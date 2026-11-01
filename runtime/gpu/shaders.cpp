@@ -20,6 +20,17 @@ std::string F(const char* fmt, ...) {
     return buf;
 }
 
+// Shader Model 3's vertex shaders end on Direct3D 9's pixel centres, half a host pixel up-left of D3D12's, and on
+// whatever a mod does to the position
+std::string Sm3Position(std::string s) {
+    const char* fix = "    o.pos.xy += hostpx.xy * o.pos.w;\n#ifdef RHI_MOD_POSITION\n    RHI_MOD_POSITION(o.pos);\n#endif\n";
+    for (const char* at : {"    o.pos = q;\n", "    o.pos = cp;\n"}) {
+        size_t p = s.find(at);
+        if (p != std::string::npos) s.insert(p + std::strlen(at), fix);
+    }
+    return s;
+}
+
 const char* kCommonHead = R"(
 struct VOut {
     float4 pos : SV_Position;
@@ -60,10 +71,77 @@ const char* kCommonTail = R"(    float4 spread[4];
 
 const ShaderHooks& Hooks() {
     static const ShaderHooks plain;
-    return g_shader_hooks ? *g_shader_hooks : plain;
+    // an extension's hooks write Shader Model 5
+    return g_shader_hooks && !g_shader_model3 ? *g_shader_hooks : plain;
 }
 
-std::string Common() { return kCommonHead + Hooks().Constants() + kCommonTail; }
+// which shader the common declarations head: Shader Model 3 lays its constants out per stage
+enum class For { Program, Fixed, Pixel };
+
+// Shader Model 3: what passes between the stages under Direct3D 9's names, the pixel shader's without the position
+const char* kSm3Head = R"(#define precise
+struct VOut {
+    float4 pos : POSITION;
+    float4 d0 : COLOR0;
+    float4 d1 : COLOR1;
+    float4 b0 : TEXCOORD6;
+    float4 b1 : TEXCOORD7;
+    float4 tc0 : TEXCOORD0;
+    float4 tc1 : TEXCOORD1;
+    float4 tc2 : TEXCOORD2;
+    float4 tc3 : TEXCOORD3;
+    float fogamt : TEXCOORD4;
+};
+struct PIn {
+    float4 d0 : COLOR0;
+    float4 d1 : COLOR1;
+    float4 b0 : TEXCOORD6;
+    float4 b1 : TEXCOORD7;
+    float4 tc0 : TEXCOORD0;
+    float4 tc1 : TEXCOORD1;
+    float4 tc2 : TEXCOORD2;
+    float4 tc3 : TEXCOORD3;
+    float fogamt : TEXCOORD4;
+};
+)";
+
+// DrawConstants member by member, in registers
+struct Sm3Constant {
+    const char* decl;
+    uint32_t regs;
+};
+constexpr Sm3Constant kSm3Draw[] = {
+    {"float4 surf", 1},       {"float4 fogp", 1},        {"float4 fogcolor", 1}, {"float4 misc", 1},
+    {"float4 pc[18]", 18},    {"float4 tfactor", 1},     {"float4 texsize[4]", 4}, {"float4 bumpmat[4]", 4},
+    {"float4 bumplum[4]", 4}, {"float4x4 wvp", 4},       {"float4 ext", 1},     {"float4 spread[4]", 4},
+    {"float4x4 wv", 4},       {"float4x4 wvn", 4},       {"float4x4 tm[4]", 16}, {"float4 mat[5]", 5},
+    {"float4 amb", 1},        {"float4 lt[56]", 56},     {"float4 rtshift", 1}, {"float4 zparams", 1},
+};
+constexpr const char* kSm3ProgramDrawLast = "float4 spread[4]";  // the last member a program reads
+
+std::string Sm3Common(For f) {
+    std::string s = kSm3Head;
+    uint32_t reg = 0;
+    if (f == For::Program) {
+        s += "float4 c[192] : register(c0);\n";
+        reg = kSm3ProgramDraw;
+    }
+    for (const Sm3Constant& k : kSm3Draw) {
+        s += F("%s : register(c%u);\n", k.decl, reg);
+        reg += k.regs;
+        if (f == For::Program && !std::strcmp(k.decl, kSm3ProgramDrawLast)) break;
+    }
+    if (f != For::Pixel) {
+        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\n", kSm3DepthClamp, kSm3HostPixel);
+        s += g_sm3_vertex_prelude + "\n";
+    }
+    return s;
+}
+
+std::string Common(For f) {
+    if (g_shader_model3) return Sm3Common(f);
+    return kCommonHead + Hooks().Constants() + kCommonTail;
+}
 
 // vertex programs
 
@@ -99,6 +177,24 @@ float fogfactor(float d) {
     return 1;
 }
 )";
+
+// Shader Model 3 takes no infinite literal, nor one folded from a constant (a program reading a register the draw
+// lacks): the largest float stands in, and nothing divides by or takes the log of a constant 0
+std::string VsHelpers() {
+    if (!g_shader_model3) return kVsHelpers;
+    std::string s = kVsHelpers;
+    auto put = [&](const std::string& from, const std::string& to) {
+        for (size_t at; (at = s.find(from)) != std::string::npos;) s.replace(at, from.size(), to);
+    };
+    put("float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }",
+        "float4 ilu_rcp(float v) { float r = 1.0 / (v == 0 ? 1 : v); return (v == 0 ? 3.402823e38 : r).xxxx; }");
+    put("magclamp(1.0 / v)", "magclamp(v == 0 ? 3.402823e38 : 1.0 / (v == 0 ? 1 : v))");
+    put("rsqrt(abs(v))", "rsqrt(v == 0 ? 1 : abs(v))");
+    put("l2 = log2(mag)", "l2 = log2(mag == 0 ? 1 : mag)");
+    put("log2(max(s.y, 0))", "log2(max(s.y, 1.175494e-38))");  // the smallest normal float: 2^-126
+    put("1.#INF", "3.402823e38");
+    return s;
+}
 
 struct Tok {
     const uint32_t* t;
@@ -179,25 +275,40 @@ std::string IluExpr(uint32_t op, const std::string& c) {
 
 std::string RegDest(uint32_t r) { return r == 12 ? "oPos" : F("R%u", r); }
 
-std::string VsInputStruct(uint16_t regs) {
+// D3DDECLUSAGE as HLSL names it
+const char* kUsageNames[] = {"POSITION", "BLENDWEIGHT", "BLENDINDICES", "NORMAL", "PSIZE", "TEXCOORD", "TANGENT",
+                             "BINORMAL", "TESSFACTOR", "POSITIONT", "COLOR", "FOG", "DEPTH", "SAMPLE"};
+
+// input register r's semantic: ATTRr, or under Shader Model 3 its Direct3D 9 name
+std::string InputSemantic(int r, const InputUsages* usages) {
+    if (!g_shader_model3) return F("ATTR%d", r);
+    InputUsage u = usages ? (*usages)[size_t(r)] : HabitUsage(r);
+    const char* name = u.usage < std::size(kUsageNames) ? kUsageNames[u.usage] : "TEXCOORD";
+    return F("%s%u", name, u.index);
+}
+
+std::string VsInputStruct(uint16_t regs, const InputUsages* usages) {
     std::string s = "struct VIn {\n";
     for (int r = 0; r < 16; r++)
-        if ((regs >> r) & 1) s += F("    float4 v%d : ATTR%d;\n", r, r);
-    if (!regs) s += "    uint id : SV_VertexID;\n";
+        if ((regs >> r) & 1) s += F("    float4 v%d : %s;\n", r, InputSemantic(r, usages).c_str());
+    if (!regs) s += g_shader_model3 ? "    float4 v0 : POSITION0;\n" : "    uint id : SV_VertexID;\n";
     return s + "};\n";
 }
 
-// the input struct and the head of main: elements read raw are finished into float4 i.vN first
-std::string VsInputs(uint16_t regs, uint64_t decode) {
-    if (!decode) return VsInputStruct(regs) + "VOut main(VIn i) {\n";
+// the input struct and the head of main: elements read raw are finished into float4 i.vN first. Shader Model 3 has
+// no integer inputs: its renderer reads shorts as floats and hands over no packed elements
+std::string VsInputs(uint16_t regs, uint64_t decode, const InputUsages* usages) {
+    if (!decode) return VsInputStruct(regs, usages) + "VOut main(VIn i) {\n";
     std::string raw = "struct VRaw {\n", in = "struct VIn {\n", body;
     bool packed = false;
     for (int r = 0; r < 16; r++) {
         if (!((regs >> r) & 1)) continue;
         uint32_t d = uint32_t(decode >> (r * 4)) & 15;
         const char* type = d == kDecodeInt || d == kDecodeIntW1 ? "int4" : d == kDecodePacked ? "uint" : "float4";
-        raw += F("    %s v%d : ATTR%d;\n", type, r, r);
+        if (g_shader_model3) type = "float4";
+        raw += F("    %s v%d : %s;\n", type, r, InputSemantic(r, usages).c_str());
         in += F("    float4 v%d;\n", r);
+        if (g_shader_model3 && d == kDecodePacked) d = kDecodeNone;
         packed |= d == kDecodePacked;
         switch (d) {
             case kDecodeW1: body += F("    i.v%d = float4(ri.v%d.xyz, 1);\n", r, r); break;
@@ -351,7 +462,7 @@ struct Ps {
         code += F("%s ab%s = clamp((%s)%s, -1, 1);\n", T, n, T, Map(ab, map).c_str());
         code += F("%s cd%s = clamp((%s)%s, -1, 1);\n", T, n, T, Map(cd, map).c_str());
         std::string sum = (fl & 4) ? F("((%s) ? (%s)%s : (%s)%s)",
-                                       ((k.count >> 8) & 1) ? "r0.a >= 0.5" : "(uint(r0.a * 255) & 1) == 1", T,
+                                       ((k.count >> 8) & 1) ? "r0.a >= 0.5" : g_shader_model3 ? "fmod(round(r0.a * 255), 2) == 1" : "(uint(r0.a * 255) & 1) == 1", T,
                                        cd.c_str(), T, ab.c_str())
                                    : "(" + ab + " + " + cd + ")";
         code += F("%s ms%s = clamp((%s)%s, -1, 1);\n", T, n, T, Map(sum, map).c_str());
@@ -379,6 +490,16 @@ std::string DotInput(uint32_t map, uint32_t src) {
     }
 }
 
+// stage i's texture sampled at coord, its size by the texture's kind
+std::string Sample(const TexInfo& t, int i, const std::string& coord) {
+    if (!g_shader_model3) return F("tex%d.Sample(smp%d, %s)", i, i, coord.c_str());
+    const char* fn = t.kind == kTexCube ? "texCUBE" : t.kind == kTex3D ? "tex3D" : "tex2D";
+    return F("%s(smp%d, %s)", fn, i, coord.c_str());
+}
+
+// spreadtap's and shadow's texture arguments: Shader Model 3 has the sampler alone
+std::string TexArgs(int i) { return g_shader_model3 ? F("smp%d", i) : F("tex%d, smp%d", i, i); }
+
 // stage i's coordinates as the title wrote them, over 0..1. The console draws half a pixel right and down of the
 // host unless a program writes positions raw: a render target is read where the console's offset puts it
 std::string TexUv(const TexInfo& t, int i, const std::string& uv) {
@@ -404,29 +525,29 @@ std::string TexFetch(const PixelKey& k, int i) {
         return F("float dp%d%s = dot(tc%d.xyz, %s);\n", n, coord == n ? "" : "n", coord, DotInput(map, src).c_str());
     };
     auto tex2d = [&](const std::string& uv) {
-        if (t.flags & kTexWide) return F("spreadtap(tex%d, smp%d, %s, spread[%d], %s)", i, i, uv.c_str(), i, Hooks().ReadScale(t).c_str());
-        return F("tex%d.Sample(smp%d, %s)", i, i, uv.c_str());
+        if (t.flags & kTexWide) return F("spreadtap(%s, %s, spread[%d], %s)", TexArgs(i).c_str(), uv.c_str(), i, Hooks().ReadScale(t).c_str());
+        return Sample(t, i, uv);
     };
     auto cube = [&](const std::string& dir) {
         std::string c = Hooks().Cube(t, i, dir);
-        return c.empty() ? F("tex%d.Sample(smp%d, %s)", i, i, dir.c_str()) : c;
+        return c.empty() ? Sample(t, i, dir) : c;
     };
     auto sample2 = [&](const std::string& uv) {
         if (t.kind == kTex2D) return tex2d(TexUv(t, i, uv));
         if (t.kind == kTexCube) return cube("float3(" + uv + ", 1)");
-        if (t.kind == kTex3D) return F("tex%d.Sample(smp%d, float3(%s, 0))", i, i, uv.c_str());
+        if (t.kind == kTex3D) return Sample(t, i, "float3(" + uv + ", 0)");
         return std::string("float4(0,0,0,1)");
     };
     auto sample3 = [&](const std::string& uvw) {
         if (t.kind == kTex2D) return tex2d(TexUv(t, i, "(" + uvw + ").xy"));
         if (t.kind == kTexCube) return cube(uvw);
-        if (t.kind == kTex3D) return F("tex%d.Sample(smp%d, %s)", i, i, uvw.c_str());
+        if (t.kind == kTex3D) return Sample(t, i, uvw);
         return std::string("float4(0,0,0,1)");
     };
     auto depth = [&](const std::string& ref) {
         std::string uv = TexUv(t, i, F("%s.xy / %s.w", q, q));
         std::string rest = F(", %s, %d, i.pos.xy, texsize[%d].xy)", ref.c_str(), t.shadow, i);
-        return put(F("shadow(tex%d, smp%d, ", i, i) + uv + rest);
+        return put("shadow(" + TexArgs(i) + ", " + uv + rest);
     };
     std::string s;
     switch (mode) {
@@ -488,7 +609,31 @@ void alphatest(float a) {
 }
 )";
 
-std::string PsHelpers() { return kPsSbyte + Hooks().Shadow() + kPsTail; }
+// Shader Model 3: one tap (its renderer reads no target shrunk), and a depth texture (INTZ) compared by hand
+const char* kSm3PsTail = R"(float4 spreadtap(sampler2D s, float2 uv, float4 w, float m) {
+    float4 v = tex2D(s, uv);
+    return float4(saturate(v.rgb * m), v.a);
+}
+// the console tests texel OP r
+float4 shadow(sampler2D s, float2 uv, float z, int fmt, float2 px, float2 size) {
+    float mx = fmt == 2 ? 65535.0 : 16777215.0;
+    float r = clamp(z, 0, mx) / mx, d = tex2D(s, uv).r;
+    int f = (int)misc.z;
+    bool ok = f == 0 ? false : f == 1 ? d < r : f == 2 ? d == r : f == 3 ? d <= r : f == 4 ? d > r : f == 5 ? d != r : f == 6 ? d >= r : true;
+    return ok ? 1 : 0;
+}
+void alphatest(float a) {
+    int f = (int)misc.y;
+    int v = (int)round(a * 255), r = (int)misc.x;
+    bool ok = f == 0 ? false : f == 1 ? v < r : f == 2 ? v == r : f == 3 ? v <= r : f == 4 ? v > r : f == 5 ? v != r : f == 6 ? v >= r : true;
+    if (!ok) discard;
+}
+)";
+
+std::string PsHelpers() {
+    if (g_shader_model3) return std::string(kPsSbyte) + kSm3PsTail;
+    return kPsSbyte + Hooks().Shadow() + kPsTail;
+}
 
 // fixed function texture stage arguments, D3DTA
 std::string FfArg(uint32_t a, int stage, bool alpha) {
@@ -689,10 +834,118 @@ bool ReadsViewportOffset(const std::vector<uint32_t>& prog) {
     return false;
 }
 
-std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode) {
-    std::string s = Common();
-    s += kVsHelpers;
-    s += VsInputs(regs, decode);
+// D3DDECLUSAGE
+constexpr uint8_t kUsagePosition = 0, kUsageBlendWeight = 1, kUsageNormal = 3, kUsagePSize = 4, kUsageTexCoord = 5,
+                  kUsageColor = 10, kUsageFog = 11;
+
+InputUsage HabitUsage(int reg) {
+    static const InputUsage habit[16] = {
+        {kUsagePosition, 0}, {kUsageBlendWeight, 0}, {kUsageNormal, 0}, {kUsageColor, 0},
+        {kUsageColor, 1},    {kUsageFog, 0},         {kUsagePSize, 0},  {kUsageColor, 2},  // v7, v8 back colours
+        {kUsageColor, 3},    {kUsageTexCoord, 0},    {kUsageTexCoord, 1}, {kUsageTexCoord, 2},
+        {kUsageTexCoord, 3}, {kUsageTexCoord, 4},    {kUsageTexCoord, 5}, {kUsageTexCoord, 6},
+    };
+    return habit[reg & 15];
+}
+
+namespace {
+
+constexpr uint32_t kMuxTemp = 1, kMuxInput = 2;
+constexpr uint32_t kMacDp3 = 5, kMacArl = 13;
+constexpr int kOutPos = 0, kOutD0 = 3, kOutT0 = 9;
+
+// the inputs an operand reads, directly or through the temporaries
+uint16_t Feeds(const Tok& k, int which, const uint16_t temp[13]) {
+    uint32_t reg = which == 0 ? k.f(2, 28, 4) : which == 1 ? k.f(2, 13, 4) : (k.f(2, 0, 2) << 2 | k.f(3, 30, 2));
+    uint32_t mux = which == 0 ? k.f(2, 26, 2) : which == 1 ? k.f(2, 11, 2) : k.f(3, 28, 2);
+    if (mux == kMuxInput) return uint16_t(1u << k.f(1, 9, 4));
+    if (mux == kMuxTemp && reg <= 12) return temp[reg];
+    return 0;
+}
+
+void FeedTemp(uint32_t r, uint32_t mask, uint16_t from, uint16_t temp[13], uint16_t out[16]) {
+    if (!mask || r > 12) return;
+    temp[r] = mask == 0xF ? from : temp[r] | from;
+    if (r == 12) out[kOutPos] |= from;  // R12 is oPos
+}
+
+int OneInput(uint16_t m) { return m && !(m & (m - 1)) ? std::countr_zero(m) : -1; }
+
+// three DP3s in a row of one input into x, y and z of one temporary: a matrix rotating the normal
+int RotatedInput(const std::vector<uint32_t>& prog) {
+    for (size_t n = 0; n + 12 <= prog.size(); n += 4) {
+        int k = 0, in = -1;
+        uint32_t r = 0;
+        for (; k < 3; k++) {
+            Tok t{&prog[n + size_t(k) * 4]};
+            if (t.f(1, 21, 4) != kMacDp3 || t.f(2, 26, 2) != kMuxInput || t.f(3, 24, 4) != (8u >> k)) break;
+            if (k == 0) in = int(t.f(1, 9, 4)), r = t.f(3, 20, 4);
+            else if (int(t.f(1, 9, 4)) != in || t.f(3, 20, 4) != r) break;
+        }
+        if (k == 3) return in;
+    }
+    return -1;
+}
+
+}  // namespace
+
+void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputUsages& out) {
+    uint16_t temp[13] = {}, feeds[16] = {}, dp3 = 0, named = 0;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
+        uint16_t m = 0, i = 0;
+        switch (mac) {
+            case 0: case kMacArl: break;
+            case 1: m = Feeds(k, 0, temp); break;
+            case 3: m = Feeds(k, 0, temp) | Feeds(k, 2, temp); break;
+            case 4: m = Feeds(k, 0, temp) | Feeds(k, 1, temp) | Feeds(k, 2, temp); break;
+            default: m = Feeds(k, 0, temp) | Feeds(k, 1, temp); break;
+        }
+        if (mac == kMacDp3) dp3 |= m;
+        if (ilu) i = Feeds(k, 2, temp);
+        // both units read the registers as they stood before the instruction
+        uint32_t r = k.f(3, 20, 4);
+        if (mac && mac != kMacArl) FeedTemp(r, ilu && r == 1 ? 0 : k.f(3, 24, 4), m, temp, feeds);
+        if (ilu) FeedTemp(mac ? 1 : r, k.f(3, 16, 4), i, temp, feeds);
+        bool use_ilu = k.f(3, 2, 1) == 1;
+        if (k.f(3, 12, 4) && k.f(3, 11, 1)) feeds[k.f(3, 3, 8) & 0xF] |= use_ilu ? i : m;
+        if (k.f(3, 0, 1)) break;
+    }
+
+    for (int r = 0; r < 16; r++) out[size_t(r)] = HabitUsage(r);
+    auto name = [&](int reg, uint8_t usage, uint8_t index) {
+        if (reg < 0 || (named >> reg) & 1) return false;
+        for (int r = 0; r < 16; r++)
+            if ((named >> r) & 1 && out[size_t(r)].usage == usage && out[size_t(r)].index == index) return false;
+        out[size_t(reg)] = {usage, index};
+        named |= uint16_t(1u << reg);
+        return true;
+    };
+    if (uint16_t pos = feeds[kOutPos] & regs) name(pos & 1 ? 0 : std::countr_zero(pos), kUsagePosition, 0);
+    if (int rot = RotatedInput(prog); rot >= 0 && (regs >> rot) & 1) name(rot, kUsageNormal, 0);
+    for (int c = 0; c < 2; c++) {  // what alone reaches a colour; a lit program's normal goes through a DP3 too
+        uint16_t m = feeds[kOutD0 + c] & regs & ~named;
+        if (OneInput(m) < 0) m &= uint16_t(~dp3);
+        name(OneInput(m), kUsageColor, uint8_t(c));
+    }
+    for (int t = 0; t < 4; t++) name(OneInput(feeds[kOutT0 + t] & regs & ~named), kUsageTexCoord, uint8_t(t));
+    if (uint16_t d = dp3 & regs & ~named) name(std::countr_zero(d), kUsageNormal, 0);
+    // the rest keep the habit's name unless it has gone
+    uint8_t spare = 8;
+    for (int r = 0; r < 16; r++) {
+        if (!((regs >> r) & 1) || (named >> r) & 1) continue;
+        InputUsage h = HabitUsage(r);
+        if (!name(r, h.usage, h.index))
+            while (spare < 16 && !name(r, kUsageTexCoord, spare++)) {}
+    }
+}
+
+std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode,
+                              const InputUsages* usages) {
+    std::string s = Common(For::Program);
+    s += VsHelpers();
+    s += VsInputs(regs, decode, usages);
     s += kVsPrologue;
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
         Tok k{&prog[n]};
@@ -728,7 +981,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         if (k.f(3, 0, 1)) break;  // last instruction
     }
     s += kVsEpilogue;
-    return s;
+    return g_shader_model3 ? Sm3Position(std::move(s)) : s;
 }
 
 FixedKey MakeFixedKey(const State& s) {
@@ -759,10 +1012,11 @@ FixedKey MakeFixedKey(const State& s) {
 }
 
 // D3D's fixed function vertex pipeline: transform, lighting in view space, texture coordinate generation and transforms
-std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode, const FixedKey& f) {
-    std::string s = Common();
-    s += kVsHelpers;
-    s += VsInputs(regs, decode);
+std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode, const FixedKey& f,
+                            const InputUsages* usages) {
+    std::string s = Common(For::Fixed);
+    s += VsHelpers();
+    s += VsInputs(regs, decode, usages);
     s += kVsPrologue;
     auto v = [&](int r, const char* def) { return (regs >> r) & 1 ? F("i.v%d", r) : std::string(def); };
     bool lit = !pretransformed && (f.light & 1);
@@ -840,7 +1094,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    }\n";
     }
     s += "    oFog = " + v(5, "float4(0,0,0,0)") + ";\n";
-    if (pretransformed) return s + kVsEpilogue;
+    if (pretransformed) return g_shader_model3 ? Sm3Position(s + kVsEpilogue) : s + kVsEpilogue;
     s += R"(
     VOut o;
     // like the pretransformed ones, target sized passes end half a console pixel short of the far edges
@@ -860,18 +1114,30 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     return o;
 }
 )";
-    return s;
+    return g_shader_model3 ? Sm3Position(std::move(s)) : s;
 }
 
 std::string PixelHlsl(const PixelKey& k) {
-    std::string s = Common();
+    std::string s = Common(For::Pixel);
     s += PsHelpers();
     for (int i = 0; i < 4; i++) {
         const TexInfo& t = k.tex[i];
+        if (g_shader_model3) {
+            s += F("%s smp%d : register(s%d);\n", t.kind == kTex3D ? "sampler3D" : t.kind == kTexCube ? "samplerCUBE" : "sampler2D", i, i);
+            continue;
+        }
         const char* type = t.shadow ? "Texture2D<float>" : t.kind == kTex3D ? "Texture3D" : t.kind == kTexCube ? "TextureCube" : "Texture2D";
         s += F("%s tex%d : register(t%d);\n%s smp%d : register(s%d);\n", type, i, i, t.shadow ? "SamplerComparisonState" : "SamplerState", i, i);
     }
-    s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
+    if (g_shader_model3) {
+        // the shared body reads the position and the face as Shader Model 5 hands them over
+        s += "float4 main(PIn pi, float2 vpos : VPOS, float vface : VFACE) : COLOR0 {\n";
+        s += "    VOut i;\n    i.pos = float4(vpos, 0, 1);\n    i.d0 = pi.d0;\n    i.d1 = pi.d1;\n    i.b0 = pi.b0;\n    i.b1 = pi.b1;\n";
+        s += "    i.tc0 = pi.tc0;\n    i.tc1 = pi.tc1;\n    i.tc2 = pi.tc2;\n    i.tc3 = pi.tc3;\n    i.fogamt = pi.fogamt;\n";
+        s += "    bool front = vface > 0;\n";
+    } else {
+        s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
+    }
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
     s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
@@ -925,13 +1191,13 @@ std::string PixelHlsl(const PixelKey& k) {
             std::string uv = TexUv(t, i, (k.proj >> i) & 1 ? F("tc%d.xy / tc%d.w", i, i) : F("tc%d.xy", i));
             std::string cube;
             if (t.shadow)
-                body += F("float4 t%d = shadow(tex%d, smp%d, ", i, i, i) + TexUv(t, i, F("tc%d.xy / tc%d.w", i, i)) +
+                body += F("float4 t%d = shadow(%s, ", i, TexArgs(i).c_str()) + TexUv(t, i, F("tc%d.xy / tc%d.w", i, i)) +
                         F(", tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i, t.shadow, i);
             else if (t.kind == kTex2D && (t.flags & kTexWide))
-                body += F("float4 t%d = spreadtap(tex%d, smp%d, %s, spread[%d], %s);\n", i, i, i, uv.c_str(), i, Hooks().ReadScale(t).c_str());
-            else if (t.kind == kTex2D) body += F("float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, uv.c_str());
+                body += F("float4 t%d = spreadtap(%s, %s, spread[%d], %s);\n", i, TexArgs(i).c_str(), uv.c_str(), i, Hooks().ReadScale(t).c_str());
+            else if (t.kind == kTex2D) body += F("float4 t%d = %s;\n", i, Sample(t, i, uv).c_str());
             else if (t.kind == kTexCube && !(cube = Hooks().Cube(t, i, F("tc%d.xyz", i))).empty()) body += F("float4 t%d = %s;\n", i, cube.c_str());
-            else if (t.kind) body += F("float4 t%d = tex%d.Sample(smp%d, tc%d.xyz);\n", i, i, i, i);
+            else if (t.kind) body += F("float4 t%d = %s;\n", i, Sample(t, i, F("tc%d.xyz", i)).c_str());
             else body += F("float4 t%d = float4(1,1,1,1);\n", i);
             body += Hooks().Fetched(t, i);
             if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
@@ -997,7 +1263,7 @@ std::string ReversedDepthHlsl(std::string s) {
 
 // a point covers its console pixel, several host pixels on an upscaled target: drawn as a quad of that size
 std::string PointHlsl() {
-    return Common() + R"(
+    return Common(For::Pixel) + R"(
 [maxvertexcount(4)]
 void main(point VOut v[1], inout TriangleStream<VOut> strip) {
     float2 half_pixel = v[0].pos.w / surf.xy;  // in clip units, the target spans 2 across surf.xy pixels

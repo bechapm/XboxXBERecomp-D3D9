@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,9 +42,37 @@ uint64_t Hash(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 PixelKey MakePixelKey(const State& s, const TexInfo tex[4]);
 
+// Shader Model 3, for the Direct3D 9 renderer: constants in registers, Direct3D 9's names for what passes between
+// the stages, inputs named by what they hold. The layouts are the kSm3 registers below.
+inline bool g_shader_model3 = false;
+// vertex shader constant registers under Shader Model 3: a program's own c0 to c191, then the DrawConstants it reads
+// from kSm3ProgramDraw (surf to spread); a fixed function shader's DrawConstants from c0. kSm3ModFirst on are a mod's
+// (d3d9_vertex_hlsl), then rhi_depth_clamp and the host pixel offset. Pixel shaders take DrawConstants from c0.
+constexpr uint32_t kSm3ProgramDraw = 192;
+constexpr uint32_t kSm3ModFirst = 248;
+constexpr uint32_t kSm3DepthClamp = 254;  // rhi_depth_clamp, as a mod knows it; its w is always 0
+constexpr uint32_t kSm3HostPixel = 255;   // host pixels per clip unit: -1 / width, 1 / height of the bound target
+// HLSL a mod puts in every Shader Model 3 vertex shader, after the constants; it may define RHI_MOD_POSITION(p)
+inline std::string g_sm3_vertex_prelude;
+
+// a vertex input's Direct3D 9 name: D3DDECLUSAGE and usage index
+struct InputUsage {
+    uint8_t usage = 0;
+    uint8_t index = 0;
+};
+using InputUsages = std::array<InputUsage, 16>;
+// the XDK's register habit: v0 position, v2 normal, v3 and v4 colours, v9 to v12 texture coordinates
+InputUsage HabitUsage(int reg);
+// what each input of a program holds, from the output it reaches: a title lays out its own inputs (TS2's levels keep
+// position in v1, colour in v2, texture coordinates in v3), and anything reading the declaration (RTX Remix) goes by
+// the names. Each name is used once; an input that tells nothing keeps the habit's, or a spare TEXCOORD
+void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, InputUsages& out);
+
 // vertex program microcode to HLSL, regs is the bit mask of v registers the draw supplies
 // decode: VertexDecode per register, 4 bits each, for elements the input assembler hands over raw
-std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0);
+// usages: Shader Model 3's input names, the habit's without them
+std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0,
+                              const InputUsages* usages = nullptr);
 // the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
 bool ReadsViewportOffset(const std::vector<uint32_t>& program);
 // fixed function vertex state a shader is built for
@@ -54,7 +83,8 @@ struct FixedKey {
     uint32_t tex[4] = {};  // per stage: coordinate set, texgen at bit 4, D3DTTFF count at bit 8, projected bit 11, set size at bit 12
 };
 FixedKey MakeFixedKey(const State& s);
-std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode = 0, const FixedKey& f = {});
+std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode = 0, const FixedKey& f = {},
+                            const InputUsages* usages = nullptr);
 std::string PixelHlsl(const PixelKey& k);
 // a screen quad's vertex or pixel shader: texture coordinates as the quad was drawn, before its far edges were pulled out
 std::string QuadHlsl(std::string s);
