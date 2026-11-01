@@ -133,5 +133,6 @@ private:
 }  // namespace
 
 std::unique_ptr<Backend> CreateBackend() { return std::make_unique<NullBackend>(); }
+std::unique_ptr<Backend> CreateD3D9Backend() { return std::make_unique<NullBackend>(); }
 
 }  // namespace gpu

@@ -1130,11 +1130,13 @@ std::string PixelHlsl(const PixelKey& k) {
         s += F("%s tex%d : register(t%d);\n%s smp%d : register(s%d);\n", type, i, i, t.shadow ? "SamplerComparisonState" : "SamplerState", i, i);
     }
     if (g_shader_model3) {
-        // the shared body reads the position and the face as Shader Model 5 hands them over
+        // the shared body reads the position and the face as Shader Model 5 hands them over: VPOS is the pixel's
+        // corner, SV_Position its centre
         s += "float4 main(PIn pi, float2 vpos : VPOS, float vface : VFACE) : COLOR0 {\n";
-        s += "    VOut i;\n    i.pos = float4(vpos, 0, 1);\n    i.d0 = pi.d0;\n    i.d1 = pi.d1;\n    i.b0 = pi.b0;\n    i.b1 = pi.b1;\n";
+        s += "    VOut i;\n    i.pos = float4(vpos + 0.5, 0, 1);\n    i.d0 = pi.d0;\n    i.d1 = pi.d1;\n    i.b0 = pi.b0;\n    i.b1 = pi.b1;\n";
         s += "    i.tc0 = pi.tc0;\n    i.tc1 = pi.tc1;\n    i.tc2 = pi.tc2;\n    i.tc3 = pi.tc3;\n    i.fogamt = pi.fogamt;\n";
-        s += "    bool front = vface > 0;\n";
+        // the face is positive on clockwise triangles; two_sided 2 has counter clockwise as the front
+        s += k.two_sided == 2 ? "    bool front = vface < 0;\n" : "    bool front = vface > 0;\n";
     } else {
         s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
     }

@@ -278,13 +278,16 @@ void SetFrameBuffers(const char* caller, uint32_t pp) {
         g_depth = zf ? NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4) : 0;  // 0x30 LIN_D16, 0x31 LIN_F16
     }
     if (!g_backend) {
-        g_backend = gpu::CreateBackend();
+        bool d3d9 = app::Get().renderer == "d3d9";
+        g_backend = d3d9 ? gpu::CreateD3D9Backend() : gpu::CreateBackend();
         if (!g_backend->Init(w, h)) {
             LOGE("d3d: renderer init failed");
             // no owner window: this runs on the title's thread and the window may already be fullscreen over the box
             MessageBoxW(nullptr,
-                        L"Direct3D 12 could not be started. Make sure your graphics card supports it and its driver "
-                        L"is up to date.",
+                        d3d9 ? L"Direct3D 9 could not be started. Make sure the graphics driver is up to date, or set "
+                               L"renderer = \"d3d12\" in the settings file."
+                             : L"Direct3D 12 could not be started. Make sure your graphics card supports it and its "
+                               L"driver is up to date.",
                         app::kGame.short_title, MB_ICONERROR | MB_TOPMOST);
             kernel::Shutdown(1);
         }
