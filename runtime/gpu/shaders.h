@@ -73,8 +73,13 @@ void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, Inp
 // usages: Shader Model 3's input names, the habit's without them
 std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0,
                               const InputUsages* usages = nullptr);
+// the program reads constant register reg (hardware order: c-96 is 0) by its number, not through a0
+bool ReadsConstant(const std::vector<uint32_t>& program, uint32_t reg);
 // the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
 bool ReadsViewportOffset(const std::vector<uint32_t>& program);
+// the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
+// names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
+inline int g_projection_register = -1;
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:

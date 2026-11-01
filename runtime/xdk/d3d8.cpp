@@ -23,6 +23,7 @@
 #include "gpu/simple_dirty.h"
 #include "gpu/texture.h"
 #include "gpu/vertex.h"
+#include "mods/mods.h"
 #include "xdk/d3d8.h"
 #include "xdk/hle.h"
 #include "xdk/layout.h"
@@ -278,6 +279,7 @@ void SetFrameBuffers(const char* caller, uint32_t pp) {
         g_depth = zf ? NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4) : 0;  // 0x30 LIN_D16, 0x31 LIN_F16
     }
     if (!g_backend) {
+        mods::Load();
         bool d3d9 = app::Get().renderer == "d3d9";
         g_backend = d3d9 ? gpu::CreateD3D9Backend() : gpu::CreateBackend();
         if (!g_backend->Init(w, h)) {
@@ -291,7 +293,9 @@ void SetFrameBuffers(const char* caller, uint32_t pp) {
                         app::kGame.short_title, MB_ICONERROR | MB_TOPMOST);
             kernel::Shutdown(1);
         }
-        if (kRenderThread) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+        // a mod reading guest memory at the draws needs them made while the game is at them
+        if (kRenderThread && !(d3d9 && mods::HooksDraws())) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+        else if (kRenderThread) LOGI("d3d: a mod hooks draws, the renderer runs on the game's thread");
     }
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
     SetDev(kDevRenderTarget, g_buffers[1]);
@@ -628,6 +632,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    mods::Frame();
     app::Pace();
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);

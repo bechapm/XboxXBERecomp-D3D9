@@ -91,6 +91,9 @@ struct VOut {
     float4 tc2 : TEXCOORD2;
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
+#if defined(RHI_MOD_NORMAL) && defined(XBE_VS_NORMAL)
+    float3 normal : NORMAL;
+#endif
 };
 struct PIn {
     float4 d0 : COLOR0;
@@ -120,7 +123,13 @@ constexpr Sm3Constant kSm3Draw[] = {
 constexpr const char* kSm3ProgramDrawLast = "float4 spread[4]";  // the last member a program reads
 
 std::string Sm3Common(For f) {
-    std::string s = kSm3Head;
+    // a mod's HLSL first: VOut has a NORMAL when it defines RHI_MOD_NORMAL
+    std::string s;
+    if (f != For::Pixel) {
+        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\n", kSm3DepthClamp, kSm3HostPixel);
+        s += g_sm3_vertex_prelude + "\n";
+    }
+    s += kSm3Head;
     uint32_t reg = 0;
     if (f == For::Program) {
         s += "float4 c[192] : register(c0);\n";
@@ -130,10 +139,6 @@ std::string Sm3Common(For f) {
         s += F("%s : register(c%u);\n", k.decl, reg);
         reg += k.regs;
         if (f == For::Program && !std::strcmp(k.decl, kSm3ProgramDrawLast)) break;
-    }
-    if (f != For::Pixel) {
-        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\n", kSm3DepthClamp, kSm3HostPixel);
-        s += g_sm3_vertex_prelude + "\n";
     }
     return s;
 }
@@ -823,16 +828,18 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
 constexpr uint32_t kMuxConstant = 3;
 constexpr uint32_t kViewportOffsetConstant = 59;  // c-37: constants start at c-96
 
-bool ReadsViewportOffset(const std::vector<uint32_t>& prog) {
+bool ReadsConstant(const std::vector<uint32_t>& prog, uint32_t reg) {
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
         Tok k{&prog[n]};
         // an instruction reads at most one constant, through any of its operands
         bool constant = k.f(2, 26, 2) == kMuxConstant || k.f(2, 11, 2) == kMuxConstant || k.f(3, 28, 2) == kMuxConstant;
         bool relative = k.f(3, 1, 1);
-        if (constant && !relative && k.f(1, 13, 8) == kViewportOffsetConstant) return true;
+        if (constant && !relative && k.f(1, 13, 8) == reg) return true;
     }
     return false;
 }
+
+bool ReadsViewportOffset(const std::vector<uint32_t>& prog) { return ReadsConstant(prog, kViewportOffsetConstant); }
 
 // D3DDECLUSAGE
 constexpr uint8_t kUsagePosition = 0, kUsageBlendWeight = 1, kUsageNormal = 3, kUsagePSize = 4, kUsageTexCoord = 5,
@@ -871,8 +878,9 @@ void FeedTemp(uint32_t r, uint32_t mask, uint16_t from, uint16_t temp[13], uint1
 
 int OneInput(uint16_t m) { return m && !(m & (m - 1)) ? std::countr_zero(m) : -1; }
 
-// three DP3s in a row of one input into x, y and z of one temporary: a matrix rotating the normal
-int RotatedInput(const std::vector<uint32_t>& prog) {
+// three DP3s in a row of one input into x, y and z of one temporary: a matrix rotating the normal; temp gets the
+// temporary, last the instruction of the third
+int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, size_t* last = nullptr) {
     for (size_t n = 0; n + 12 <= prog.size(); n += 4) {
         int k = 0, in = -1;
         uint32_t r = 0;
@@ -882,7 +890,11 @@ int RotatedInput(const std::vector<uint32_t>& prog) {
             if (k == 0) in = int(t.f(1, 9, 4)), r = t.f(3, 20, 4);
             else if (int(t.f(1, 9, 4)) != in || t.f(3, 20, 4) != r) break;
         }
-        if (k == 3) return in;
+        if (k == 3) {
+            if (temp) *temp = r;
+            if (last) *last = n + 8;
+            return in;
+        }
     }
     return -1;
 }
@@ -943,10 +955,18 @@ void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputU
 
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode,
                               const InputUsages* usages) {
-    std::string s = Common(For::Program);
+    // Shader Model 3: the normal as the program rotated it goes out as NORMAL for a mod that defines RHI_MOD_NORMAL,
+    // so a tool reading vertex outputs (RTX Remix) gets it after the program's skinning; only from a program that
+    // rotates one, a tool would take any other program's zero for its normal
+    uint32_t ntemp = 0;
+    size_t nlast = 0;
+    bool normal = g_shader_model3 && RotatedInput(prog, &ntemp, &nlast) >= 0;
+    std::string s = normal ? "#define XBE_VS_NORMAL\n" : "";
+    s += Common(For::Program);
     s += VsHelpers();
     s += VsInputs(regs, decode, usages);
     s += kVsPrologue;
+    if (normal) s += "#ifdef RHI_MOD_NORMAL\n    float3 xnormal = 0;\n#endif\n";
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
         Tok k{&prog[n]};
         uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
@@ -978,9 +998,14 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
             }
             s += "    }\n";
         }
+        if (normal && n == nlast) s += F("#ifdef RHI_MOD_NORMAL\n    xnormal = R%u.xyz;\n#endif\n", ntemp);
         if (k.f(3, 0, 1)) break;  // last instruction
     }
     s += kVsEpilogue;
+    if (normal) {
+        size_t at = s.rfind("    return o;\n");
+        s.insert(at, "#ifdef RHI_MOD_NORMAL\n    o.normal = xnormal;\n    RHI_MOD_NORMAL(o.normal);\n#endif\n");
+    }
     return g_shader_model3 ? Sm3Position(std::move(s)) : s;
 }
 
