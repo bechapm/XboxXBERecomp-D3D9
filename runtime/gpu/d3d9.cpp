@@ -36,6 +36,7 @@
 #include "core/log.h"
 #include "core/testdrive.h"
 #include "gpu/backend.h"
+#include "gpu/picture.h"
 #include "gpu/shaders.h"
 #include "gpu/texture.h"
 #include "gpu/texturedumper.h"
@@ -741,7 +742,7 @@ private:
     void SetFixedFunction(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
                           GuestExtent size);
     void SetShaderConstants(const State& s, const DrawShaders& sh, const DrawTextures& stages, GuestExtent size);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const Placed& pl);
     bool DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride, Geometry& g);
     // WORLD, VIEW and PROJECTION: the title's, or a mod's
     void HalfPixel(float* m) const;
@@ -755,6 +756,7 @@ private:
     void ModsAfter();
     uint32_t RingVertices(const void* src, uint32_t bytes, void** write = nullptr);
     float TargetScale() const;
+    bool ScreenSized(uint32_t gw, uint32_t gh) const { return gw == guest_w_ && gh == guest_h_; }
     float RenderTargetShift(const State& s, const DrawShaders& sh) const;
     // visibility tests
     IDirect3DQuery9* BeginCountedDraw(const State& s);
@@ -857,6 +859,10 @@ private:
     uint32_t bb_w_ = 0;
     uint32_t bb_h_ = 0;
     float scale_ = 1.0f;
+    // the screen's targets' host width over their render scale width: the picture's shape over the console's, 1 but for
+    // a game that widens its own view (gpu/picture.h)
+    float wide_ = 1.0f;
+    Placed place_;  // the draw in hand's
     uint64_t presents_ = 0;
     // where the draws went, reported twice early on: a black picture says which step refused them
     struct DrawCounts {
@@ -1053,14 +1059,16 @@ bool D3D9Backend::Init(uint32_t width, uint32_t height) {
     guest_w_ = width;
     guest_h_ = height;
     scale_ = app::RenderScale(guest_h_);
-    bb_w_ = std::max(1u, uint32_t(std::lround(width * scale_)));
+    wide_ = PictureWide(width, height);
+    bb_w_ = std::max(1u, uint32_t(std::lround(width * scale_ * wide_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(height * scale_)));
     if (!CreateDevice(static_cast<HWND>(app::Window()))) return false;
     if (!CreateDeviceObjects()) return false;
     ImGui_ImplDX9_Init(dev_.Get());
     texturedumper::Update();
     Scene(true);
-    LOGI("d3d9: %ux%u guest, %ux%u back buffer, render scale %.3f", width, height, bb_w_, bb_h_, scale_);
+    LOGI("d3d9: %ux%u guest, %ux%u back buffer, render scale %.3f, picture %.3f wide", width, height, bb_w_, bb_h_,
+         scale_, app::PictureAspect());
     mods::SetRenderer(this);
     for (const mods::DeviceHook& h : mods::D3d9().device) h.fn(dev_.Get(), h.user);
     return true;
@@ -1166,7 +1174,8 @@ void D3D9Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator i
 
 // the host surface of a new target at render scale, cleared
 bool D3D9Backend::CreateTargetResource(Target& t) {
-    t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_)));
+    // the screen's size: at the picture's shape, which is the back buffer's
+    t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_ * (ScreenSized(t.gw, t.gh) ? wide_ : 1.0f))));
     t.h = std::max(1u, uint32_t(std::lround(t.gh * scale_)));
     if (!t.depth) {
         if (FAILED(dev_->CreateTexture(t.w, t.h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &t.tex,
@@ -1414,9 +1423,9 @@ void D3D9Backend::ClearChannels(Target& t, D3DCOLOR color, uint8_t mask, const s
 
 // a guest rect scaled to the target and clamped to it
 D3DRECT ScaledRect(const Target& t, int x0, int y0, int x1, int y1) {
-    float sc = float(t.w) / t.gw;
-    return {std::clamp<LONG>(LONG(x0 * sc), 0, t.w), std::clamp<LONG>(LONG(y0 * sc), 0, t.h),
-            std::clamp<LONG>(LONG(x1 * sc), 0, t.w), std::clamp<LONG>(LONG(y1 * sc), 0, t.h)};
+    float sx = float(t.w) / t.gw, sy = float(t.h) / t.gh;
+    return {std::clamp<LONG>(LONG(x0 * sx), 0, t.w), std::clamp<LONG>(LONG(y0 * sy), 0, t.h),
+            std::clamp<LONG>(LONG(x1 * sx), 0, t.w), std::clamp<LONG>(LONG(y1 * sy), 0, t.h)};
 }
 
 void D3D9Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
@@ -1514,7 +1523,7 @@ IDirect3DBaseTexture9* D3D9Backend::BindTargetTexture(const State& s, int stage,
     }
     // a pass shrinking it averages each tap over a console texel, else upscaled taps skip texels and ghost
     Target* rt = FindTarget(s.rt, false);
-    float k = float(t.w) / t.gw;
+    float k = float(t.h) / t.gh;
     if (k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) {
         stages.wide[stage] = k;
         info.flags |= kTexWide;
@@ -1993,8 +2002,8 @@ IDirect3DPixelShader9* D3D9Backend::EnsurePixelShader(const PixelKey& pk, uint64
 
 float D3D9Backend::TargetScale() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
-    if (!t || !t->gw) return 1;
-    return float(t->w) / float(t->gw);
+    if (!t || !t->gh) return 1;
+    return float(t->h) / float(t->gh);  // down: across, a target at the picture's shape has more
 }
 
 // the XDK's screen space offset puts the console's positions half a pixel right and down of the host's, unless a
@@ -2292,26 +2301,31 @@ void D3D9Backend::SetShaderConstants(const State& s, const DrawShaders& sh, cons
     float hh = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
     const float tail[8] = {0, 0, 0, 0, -1.0f / hw, 1.0f / hh, 0, 0};
     dev_->SetVertexShaderConstantF(kSm3DepthClamp, tail, 2);
+    float place[4];
+    PlaceConstant(place_, place);
+    dev_->SetVertexShaderConstantF(kSm3Place, place, 1);
     dev_->SetPixelShaderConstantF(0, c.surf, kDrawRegs);
 }
 
-// the host viewport covers the target, the guest one is in the transform; the scissor clips to it
-void D3D9Backend::SetViewportScissor(const State& s, uint32_t gw) {
+// the host viewport covers the target, the guest one is in the transform; the scissor clips to it, placed with the draw
+void D3D9Backend::SetViewportScissor(const State& s, uint32_t gw, const Placed& pl) {
     uint32_t W = bound_rt_ ? bound_rt_->w : bound_ds_->w;
     uint32_t H = bound_rt_ ? bound_rt_->h : bound_ds_->h;
+    uint32_t gh = bound_rt_ ? bound_rt_->gh : bound_ds_->gh;
     D3DVIEWPORT9 vp{0, 0, W, H, 0, 1};
     dev_->SetViewport(&vp);
-    float sc = float(W) / gw;
-    LONG x0 = LONG(s.viewport.x * sc);
-    LONG y0 = LONG(s.viewport.y * sc);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sc);
-    LONG y1 = LONG((s.viewport.y + s.viewport.h) * sc);
+    float sy = float(H) / std::max(gh, 1u);
+    float gx0 = float(s.viewport.x), gx1 = float(s.viewport.x + s.viewport.w);
+    LONG y0 = LONG(s.viewport.y * sy);
+    LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sc));
-        y0 = std::max(y0, LONG(s.scissors[1] * sc));
-        x1 = std::min(x1, LONG(s.scissors[2] * sc));
-        y1 = std::min(y1, LONG(s.scissors[3] * sc));
+        gx0 = std::max(gx0, float(s.scissors[0]));
+        y0 = std::max(y0, LONG(s.scissors[1] * sy));
+        gx1 = std::min(gx1, float(s.scissors[2]));
+        y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
+    long x0, x1;
+    pl.Scissor(gx0, gx1, gw, W, x0, x1);
     RECT r{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)), std::clamp<LONG>(x1, 0, LONG(W)),
            std::clamp<LONG>(y1, 0, LONG(H))};
     dev_->SetScissorRect(&r);
@@ -2620,6 +2634,12 @@ void D3D9Backend::SetTitleTransforms(const State& s, const Assembled& a, GuestEx
         FoldProjection(s, size, want[2], proj);
         SetDeviceTransform(0, want[0]);
         SetDeviceTransform(1, want[1]);
+    }
+    // the draw's place on a picture wider than the console's, as the shaders put it (gpu/picture.h)
+    if (place_.On()) {
+        float placed[16];
+        PlaceMatrix(place_, proj, placed);
+        std::memcpy(proj, placed, sizeof(proj));
     }
     SetDeviceTransform(2, proj);
 }
@@ -3197,7 +3217,13 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     sh.prog = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     sh.fixed_transform = !sh.prog && !a.pretransformed;
     sh.sprite = a.topology == Topology::Points && sh.prog && s.rs[kRsPointSpriteEnable];
-    sh.ffp = !sh.prog && FixedFunctionDraws(s, a, stages);
+    // its place on a picture wider than the console's: the screen's targets are that shape, wide_ across
+    {
+        const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+        place_ = t && ScreenSized(t->gw, t->gh) ? Place(s, a, sh.prog, t->gw, t->gh, wide_) : Placed{};
+    }
+    // FILL's edges move vertices apart, which only the shaders do
+    sh.ffp = !sh.prog && !place_.bleed && FixedFunctionDraws(s, a, stages);
     if (!sh.prog) sh.fk = MakeFixedKey(s);
     if (sh.prog) {
         if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
@@ -3244,7 +3270,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     dev_->SetVertexDeclaration(decl);
     SetSamplers(s, a, stages);
     SetOutputState(s, a, sh.ffp);
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, place_);
 
     Geometry g;
     if (!DrawGeometry(a, el, conv_stride, g)) {
@@ -3310,8 +3336,8 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
     if (!dst_t || src_t == dst_t) return;
     NoteAfterMark("copy", src_t->data, dst_t->data);
     Scene(false);
-    float ss = float(src_t->w) / src_t->gw;
-    float ds = float(dst_t->w) / dst_t->gw;
+    float ssx = float(src_t->w) / src_t->gw, ssy = float(src_t->h) / src_t->gh;
+    float dsx = float(dst_t->w) / dst_t->gw, dsy = float(dst_t->h) / dst_t->gh;
     bool listed = count && src_rects;
     uint32_t n = listed ? count : 1;
     for (uint32_t i = 0; i < n; i++) {
@@ -3334,8 +3360,8 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
         x1 = std::min(x1, int32_t(std::min<int64_t>(src_t->gw, x0 + int64_t(dst_t->gw) - dx)));
         y1 = std::min(y1, int32_t(std::min<int64_t>(src_t->gh, y0 + int64_t(dst_t->gh) - dy)));
         if (x0 < 0 || y0 < 0 || dx < 0 || dy < 0 || x1 <= x0 || y1 <= y0) continue;
-        RECT sr{LONG(x0 * ss), LONG(y0 * ss), LONG(x1 * ss), LONG(y1 * ss)};
-        RECT dr{LONG(dx * ds), LONG(dy * ds), LONG((dx + x1 - x0) * ds), LONG((dy + y1 - y0) * ds)};
+        RECT sr{LONG(x0 * ssx), LONG(y0 * ssy), LONG(x1 * ssx), LONG(y1 * ssy)};
+        RECT dr{LONG(dx * dsx), LONG(dy * dsy), LONG((dx + x1 - x0) * dsx), LONG((dy + y1 - y0) * dsy)};
         sr.right = std::min<LONG>(sr.right, src_t->w);
         sr.bottom = std::min<LONG>(sr.bottom, src_t->h);
         dr.right = std::min<LONG>(dr.right, dst_t->w);
@@ -3357,13 +3383,13 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
     dst_t->drawn = true;
 }
 
-// the frame letterboxed in the window, 16:9 when the console reports a widescreen display, else 4:3
+// the frame letterboxed in the window at the picture's shape (app::PictureAspect)
 RECT D3D9Backend::FrameRect() const {
     RECT rc;
     GetClientRect(hwnd_, &rc);
     float w = float(std::max<LONG>(rc.right - rc.left, 1));
     float h = float(std::max<LONG>(rc.bottom - rc.top, 1));
-    float aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = app::PictureAspect();
     float vw = std::min(w, h * aspect);
     float vh = vw / aspect;
     LONG x = LONG((w - vw) / 2);
@@ -3429,20 +3455,22 @@ void D3D9Backend::CountFps() {
     }
 }
 
-// a new render scale or vsync makes every target and the back buffer again
+// a new render scale, picture shape or vsync makes every target and the back buffer again
 void D3D9Backend::ApplySettings() {
     if (texturedumper::Update()) pack_textures_.clear(), Invalidate();
     float want = app::RenderScale(guest_h_);
-    bool rescale = std::fabs(want - scale_) > 1e-4f;
+    float wide = PictureWide(guest_w_, guest_h_);
+    bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
     if (!rescale && app::Get().vsync == vsync_) return;
     vsync_ = app::Get().vsync;
     scale_ = want;
+    wide_ = wide;
     Scene(false);
     Bind(nullptr, nullptr);
     targets_.clear();  // a plain device's reset frees them either way
     dummies_.clear();
     prime_.Reset();
-    bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_)));
+    bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_ * wide_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(guest_h_ * scale_)));
     D3DPRESENT_PARAMETERS pp;
     FillPresentParams(pp);
@@ -3459,7 +3487,8 @@ void D3D9Backend::ApplySettings() {
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    LOGI("d3d9: render scale %.3f, %ux%u back buffer, vsync %s", scale_, bb_w_, bb_h_, vsync_ ? "on" : "off");
+    LOGI("d3d9: render scale %.3f, %ux%u back buffer, picture %.3f wide, vsync %s", scale_, bb_w_, bb_h_,
+         app::PictureAspect(), vsync_ ? "on" : "off");
 }
 
 void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
@@ -3569,6 +3598,7 @@ void D3D9Backend::Present(const Surface& front) {
     bound_rt_surf_ = nullptr;
     presents_++;
     testdrive::Presented();
+    PlacementFrame();
     if (report) {
         const DrawCounts& c = counts_;
         LOGR("d3d9: %llu frames, %u draws made (%u fixed function); refused: %u assembly, %u targets, %u declarations, "

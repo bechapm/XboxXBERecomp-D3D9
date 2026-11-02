@@ -613,6 +613,7 @@ HLE_STDCALL(D3DDevice_GetDepthStencilSurface2, 0) {
 
 namespace {
 std::atomic<uint32_t> g_presents{0};
+uint32_t g_frame_pass_count = 0;  // passes over the frame this frame (FramePassSkipped)
 }  // namespace
 
 HLE_STDCALL(D3DDevice_Swap, 1) {
@@ -628,6 +629,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_presents++;
+    g_frame_pass_count = 0;
     // the kept display is shown until the title presents its own
     kernel::SetSavedDataAddress(0);
     // the ramp an inlined SetGammaRamp left for the vertical blank that shows this swap
@@ -1195,10 +1197,25 @@ HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
 
 // drawing
 
+namespace {
+
+// a pass over the frame past d3d::g_frame_passes: its stage 0 texture is one of the swap chain's buffers
+bool FramePassSkipped() {
+    int limit = d3d::g_frame_passes;
+    if (limit < 0 || !g_state.textures[0]) return false;
+    uint32_t data = R32(g_state.textures[0] + 4) & 0x0FFFFFFF;
+    for (uint32_t i = 0; i < g_buffer_count; i++)
+        if (g_buffers[i] && (R32(g_buffers[i] + 4) & 0x0FFFFFFF) == data) return g_frame_pass_count++ >= uint32_t(limit);
+    return false;
+}
+
+}  // namespace
+
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
+    if (FramePassSkipped()) return 0;
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
     return 0;
 }
@@ -1207,6 +1224,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     SyncDeferred();
+    if (FramePassSkipped()) return 0;
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
     return 0;
@@ -1243,6 +1261,7 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
 void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
+    if (FramePassSkipped()) return;
     auto stream = g_state.streams[0];
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
     g_backend->Draw(g_state, prim, 0, count, nullptr);
