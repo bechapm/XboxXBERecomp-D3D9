@@ -857,6 +857,14 @@ private:
             uint64_t program;
         } frame, last;
         uint32_t frames, early, unmarked, offscreen_size;
+        // the frame's draws from the first marked one on, which RTX Remix draws over its picture
+        struct After {
+            uint64_t program;
+            uint32_t primitives;
+            uint8_t textures, copies;
+            bool drawn, marked, two_d;
+        };
+        std::vector<After> after, after_last;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
     void EndCameraFrame();
@@ -2412,6 +2420,17 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
             f.h = bound_rt_ ? bound_rt_->h : 0;
         }
     }
+    if (f.marked && c.after.size() < 48) {
+        CameraCounts::After a{d.program_id, d.primitives, 0, uint8_t(d.screen_copies), drawn, false, bool(d.two_d)};
+        for (int i = 0; i < 4; i++)
+            if (d.textures[i]) a.textures |= uint8_t(1u << i);
+        IDirect3DBaseTexture9* vt = nullptr;
+        if (drawn && SUCCEEDED(dev_->GetTexture(D3DVERTEXTEXTURESAMPLER3, &vt)) && vt) {
+            vt->Release();
+            a.marked = true;
+        }
+        c.after.push_back(a);
+    }
     // a target other than the screen that RTX Remix takes for the picture all the same, being the back buffer's size
     if (drawn && d.offscreen && bound_rt_ && bound_rt_->w == bb_w_ && bound_rt_->h == bb_h_) c.offscreen_size++;
     if (d.offscreen) return;
@@ -2435,6 +2454,8 @@ void D3D9Backend::EndCameraFrame() {
     else if (c.frame.marked_after * 2 < c.frame.three_d) c.early++;
     c.last = c.frame;
     c.frame = {};
+    c.after_last.swap(c.after);
+    c.after.clear();
 }
 
 void D3D9Backend::ReportCamera() {
@@ -2465,6 +2486,12 @@ void D3D9Backend::ReportCamera() {
              l.offscreen ? "offscreen" : "screen", l.w, l.h);
     else
         LOGR("d3d9: camera: last frame: %u 3D draws on screen, none marked", l.three_d);
+    for (size_t i = 0; i < c.after_last.size(); i++) {
+        const CameraCounts::After& a = c.after_last[i];
+        LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, %s", i,
+             (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies,
+             !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
+    }
     c = {};
 }
 
