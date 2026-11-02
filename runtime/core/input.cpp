@@ -204,6 +204,7 @@ bool WheelHeld(WheelWay& w, uint64_t now) {
 constexpr auto kLookPeriod = std::chrono::milliseconds(12);
 constexpr float kLookFullScale = 100000.0f;  // counts a second for a full push at sensitivity 1
 std::atomic<int> g_mouse_dx{0}, g_mouse_dy{0};
+std::atomic<bool> g_direct{false};  // MouseDirect: the game takes the counts, the stick none
 std::chrono::steady_clock::time_point g_look_at;
 float g_look_speed[2] = {}, g_look_out[2] = {};  // under g_lock
 
@@ -259,7 +260,7 @@ void ReadKeyboardMouse(Pad& p) {
     int16_t* axes[4] = {&p.lx, &p.ly, &p.rx, &p.ry};
     for (int i = 0; i < 4; i++)
         if (sticks[i]) *axes[i] = sticks[i] > 0 ? int16_t(32767) : int16_t(-32768);
-    if (app::Get().mouse_look && g_captured) {
+    if (app::Get().mouse_look && g_captured && !g_direct) {
         float look[2];
         LookAxes(look);
         for (int i = 0; i < 2; i++) {
@@ -329,6 +330,18 @@ void SaveControls(void* table) {
 Pad KeyboardMouse() {
     std::lock_guard lock(g_lock);
     return g_kbm;
+}
+
+void MouseDirect(bool on) {
+    if (on && !g_direct) LOGI("input: the game turns by the mouse itself; the right stick is left to the pad");
+    g_direct = on;
+}
+
+bool MouseTake(float* dx, float* dy) {
+    int x = g_mouse_dx.exchange(0), y = g_mouse_dy.exchange(0);
+    if (dx) *dx = float(x);
+    if (dy) *dy = float(y);
+    return x || y;
 }
 
 void Window(void* hwnd) {
