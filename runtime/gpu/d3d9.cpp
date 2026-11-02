@@ -842,6 +842,16 @@ private:
     struct DrawCounts {
         uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods;
     } counts_{};
+    // what Remix is given to find the camera in, reported every ten seconds while a mod hooks the draws: the program
+    // draws, and the first that draws the screen in 3D with the transforms it left on the device
+    struct CameraCounts {
+        uint32_t programs, screen, projected, two_d, skipped;
+        bool sampled;
+        float projection[16], view[16], device_projection[16];
+        uint32_t w, h;
+    } camera_{};
+    void CountCamera(const DrawShaders& sh, bool drawn);
+    void ReportCamera();
     uint64_t frame_ = 0;
     double fps_ = 0;
     std::chrono::steady_clock::time_point fps_t_ = std::chrono::steady_clock::now();
@@ -2369,6 +2379,45 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     return true;
 }
 
+void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
+    if (!sh.prog || mods::D3d9().draw.empty()) return;
+    const RecompModDraw& d = mod_draw_;
+    CameraCounts& c = camera_;
+    c.programs++;
+    if (!drawn) c.skipped++;
+    if (d.offscreen) return;
+    c.screen++;
+    if (d.program_projection_set) c.projected++;
+    if (d.two_d) c.two_d++;
+    if (c.sampled || d.two_d || !drawn) return;
+    c.sampled = true;
+    std::memcpy(c.projection, d.program_projection, sizeof(c.projection));
+    std::memcpy(c.view, dev_xf_[1], sizeof(c.view));
+    std::memcpy(c.device_projection, dev_xf_[2], sizeof(c.device_projection));
+    c.w = bound_rt_ ? bound_rt_->w : 0;
+    c.h = bound_rt_ ? bound_rt_->h : 0;
+}
+
+void D3D9Backend::ReportCamera() {
+    CameraCounts& c = camera_;
+    auto row = [](const float* m) {
+        char b[160];
+        std::snprintf(b, sizeof(b), "[%.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g]",
+                      m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14],
+                      m[15]);
+        return std::string(b);
+    };
+    LOGR("d3d9: camera: %u program draws, %u skipped by mods; %u on screen, %u read the projection, %u 2D",
+         c.programs, c.skipped, c.screen, c.projected, c.two_d);
+    if (c.sampled) {
+        LOGR("d3d9: camera: first 3D draw on screen (target %ux%u, back buffer %ux%u): program projection %s",
+             c.w, c.h, bb_w_, bb_h_, row(c.projection).c_str());
+        LOGR("d3d9: camera: device VIEW %s", row(c.view).c_str());
+        LOGR("d3d9: camera: device PROJECTION %s", row(c.device_projection).c_str());
+    }
+    c = {};
+}
+
 void D3D9Backend::ModsAfter() {
     const auto& hooks = mods::D3d9().draw;
     for (size_t i = mods_called_; i-- > 0;)
@@ -2584,7 +2633,9 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     mod_state_ = &s;
     mod_asm_ = &a;
     mod_size_ = size;
-    if (ModsBefore(s, a, sh, stages, g)) {
+    bool drawn = ModsBefore(s, a, sh, stages, g);
+    CountCamera(sh, drawn);
+    if (drawn) {
         IDirect3DQuery9* query = BeginCountedDraw(s);
         if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
         else dev_->DrawPrimitive(g.type, 0, g.prims);
@@ -2851,6 +2902,7 @@ void D3D9Backend::Present(const Surface& front) {
              front.data, t ? t->gw : 0, t ? t->gh : 0, t ? (t->drawn ? ", drawn" : ", never drawn") : ", no target",
              unsigned(hr));
     }
+    if (presents_ % 600 == 0 && !mods::D3d9().draw.empty()) ReportCamera();
     frame_++;
     DeliverReports(false);
     ReleaseOldTextures();
