@@ -1286,7 +1286,22 @@ void D3D9Backend::DrawQuad(IDirect3DBaseTexture9* tex, const RECT& to, D3DCOLOR 
         Samp(i, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
         Samp(i, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
     }
+    // the textures left on the other samplers stay out of it: Direct3D 9 ignores a disabled stage's texture, but a tool
+    // that reads which textures a draw has (RTX Remix, whose fixed function draws count stages 0 to 6 as used) takes them
+    // as this draw's. A mod's UI mark left on a stage from the frame's last draw made a clear before the next frame's 3D
+    // RTX Remix's UI, and the frame lost Remix's picture. They are put back after, so the mods find what they left
+    constexpr DWORD kHidden[] = {1, 2, 3, 4, 5, 6, 7, D3DVERTEXTEXTURESAMPLER0, D3DVERTEXTEXTURESAMPLER1,
+                                 D3DVERTEXTEXTURESAMPLER2, D3DVERTEXTEXTURESAMPLER3};
+    IDirect3DBaseTexture9* hidden[std::size(kHidden)] = {};
+    for (size_t i = 0; i < std::size(kHidden); i++) {
+        if (SUCCEEDED(dev_->GetTexture(kHidden[i], &hidden[i])) && hidden[i]) dev_->SetTexture(kHidden[i], nullptr);
+    }
     dev_->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(QuadVertex));
+    for (size_t i = 0; i < std::size(kHidden); i++) {
+        if (!hidden[i]) continue;
+        dev_->SetTexture(kHidden[i], hidden[i]);
+        hidden[i]->Release();
+    }
 }
 
 // the pixels the CPU changed since the last Sync, opaque, the rest 0; t.read takes them
