@@ -868,8 +868,12 @@ private:
             const char* op;  // not a draw: what the renderer did to which target
             uint32_t from, to;
             uint8_t write, blend, src, dst;  // colour write mask, and the blend if on
+            bool offscreen, zwrite, zenable;
+            float min_z, max_z;  // the device's viewport depth range
+            uint32_t w, h;       // the device's render target
         };
         std::vector<After> after, after_last;
+        std::vector<After> first, first_last;  // the frame's first draws, marked or not
         // the frame before a report: the picture in the target of the first marked draw just before and after it, and
         // what Present is given; whether RTX Remix's picture went in there and stayed
         bool probe, probed;
@@ -2463,21 +2467,45 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
             f.h = bound_rt_ ? bound_rt_->h : 0;
         }
     }
-    if (f.marked && c.after.size() < 48) {
-        CameraCounts::After a{d.program_id, d.primitives, 0, uint8_t(d.screen_copies), drawn, false, bool(d.two_d), nullptr, 0, 0, 0, 0, 0, 0};
+    auto entry = [&] {
+        CameraCounts::After a{};
+        a.program = d.program_id;
+        a.primitives = d.primitives;
+        a.copies = uint8_t(d.screen_copies);
+        a.drawn = drawn;
+        a.two_d = d.two_d;
+        a.offscreen = d.offscreen;
         for (int i = 0; i < 4; i++)
             if (d.textures[i]) a.textures |= uint8_t(1u << i);
         a.write = uint8_t(rs_ok_[D3DRS_COLORWRITEENABLE] ? rs_[D3DRS_COLORWRITEENABLE] : 15);
         a.blend = rs_ok_[D3DRS_ALPHABLENDENABLE] && rs_[D3DRS_ALPHABLENDENABLE];
         a.src = uint8_t(rs_[D3DRS_SRCBLEND]);
         a.dst = uint8_t(rs_[D3DRS_DESTBLEND]);
+        a.zenable = rs_ok_[D3DRS_ZENABLE] && rs_[D3DRS_ZENABLE];
+        a.zwrite = rs_ok_[D3DRS_ZWRITEENABLE] && rs_[D3DRS_ZWRITEENABLE];
+        D3DVIEWPORT9 vp{};
+        if (SUCCEEDED(dev_->GetViewport(&vp))) {
+            a.min_z = vp.MinZ;
+            a.max_z = vp.MaxZ;
+        }
+        IDirect3DSurface9* rt = nullptr;
+        if (SUCCEEDED(dev_->GetRenderTarget(0, &rt)) && rt) {
+            D3DSURFACE_DESC desc;
+            if (SUCCEEDED(rt->GetDesc(&desc))) {
+                a.w = desc.Width;
+                a.h = desc.Height;
+            }
+            rt->Release();
+        }
         IDirect3DBaseTexture9* vt = nullptr;
         if (drawn && SUCCEEDED(dev_->GetTexture(D3DVERTEXTEXTURESAMPLER3, &vt)) && vt) {
             vt->Release();
             a.marked = true;
         }
-        c.after.push_back(a);
-    }
+        return a;
+    };
+    if (f.marked && c.after.size() < 48) c.after.push_back(entry());
+    if (c.first.size() < 12) c.first.push_back(entry());
     // a target other than the screen that RTX Remix takes for the picture all the same, being the back buffer's size
     if (drawn && d.offscreen && bound_rt_ && bound_rt_->w == bb_w_ && bound_rt_->h == bb_h_) c.offscreen_size++;
     if (d.offscreen) return;
@@ -2562,6 +2590,8 @@ void D3D9Backend::EndCameraFrame() {
     c.frame = {};
     c.after_last.swap(c.after);
     c.after.clear();
+    c.first_last.swap(c.first);
+    c.first.clear();
 }
 
 void D3D9Backend::ReportCamera() {
@@ -2602,24 +2632,31 @@ void D3D9Backend::ReportCamera() {
         LOGR("d3d9: camera:   after draw %u: %.0f to %.0f, program %016llX, %u primitives, %s, %s, %s %ux%u", j.index,
              j.from, j.to, (unsigned long long)j.program, j.primitives, j.two_d ? "2D" : "3D",
              j.marked ? "marked" : "unmarked", j.offscreen ? "offscreen" : "screen", j.w, j.h);
-    for (size_t i = 0; i < c.after_last.size(); i++) {
-        const CameraCounts::After& a = c.after_last[i];
-        auto where = [this](uint32_t data) {
-            for (uint32_t d : screens_)
-                if (d && d == data) return "the screen";
-            return "a texture";
-        };
-        if (a.op) {
-            LOGR("d3d9: camera:   %2zu %s %08X (%s) to %08X (%s)", i, a.op, a.from, a.from ? where(a.from) : "-", a.to,
-                 where(a.to));
-            continue;
+    auto print = [&](const char* title, const std::vector<CameraCounts::After>& list) {
+        LOGR("d3d9: camera: %s", title);
+        for (size_t i = 0; i < list.size(); i++) {
+            const CameraCounts::After& a = list[i];
+            auto where = [this](uint32_t data) {
+                for (uint32_t d : screens_)
+                    if (d && d == data) return "the screen";
+                return "a texture";
+            };
+            if (a.op) {
+                LOGR("d3d9: camera:   %2zu %s %08X (%s) to %08X (%s)", i, a.op, a.from, a.from ? where(a.from) : "-", a.to,
+                     where(a.to));
+                continue;
+            }
+            char blend[24] = "no blend";
+            if (a.blend) std::snprintf(blend, sizeof(blend), "blend %u %u", a.src, a.dst);
+            LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, "
+                 "depth %s%s, viewport z %.2g-%.2g, %s %ux%u, %s",
+                 i, (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
+                 blend, a.zenable ? "on" : "off", a.zwrite ? " written" : "", a.min_z, a.max_z,
+                 a.offscreen ? "offscreen" : "screen", a.w, a.h, !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
         }
-        char blend[24] = "no blend";
-        if (a.blend) std::snprintf(blend, sizeof(blend), "blend %u %u", a.src, a.dst);
-        LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, %s",
-             i, (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
-             blend, !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
-    }
+    };
+    print("the last frame's first draws:", c.first_last);
+    print("and its draws from the first marked one on:", c.after_last);
     c = {};
 }
 
