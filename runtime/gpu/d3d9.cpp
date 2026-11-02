@@ -871,6 +871,8 @@ private:
             bool offscreen, zwrite, zenable;
             float min_z, max_z;  // the device's viewport depth range
             uint32_t w, h;       // the device's render target
+            const char* remix;   // the camera RTX Remix takes from the device's transforms (RemixCamera)
+            float fov, lean;     // its vertical field of view and sideways lean, degrees
         };
         std::vector<After> after, after_last;
         std::vector<After> first, first_last;  // the frame's first draws, marked or not
@@ -2446,6 +2448,31 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     return true;
 }
 
+// the camera RTX Remix takes from a draw's WORLD, VIEW and PROJECTION (CameraManager::processCameraData): none for an
+// identity projection or a VIEW that leaves WORLD as it is, rejected for a projection leaning sideways over 0.01 radian
+// or seeing under 0.001 radian high (an orthographic one), else the main camera, or the sky's where the depth range
+// starts at 1. The angles are found from the frustum's planes as Remix finds them (MathLib DecomposeProjection)
+static const char* RemixCamera(const float* world, const float* view, const float* p, float min_z, float& fov,
+                               float& lean) {
+    fov = lean = 0;
+    if (!std::memcmp(p, kIdentity, sizeof(kIdentity))) return "none";
+    float wv[16];
+    MatMul(world, view, wv);
+    if (!std::memcmp(wv, world, sizeof(wv)) && std::memcmp(wv, kIdentity, sizeof(wv))) return "none, VIEW leaves WORLD";
+    if (p[15] != 1) {
+        // the planes through the eye: left and right (w + x, w - x), bottom and top (w + y, w - y), as z over x or y
+        float x0 = (p[11] + p[8]) / (p[3] + p[0]), x1 = (p[11] - p[8]) / (p[3] - p[0]);
+        float y0 = (p[11] + p[9]) / (p[7] + p[5]), y1 = (p[11] - p[9]) / (p[7] - p[5]);
+        fov = std::fabs(std::atan(y1) - std::atan(y0));
+        lean = (std::atan(x0) + std::atan(x1)) * 0.5f;
+    }
+    bool bad = !(std::fabs(lean) <= 0.01f) || !(fov >= 0.001f);
+    fov *= 57.29578f;
+    lean *= 57.29578f;
+    if (bad) return "rejected";
+    return min_z >= 1 ? "sky" : "main";
+}
+
 void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
     if (!sh.prog || mods::D3d9().draw.empty()) return;
     const RecompModDraw& d = mod_draw_;
@@ -2502,6 +2529,7 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
             vt->Release();
             a.marked = true;
         }
+        a.remix = RemixCamera(dev_xf_[0], dev_xf_[1], dev_xf_[2], a.min_z, a.fov, a.lean);
         return a;
     };
     if (f.marked && c.after.size() < 48) c.after.push_back(entry());
@@ -2648,11 +2676,15 @@ void D3D9Backend::ReportCamera() {
             }
             char blend[24] = "no blend";
             if (a.blend) std::snprintf(blend, sizeof(blend), "blend %u %u", a.src, a.dst);
+            char remix[64] = "";
+            if (a.drawn && a.remix)
+                std::snprintf(remix, sizeof(remix), ", Remix camera %s (fov %.1f, lean %.2f)", a.remix, a.fov, a.lean);
             LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, "
-                 "depth %s%s, viewport z %.2g-%.2g, %s %ux%u, %s",
+                 "depth %s%s, viewport z %.2g-%.2g, %s %ux%u, %s%s",
                  i, (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
                  blend, a.zenable ? "on" : "off", a.zwrite ? " written" : "", a.min_z, a.max_z,
-                 a.offscreen ? "offscreen" : "screen", a.w, a.h, !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
+                 a.offscreen ? "offscreen" : "screen", a.w, a.h, !a.drawn ? "left out" : a.marked ? "marked" : "drawn",
+                 remix);
         }
     };
     print("the last frame's first draws:", c.first_last);
