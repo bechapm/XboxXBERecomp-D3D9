@@ -28,6 +28,7 @@
 
 #include "app/app.h"
 #include "core/log.h"
+#include "core/testdrive.h"
 
 namespace input {
 
@@ -574,6 +575,7 @@ Pad Poll(int port) {
         ReadKeyboardMouse(g_kbm);
         Merge(p, g_kbm);
     }
+    testdrive::Pad(port, p);
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
 }

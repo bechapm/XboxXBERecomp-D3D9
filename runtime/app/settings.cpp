@@ -126,6 +126,27 @@ Mode Desktop() {
     return {uint32_t(GetSystemMetrics(SM_CXSCREEN)), uint32_t(GetSystemMetrics(SM_CYSCREEN))};
 }
 
+std::vector<Mode> DisplayModes() {
+    HMONITOR mon = MonitorFromWindow(static_cast<HWND>(Window()), MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    std::vector<Mode> modes;
+    if (!GetMonitorInfoW(mon, &mi)) return modes;
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    for (DWORD i = 0; EnumDisplaySettingsW(mi.szDevice, i, &dm); i++) {
+        // the desktop's colour depth; a monitor's portrait modes are the same modes turned
+        if (dm.dmBitsPerPel != 32 || dm.dmPelsWidth < 640 || dm.dmPelsHeight < 480) continue;
+        Mode m{dm.dmPelsWidth, dm.dmPelsHeight};
+        if (std::none_of(modes.begin(), modes.end(), [&](const Mode& o) { return o.width == m.width && o.height == m.height; }))
+            modes.push_back(m);
+    }
+    std::sort(modes.begin(), modes.end(), [](const Mode& a, const Mode& b) {
+        return a.width != b.width ? a.width < b.width : a.height < b.height;
+    });
+    return modes;
+}
+
 Mode Output() {
     const Settings& s = Get();
     if (s.width && s.height) return {s.width, s.height};

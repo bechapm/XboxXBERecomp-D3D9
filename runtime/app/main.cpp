@@ -6,6 +6,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <cstdlib>
 #include <dbghelp.h>
 #include <timeapi.h>
 
@@ -77,6 +78,12 @@ void DumpThreads() {
         }
 }
 
+// SWP_NOACTIVATE under XBE_BACKGROUND: a test run neither takes the focus nor comes to the front
+UINT Quiet() {
+    static const UINT flags = std::getenv("XBE_BACKGROUND") ? SWP_NOACTIVATE : 0;
+    return flags;
+}
+
 // window thread only
 void ApplyNow() {
     const Settings& s = Get();
@@ -111,11 +118,11 @@ void ApplyNow() {
         const RECT& a = mi.rcWork;
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | visible);
         SetWindowPos(g_hwnd, HWND_NOTOPMOST, a.left + (a.right - a.left - w) / 2, a.top + (a.bottom - a.top - h) / 2, w, h,
-                     SWP_FRAMECHANGED);
+                     SWP_FRAMECHANGED | Quiet());
     } else {
         const RECT& m = mi.rcMonitor;
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP | visible);
-        SetWindowPos(g_hwnd, HWND_NOTOPMOST, m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_FRAMECHANGED);
+        SetWindowPos(g_hwnd, HWND_NOTOPMOST, m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_FRAMECHANGED | Quiet());
     }
 }
 
@@ -159,6 +166,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kOpenWindow:
             CloseSplash();
             if (wp) ApplyNow();
+            if (Quiet()) {  // XBE_BACKGROUND: a test run opens off screen and takes the focus from nothing
+                SetWindowPos(hwnd, nullptr, -6000, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                return 0;
+            }
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
             return 0;
