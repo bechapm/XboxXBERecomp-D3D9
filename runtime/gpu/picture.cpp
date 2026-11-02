@@ -444,7 +444,7 @@ void PlacementFrame() {
     if (++frames % 300) return;
     std::lock_guard<std::mutex> g(g_tag_lock);
     for (const auto& [tag, t] : g_tags)
-        LOGI("2d tags: %08X placement %X: %u draws, %u spanned, x %.1f to %.1f", tag, t.placement, t.draws, t.spanned,
+        LOGR("2d tags: %08X placement %X: %u draws, %u spanned, x %.1f to %.1f", tag, t.placement, t.draws, t.spanned,
              t.lo, t.hi);
     g_tags.clear();
 }
