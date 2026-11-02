@@ -863,10 +863,13 @@ private:
             uint32_t primitives;
             uint8_t textures, copies;
             bool drawn, marked, two_d;
+            const char* op;  // not a draw: what the renderer did to which target
+            uint32_t from, to;
         };
         std::vector<After> after, after_last;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
+    void NoteAfterMark(const char* op, uint32_t from, uint32_t to);
     void EndCameraFrame();
     void ReportCamera();
     uint64_t frame_ = 0;
@@ -1271,6 +1274,7 @@ std::vector<uint8_t> LatchCpuChanges(Target& t) {
 // CPU pixels of a colour surface into its host target, scaled: after a Sync only the pixels the CPU changed go over
 // the picture, which stays at render scale
 void D3D9Backend::UploadTarget(Target& t, const Surface& s) {
+    NoteAfterMark("CPU pixels", 0, t.data);
     TextureDesc d;
     if (!Describe(s.header, d) || Format(d.format).depth) return;
     std::vector<uint8_t> px;
@@ -1371,6 +1375,7 @@ void D3D9Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, ui
             ClearDepth(*t, rs, f, z, stencil);
             continue;
         }
+        NoteAfterMark("clear", 0, t->data);
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
         if (LatchCpuWrite(*t)) UploadTarget(*t, s.rt);
         // D3DCLEAR_TARGET_R/G/B/A are bits 4 to 7: Direct3D 9's write mask has R G B A from bit 0
@@ -2421,7 +2426,7 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
         }
     }
     if (f.marked && c.after.size() < 48) {
-        CameraCounts::After a{d.program_id, d.primitives, 0, uint8_t(d.screen_copies), drawn, false, bool(d.two_d)};
+        CameraCounts::After a{d.program_id, d.primitives, 0, uint8_t(d.screen_copies), drawn, false, bool(d.two_d), nullptr, 0, 0};
         for (int i = 0; i < 4; i++)
             if (d.textures[i]) a.textures |= uint8_t(1u << i);
         IDirect3DBaseTexture9* vt = nullptr;
@@ -2445,6 +2450,17 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
     std::memcpy(c.device_projection, dev_xf_[2], sizeof(c.device_projection));
     c.w = bound_rt_ ? bound_rt_->w : 0;
     c.h = bound_rt_ ? bound_rt_->h : 0;
+}
+
+// a copy, clear or upload after the frame's mark, which changes the picture behind RTX Remix's back
+void D3D9Backend::NoteAfterMark(const char* op, uint32_t from, uint32_t to) {
+    CameraCounts& c = camera_;
+    if (mods::D3d9().draw.empty() || !c.frame.marked || c.after.size() >= 48) return;
+    CameraCounts::After a{};
+    a.op = op;
+    a.from = from;
+    a.to = to;
+    c.after.push_back(a);
 }
 
 void D3D9Backend::EndCameraFrame() {
@@ -2488,6 +2504,16 @@ void D3D9Backend::ReportCamera() {
         LOGR("d3d9: camera: last frame: %u 3D draws on screen, none marked", l.three_d);
     for (size_t i = 0; i < c.after_last.size(); i++) {
         const CameraCounts::After& a = c.after_last[i];
+        auto where = [this](uint32_t data) {
+            for (uint32_t d : screens_)
+                if (d && d == data) return "the screen";
+            return "a texture";
+        };
+        if (a.op) {
+            LOGR("d3d9: camera:   %2zu %s %08X (%s) to %08X (%s)", i, a.op, a.from, a.from ? where(a.from) : "-", a.to,
+                 where(a.to));
+            continue;
+        }
         LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, %s", i,
              (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies,
              !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
@@ -2742,6 +2768,7 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
     }
     Target* dst_t = EnsureTarget(dst, false);
     if (!dst_t || src_t == dst_t) return;
+    NoteAfterMark("copy", src_t->data, dst_t->data);
     Scene(false);
     float ss = float(src_t->w) / src_t->gw;
     float ds = float(dst_t->w) / dst_t->gw;
