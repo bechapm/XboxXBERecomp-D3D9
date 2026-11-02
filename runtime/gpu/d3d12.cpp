@@ -2845,7 +2845,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // a point drawn over its console pixel counted up to (k + 1)^2 / k^2 pixels at scale k, more than the points
     // drawn: TS2 Siberia read up to 96 for 50, wrapping the signed byte its light glows are sized from (0x12A07F),
     // and the glow filled the screen white
-    k.counted = a.topology == Topology::Points && s.simple[kMCountEnable >> 2];
+    k.counted = a.topology == Topology::Points && !sh.sprite && s.simple[kMCountEnable >> 2];  // a sprite keeps its square
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
     if (ext_) binds_ = {};  // the extension may set anything
