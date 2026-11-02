@@ -187,7 +187,7 @@ returns 0 / NULL).
 | `d3d9_remake_written_textures` | from init or `d3d9_on_device` | – | ✓ | |
 | `d3d9_on_copy` | before each copy of a target | – | ✓ | 8 |
 | `draw_vertex_buffer` (v4) | inside a draw hook | – (0) | ✓ | |
-| `d3d9_fixed_transform` (v5) | accepted, does nothing here | – | – | |
+| `d3d9_fixed_transform` (v5) | once the device is made; see Changing a draw | – | ✓ | |
 | `replaying` | any time | ✓ (0) | ✓ (0) | |
 | `capture_on_draw`, `capture_note`, `replay_on_note` | accepted, never called: this SDK makes no frame captures for replay | – | – | |
 
@@ -218,7 +218,7 @@ flowchart TD
 | Group | Fields | Under this SDK |
 | --- | --- | --- |
 | Whose | `title`, `two_d`, `title_2d`, `clip_w`, `offscreen` | `two_d`: a program draw that does not read the game's projection registers, or reads an orthographic one; a fixed function draw in screen pixels or under an orthographic projection. `offscreen`: the target is not one the game presents. `title_2d` and `clip_w` are 0 |
-| How | `program`, `program_id`, `fixed_transform`, `primitive`, `primitives` | `program_id` is the program's microcode hash; `fixed_transform` is always 0 |
+| How | `program`, `program_id`, `fixed_transform`, `primitive`, `primitives` | `program_id` is the program's microcode hash; `fixed_transform`: a program drawn by fixed function, `world` its model-view and `view` identity. On such a draw the device's vertex shader constants are stale, as none are sent for fixed function: read `world` from the draw, or `vertex_constants` |
 | Textures | `textures[8]`, `texture_ids[8]`, `screen_copies` | stages 0 to 3. A texture's id changes when its contents do. `screen_copies` marks stages that read a render target |
 | Depth | `depth_state`, `depth_enable`, `depth_write`, `depth_func` | as the device has them for the draw |
 | Transforms | `projection_set`, `projection`, `world`, `view`, `program_projection_set`, `program_projection` | `projection` is the game's own; `world` and `view` the device's. `program_projection` needs the game's port to name its registers ([The camera](#the-camera)) |

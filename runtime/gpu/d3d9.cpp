@@ -244,6 +244,7 @@ struct DrawShaders {
     bool ffp = false;              // drawn by Direct3D 9's own fixed function pipeline
     bool fixed_transform = false;  // fixed function on untransformed vertices
     bool sprite = false;           // a program's points as point sprites
+    const PlainProgram* plain = nullptr;  // a program drawn by fixed function: prog and ffp both set
     FixedKey fk;
     InputUsages usages{};          // each input's Direct3D 9 name
     uint64_t vkey = 0;
@@ -615,6 +616,7 @@ struct DeclElement {
     uint16_t offset;
     int8_t reg = -1;  // converted: the input register it is made from
     uint8_t decode = kDecodeNone;
+    bool swap = false;  // converted: red and blue change places
 };
 
 // the shader that turns the frame into the gamma corrected picture, drawn over a screen quad
@@ -713,6 +715,8 @@ private:
     void ReleaseOldTextures();
     // draws
     bool FixedFunctionDraws(const State& s, const Assembled& a, const DrawTextures& stages) const;
+    const PlainProgram* PlainDraw(const State& s, const Assembled& a, const DrawTextures& stages, const InputUsages& usages);
+    void PlainTransforms(const State& s, const PlainProgram& p, GuestExtent size);
     void BuildDeclaration(const State& s, const Assembled& a, const DrawShaders& sh, std::vector<DeclElement>& el,
                           uint64_t& decode, uint32_t& conv_stride);
     IDirect3DVertexDeclaration9* EnsureDeclaration(const std::vector<DeclElement>& el);
@@ -723,7 +727,8 @@ private:
     ID3DBlob* Compile(const std::string& src, const char* profile);
     void SetOutputState(const State& s, const Assembled& a, bool ffp);
     void SetSamplers(const State& s, const Assembled& a, const DrawTextures& stages);
-    void SetFixedFunction(const State& s, const Assembled& a, const DrawTextures& stages, GuestExtent size);
+    void SetFixedFunction(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
+                          GuestExtent size);
     void SetShaderConstants(const State& s, const DrawShaders& sh, const DrawTextures& stages, GuestExtent size);
     void SetViewportScissor(const State& s, uint32_t gw);
     bool DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride, Geometry& g);
@@ -846,6 +851,11 @@ private:
     struct DrawCounts {
         uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods;
     } counts_{};
+    // plain transforms (PlainDraw), by program hash; position -1 is a program that is not one
+    std::unordered_map<uint64_t, PlainProgram> plain_;
+    struct PlainCounts {
+        uint32_t fixed, not_plain, two_d, fog, w_buffer, layout, shader, stage, keep;
+    } plain_counts_{};
     // what Remix is given to find the camera in, reported every ten seconds while a mod hooks the draws: the program
     // draws, and the first that draws the screen in 3D with the transforms it left on the device
     struct CameraCounts {
@@ -1799,6 +1809,13 @@ bool D3D9Backend::FixedFunctionDraws(const State& s, const Assembled& a, const D
     return true;
 }
 
+// the inputs of a program drawn by fixed function: what it reads, as ProgramInputUsages names them; 0xFF unread
+InputUsage PlainUsage(const PlainProgram& p, const InputUsages& usages, int reg) {
+    bool read = reg == p.position || reg == p.colour;
+    for (int t : p.tex) read = read || reg == t;
+    return read ? usages[size_t(reg)] : InputUsage{0xFF, 0};
+}
+
 // the D3DDECLUSAGE fixed function reads each input register as: the XDK's habit, which its FVFs follow; 0xFF unread
 InputUsage FixedUsage(int reg) {
     if (reg == 0 || reg == 2 || reg == 3 || reg == 4 || reg == 6 || (reg >= 9 && reg <= 12)) return HabitUsage(reg);
@@ -1820,7 +1837,10 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
         if (!((a.regs >> r) & 1)) continue;
         const VertexElement& e = a.elements[size_t(r)];
         uint32_t dec = uint32_t(a.decode >> (r * 4)) & 15;
-        InputUsage u = sh.ffp ? FixedUsage(r) : sh.prog ? sh.usages[size_t(r)] : HabitUsage(r);
+        InputUsage u = sh.plain ? PlainUsage(*sh.plain, sh.usages, r)
+                       : sh.ffp ? FixedUsage(r)
+                       : sh.prog ? sh.usages[size_t(r)]
+                                 : HabitUsage(r);
         if (u.usage == 0xFF) continue;
         DeclElement d{BYTE(e.buffer), 0, u.usage, u.index, e.offset};
         bool float_in = e.format == DXGI_FORMAT_R32G32B32_FLOAT || e.format == DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -1836,7 +1856,9 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
             d.type = float_in && dec == kDecodeNone ? D3DDECLTYPE_FLOAT3 : kConvert;
             if (d.type == kConvert) d.type = D3DDECLTYPE_FLOAT3 | 0x80;
         } else if (u.usage == D3DDECLUSAGE_COLOR) {
-            d.type = e.format == DXGI_FORMAT_B8G8R8A8_UNORM ? D3DDECLTYPE_D3DCOLOR : D3DDECLTYPE_D3DCOLOR | 0x80;
+            // fixed function reads the D3DCOLOR in the vertex, where the program it stands for swizzled it
+            d.swap = sh.plain && sh.plain->colour_swapped;
+            d.type = e.format == DXGI_FORMAT_B8G8R8A8_UNORM && !d.swap ? D3DDECLTYPE_D3DCOLOR : D3DDECLTYPE_D3DCOLOR | 0x80;
         } else if (u.usage == D3DDECLUSAGE_PSIZE) {
             d.type = e.format == DXGI_FORMAT_R32_FLOAT ? D3DDECLTYPE_FLOAT1 : D3DDECLTYPE_FLOAT1 | 0x80;
         } else {
@@ -2074,12 +2096,14 @@ void D3D9Backend::SetSamplers(const State& s, const Assembled& a, const DrawText
 // Direct3D 9's fixed function pipeline set up as the title set the console's: its transforms (with the guest viewport
 // and Direct3D 9's pixel centres folded into the projection, the host viewport being the whole target), lights,
 // material, texture stages and fog
-void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const DrawTextures& stages, GuestExtent size) {
-    SetTitleTransforms(s, a, size);
+void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
+                                   GuestExtent size) {
+    if (sh.plain) PlainTransforms(s, *sh.plain, size);
+    else SetTitleTransforms(s, a, size);
 
-    bool lit = !a.pretransformed && s.rs[kRsLighting];
+    bool lit = !a.pretransformed && !sh.plain && s.rs[kRsLighting];
     Rs(D3DRS_LIGHTING, lit);
-    Rs(D3DRS_SPECULARENABLE, s.rs[kRsSpecularEnable] != 0);
+    Rs(D3DRS_SPECULARENABLE, !sh.plain && s.rs[kRsSpecularEnable] != 0);
     if (lit) {
         dev_->SetMaterial(reinterpret_cast<const D3DMATERIAL9*>(s.material.data()));
         for (DWORD i = 0; i < 8; i++) {
@@ -2143,6 +2167,18 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
         uint32_t ttff = a.pretransformed ? 0 : t[kTssTextureTransformFlags];
         float tm[16];
         std::memcpy(tm, a.pretransformed ? kIdentity : s.transforms[kTsTexture0 + i].data(), sizeof(tm));
+        if (sh.plain) {
+            // what the program sends this stage: one input may reach several, and its scale is a transform even at 1
+            // (split2-recomp lost a scanner's map under RTX Remix without it, cause not known)
+            int in = sh.plain->tex[i], scale = sh.plain->tex_scale[i];
+            tci = in >= 0 ? sh.usages[size_t(in)].index : 0;
+            ttff = scale >= 0 ? D3DTTFF_COUNT2 : 0;
+            if (scale >= 0) {
+                const auto& c = s.vsc[size_t(scale)];
+                const float m[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                std::memcpy(tm, m, sizeof(tm));
+            }
+        }
         TextureDesc d;
         if (stages.info[i].rect && s.textures[i] && Describe(s.textures[i], d)) {
             const float texels[16] = {1.0f / d.width, 0, 0, 0, 0, 1.0f / d.height, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -2293,6 +2329,7 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
                 else ReadElement(ve.format, e.decode, src, f);
                 uint8_t* dst = out + size_t(v) * conv_stride + e.offset;
                 if (e.type == D3DDECLTYPE_D3DCOLOR) {
+                    if (e.swap) std::swap(f[0], f[2]);
                     uint32_t c = PackColor4(f);
                     std::memcpy(dst, &c, 4);
                 } else {
@@ -2369,6 +2406,68 @@ void D3D9Backend::FoldProjection(const State& s, GuestExtent size, const float* 
     MatMul(pv, half, out);
 }
 
+bool Orthographic(const float* p);
+
+// a run of four constants a program dot products with, as a D3D row-vector matrix
+static void ProgramMatrix(const State& s, int reg, float* m) {
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) m[r * 4 + c] = s.vsc[size_t(reg + c)][size_t(r)];
+}
+
+// WORLD the program's model-view, VIEW identity: draws the same, and a mod that knows the camera moves it from one to the
+// other. PROJECTION the program's with what comes after it folded in: the screen lines take clip space to s * p / w + o,
+// the undo at the end of a program's shader (kVsEpilogue, surf) takes that back, and Sm3Position's host pixel offset
+void D3D9Backend::PlainTransforms(const State& s, const PlainProgram& p, GuestExtent size) {
+    float mv[16], proj[16];
+    if (p.modelview >= 0) ProgramMatrix(s, p.modelview, mv);
+    else std::memcpy(mv, kIdentity, sizeof(mv));
+    ProgramMatrix(s, p.projection, proj);
+    const auto& sc = s.vsc[size_t(p.screen_scale)];
+    const auto& of = s.vsc[size_t(p.screen_offset)];
+    float hw = float(bound_rt_ ? bound_rt_->w : bound_ds_->w), hh = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
+    float zs = 1.0f / s.zscale;
+    const float mul[3] = {2 * sc[0] / size.w, -2 * sc[1] / size.h, sc[2] * zs};
+    const float add[3] = {2 * of[0] / size.w - 1 - 1.0f / hw, 1 - 2 * of[1] / size.h + 1.0f / hh, of[2] * zs};
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 3; c++) proj[r * 4 + c] = proj[r * 4 + c] * mul[c] + proj[r * 4 + 3] * add[c];
+    SetDeviceTransform(0, mv);
+    SetDeviceTransform(1, kIdentity);
+    SetDeviceTransform(2, proj);
+}
+
+// A program that is only a plain transform, drawn by fixed function for a tool that takes transforms from the device and
+// must otherwise read every vertex back out of a shader: a mod asks (d3d9_fixed_transform), XBE_D3D9_FIXED_TRANSFORM has
+// the last word. Null to stay a program, as every draw does unless asked
+const PlainProgram* D3D9Backend::PlainDraw(const State& s, const Assembled& a, const DrawTextures& stages,
+                                           const InputUsages& usages) {
+    const mods::D3d9Hooks& hooks = mods::D3d9();
+    int asked = diag::D3d9FixedTransform();
+    if (asked == 0 || (asked < 0 && !hooks.fixed_transform)) return nullptr;
+    auto [it, added] = plain_.try_emplace(s.vs->hash);
+    if (added && !PlainTransform(s.vs->program, it->second)) it->second = PlainProgram{};
+    const PlainProgram& p = it->second;
+    PlainCounts& n = plain_counts_;
+    if (p.position < 0 || p.screen_scale < 0 || a.topology == Topology::Points) return n.not_plain++, nullptr;
+    float proj[16];
+    ProgramMatrix(s, p.projection, proj);
+    if (p.projection != g_projection_register || Orthographic(proj)) return n.two_d++, nullptr;
+    if (s.rs[kRsFogEnable]) return n.fog++, nullptr;  // a program's fog is in its pixel shader
+    if (s.rs[kRsZEnable] == 2) return n.w_buffer++, nullptr;  // D3DZB_USEW: fixed function cannot write w
+    if (usages[size_t(p.position)].usage != 0 || (p.colour >= 0 && usages[size_t(p.colour)].usage != 10))
+        return n.layout++, nullptr;
+    for (int t : p.tex)
+        if (t >= 0 && usages[size_t(t)].usage != 5) return n.layout++, nullptr;
+    if (!FixedFunctionDraws(s, a, stages)) return n.shader++, nullptr;  // a pixel shader, or a stage it cannot draw
+    for (int i = 0; i < 4; i++)
+        if (stages.res[i] && p.tex[i] < 0) return n.stage++, nullptr;  // a stage reading coordinates the program does not write
+    bool zen = bound_ds_ && s.rs[kRsZEnable];
+    if (hooks.fixed_keep && !hooks.fixed_keep(zen, zen && SimpleState(s, kMZWriteEnable) != 0, Cmp(SimpleState(s, kMZFunc)),
+                                              hooks.fixed_keep_user))
+        return n.keep++, nullptr;
+    n.fixed++;
+    return &p;
+}
+
 void D3D9Backend::SetDeviceTransform(int i, const float* m) {
     static const D3DTRANSFORMSTATETYPE kType[3] = {D3DTS_WORLD, D3DTS_VIEW, D3DTS_PROJECTION};
     if (dev_xf_ok_[i] && !std::memcmp(dev_xf_[i], m, sizeof(dev_xf_[i]))) return;
@@ -2432,6 +2531,7 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     d.title = 1;
     d.program = sh.prog;
     d.program_id = sh.prog ? s.vs->hash : 0;
+    d.fixed_transform = sh.plain != nullptr;
     // a program projects through the camera when it reads the registers the game names for it
     int preg = g_projection_register;
     if (sh.prog && preg >= 0 && preg + 4 <= int(s.vsc.size()) && ReadsConstant(s.vs->program, uint32_t(preg))) {
@@ -2983,6 +3083,8 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     if (sh.prog) {
         if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
         sh.usages = ProgramUsages(s, a.regs);
+        sh.plain = sh.sprite ? nullptr : PlainDraw(s, a, stages, sh.usages);
+        sh.ffp = sh.plain != nullptr;
     }
 
     std::vector<DeclElement> el;
@@ -3000,7 +3102,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     if (sh.ffp) {
         dev_->SetVertexShader(nullptr);
         dev_->SetPixelShader(nullptr);
-        SetFixedFunction(s, a, stages, size);
+        SetFixedFunction(s, a, sh, stages, size);
     } else {
         sh.vs = EnsureVertexShader(s, a, sh, decode);
         PixelKey pk = MakePixelKey(s, stages.info);
@@ -3315,6 +3417,12 @@ void D3D9Backend::Present(const Surface& front) {
     Scene(false);
     if (testdrive::SnapDue()) SnapBackBuffer(bb.Get());
     bool report = presents_ + 1 == 60 || presents_ + 1 == 1800;
+    if ((presents_ + 1) % 1800 == 0 && (plain_counts_.fixed || plain_counts_.not_plain)) {
+        const PlainCounts& n = plain_counts_;
+        LOGR("d3d9: plain transforms: %u drawn fixed, stayed programs: %u not plain, %u 2D, %u fog, %u W buffer, %u layout, "
+             "%u pixel shader or stage state, %u stage texture, %u a mod's choice", n.fixed, n.not_plain, n.two_d, n.fog,
+             n.w_buffer, n.layout, n.shader, n.stage, n.keep);
+    }
     if (report)
         LOGR("d3d9: presented target %s; back buffer %s%s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
              PixelStats(dev_.Get(), bb.Get()).c_str(), gamma_ ? "; through the gamma ramp" : "");
