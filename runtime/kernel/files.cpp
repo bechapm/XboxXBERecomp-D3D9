@@ -96,7 +96,11 @@ struct Link : Object {
 
 uint64_t ToFileTime(fs::file_time_type t) {
     using namespace std::chrono;
-    auto sys = time_point_cast<nanoseconds>(t - fs::file_time_type::clock::now() + system_clock::now());
+    // one pair of readings for the run: two read per call put the same file a few ticks apart from one query to the
+    // next, and a game that compares a file's time with what it saw before (TS2's save check) then fails at random
+    static const auto file_now = fs::file_time_type::clock::now();
+    static const auto sys_now = system_clock::now();
+    auto sys = time_point_cast<nanoseconds>(t - file_now + sys_now);
     return uint64_t(sys.time_since_epoch().count() / 100 + 116444736000000000ll);
 }
 
