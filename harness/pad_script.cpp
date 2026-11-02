@@ -93,6 +93,8 @@ void Rumble(int port, uint16_t left, uint16_t right) {
 }
 
 Pad KeyboardMouse() { return {}; }  // no keyboard here
+void LoadControls(const void*) {}  // no bindings here
+void SaveControls(void*) {}
 
 // no mouse either: the pointer is never over the picture, and the pad is what was used
 Pointer GetPointer() { return {}; }
