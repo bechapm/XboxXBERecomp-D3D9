@@ -619,7 +619,7 @@ struct DeclElement {
 const char* kGammaHlsl = R"(sampler2D frame : register(s0);
 sampler2D ramp : register(s1);
 float4 main(float2 uv : TEXCOORD0) : COLOR0 {
-    float4 c = tex2D(frame, uv);
+    float3 c = tex2D(frame, uv).rgb * (255.0 / 256.0) + 0.5 / 256.0;  // entry n at its texel's centre
     return float4(tex2D(ramp, float2(c.r, 0.5)).r, tex2D(ramp, float2(c.g, 0.5)).g, tex2D(ramp, float2(c.b, 0.5)).b, 1);
 }
 )";
@@ -823,7 +823,12 @@ private:
     uint32_t query_next_ = 0;
     std::vector<Query> counted_;
     std::deque<Report> reports_;
-    uint8_t ramp_[768] = {};
+    // the identity until the game sets one: a ramp of zeros would draw every frame black
+    std::array<uint8_t, 768> ramp_ = [] {
+        std::array<uint8_t, 768> r{};
+        for (int i = 0; i < 768; i++) r[size_t(i)] = uint8_t(i & 255);
+        return r;
+    }();
     bool ramp_dirty_ = false;
     bool gamma_ = false;
     RECT last_frame_rect_{};
@@ -2686,7 +2691,8 @@ void D3D9Backend::UpdateGammaLut() {
     gamma_ = !identity;
     if (!gamma_) return;
     if (!gamma_ps_) {
-        if (ID3DBlob* code = Compile(kGammaHlsl, "ps_3_0"))
+        // drawn under fixed function vertices, which a Shader Model 3 pixel shader cannot follow
+        if (ID3DBlob* code = Compile(kGammaHlsl, "ps_2_0"))
             dev_->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &gamma_ps_);
     }
     if (ComPtr<IDirect3DTexture9> t = PixelTexture(px, 256 * 4, 256, 1)) lut_ = t;
@@ -2903,7 +2909,7 @@ void D3D9Backend::Flush() {
 }
 
 void D3D9Backend::SetGamma(const uint8_t* ramp) {
-    std::memcpy(ramp_, ramp, sizeof(ramp_));
+    std::memcpy(ramp_.data(), ramp, ramp_.size());
     ramp_dirty_ = true;
 }
 
