@@ -857,6 +857,9 @@ private:
             uint32_t three_d, marked_after, primitives, w, h;
             bool marked, offscreen, two_d;
             uint64_t program;
+            uint32_t draws;            // every draw, a program's or fixed function
+            uint32_t ffp_ui, ffp_ui_at;  // fixed function draws RTX Remix takes for UI itself, and the first one's number
+            bool ffp_ui_early;           // the first came before the first marked draw
         } frame, last;
         uint32_t frames, early, unmarked, offscreen_size;
         // the frame's draws from the first marked one on, which RTX Remix draws over its picture
@@ -874,6 +877,7 @@ private:
             const char* remix;   // the camera RTX Remix takes from the device's transforms (RemixCamera)
             float fov, lean;     // its vertical field of view and sideways lean, degrees
             bool counted;        // inside an occlusion query (the title counting pixels), which Remix only rasterises
+            bool ffp, ffp_ui;    // Direct3D 9's fixed function, and one Remix takes for UI by its own rule
         };
         std::vector<After> after, after_last;
         std::vector<After> first, first_last;  // the frame's first draws, marked or not
@@ -2524,9 +2528,55 @@ void D3D9Backend::Prime(const Geometry* g) {
 }
 
 void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
-    if (!sh.prog || mods::D3d9().draw.empty()) return;
+    if (mods::D3d9().draw.empty()) return;
     const RecompModDraw& d = mod_draw_;
     CameraCounts& c = camera_;
+    uint32_t index = c.frame.draws++;
+    // RTX Remix's own rule for UI (D3D9Rtx::isRenderingUI): a draw without a vertex shader, under an orthographic
+    // PROJECTION, writing no depth; it puts its picture in there, and draws everything after it flat. Only on a target
+    // the back buffer's size, writing all of red, green and blue, outside an occlusion query, as Remix checks those first
+    bool ffp_ui = false;
+    if (drawn && sh.ffp && bound_rt_ && bound_rt_->w == bb_w_ && bound_rt_->h == bb_h_) {
+        DWORD zw = TRUE, cw = 15;
+        dev_->GetRenderState(D3DRS_ZWRITEENABLE, &zw);
+        dev_->GetRenderState(D3DRS_COLORWRITEENABLE, &cw);
+        bool counted = mod_state_ && mod_state_->simple[kMCountEnable >> 2];
+        ffp_ui = dev_xf_[2][15] == 1.0f && !zw && (cw & 7) == 7 && !counted;
+    }
+    if (ffp_ui && !c.frame.ffp_ui++) {
+        c.frame.ffp_ui_at = index;
+        c.frame.ffp_ui_early = !c.frame.marked;
+    }
+    if (!sh.prog) {
+        // fixed function draws only go in the lists
+        CameraCounts::After a{};
+        a.drawn = drawn;
+        a.ffp = sh.ffp;
+        a.ffp_ui = ffp_ui;
+        a.primitives = d.primitives;
+        a.two_d = d.two_d;
+        a.offscreen = d.offscreen;
+        for (int i = 0; i < 4; i++)
+            if (d.textures[i]) a.textures |= uint8_t(1u << i);
+        DWORD v = 0;
+        a.write = uint8_t(SUCCEEDED(dev_->GetRenderState(D3DRS_COLORWRITEENABLE, &v)) ? v : 15);
+        a.blend = SUCCEEDED(dev_->GetRenderState(D3DRS_ALPHABLENDENABLE, &v)) && v;
+        if (SUCCEEDED(dev_->GetRenderState(D3DRS_SRCBLEND, &v))) a.src = uint8_t(v);
+        if (SUCCEEDED(dev_->GetRenderState(D3DRS_DESTBLEND, &v))) a.dst = uint8_t(v);
+        a.zenable = SUCCEEDED(dev_->GetRenderState(D3DRS_ZENABLE, &v)) && v;
+        a.zwrite = SUCCEEDED(dev_->GetRenderState(D3DRS_ZWRITEENABLE, &v)) && v;
+        D3DVIEWPORT9 vp{};
+        if (SUCCEEDED(dev_->GetViewport(&vp))) {
+            a.min_z = vp.MinZ;
+            a.max_z = vp.MaxZ;
+        }
+        a.w = bound_rt_ ? bound_rt_->w : 0;
+        a.h = bound_rt_ ? bound_rt_->h : 0;
+        a.remix = RemixCamera(dev_xf_[0], dev_xf_[1], dev_xf_[2], a.min_z, a.fov, a.lean);
+        if (c.frame.marked && c.after.size() < 48) c.after.push_back(a);
+        if (c.first.size() < 12) c.first.push_back(a);
+        return;
+    }
     c.programs++;
     if (!drawn) c.skipped++;
     CameraCounts::Frame& f = c.frame;
@@ -2701,6 +2751,10 @@ void D3D9Backend::ReportCamera() {
              l.offscreen ? "offscreen" : "screen", l.w, l.h);
     else
         LOGR("d3d9: camera: last frame: %u 3D draws on screen, none marked", l.three_d);
+    if (l.ffp_ui)
+        LOGR("d3d9: camera: last frame: %u fixed function draws RTX Remix takes for UI itself, the first at draw %u, %s "
+             "the first marked one",
+             l.ffp_ui, l.ffp_ui_at, l.ffp_ui_early ? "before" : "after");
     if (!c.before_mark.empty())
         LOGR("d3d9: camera: the frame before: its first marked draw's target before it %s; after it %s; presented %s",
              c.before_mark.c_str(), c.after_mark.c_str(), c.at_present.c_str());
@@ -2730,9 +2784,13 @@ void D3D9Backend::ReportCamera() {
             char remix[64] = "";
             if (a.drawn && a.remix)
                 std::snprintf(remix, sizeof(remix), ", Remix camera %s (fov %.1f, lean %.2f)", a.remix, a.fov, a.lean);
-            LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, "
+            char what[40];
+            if (a.program) std::snprintf(what, sizeof(what), "program %016llX", (unsigned long long)a.program);
+            else std::snprintf(what, sizeof(what), "%s", a.ffp ? "fixed function" : "generated fixed function");
+            if (a.ffp_ui) std::snprintf(remix, sizeof(remix), ", Remix takes it for UI itself");
+            LOGR("d3d9: camera:   %2zu %s, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, "
                  "depth %s%s, viewport z %.2g-%.2g, %s %ux%u, %s%s%s",
-                 i, (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
+                 i, what, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
                  blend, a.zenable ? "on" : "off", a.zwrite ? " written" : "", a.min_z, a.max_z,
                  a.offscreen ? "offscreen" : "screen", a.w, a.h, !a.drawn ? "left out" : a.marked ? "marked" : "drawn",
                  a.counted ? ", counted" : "", remix);
