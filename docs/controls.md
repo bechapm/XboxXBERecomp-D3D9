@@ -70,7 +70,9 @@ a hook of its own in `src/game` that turns the camera by the mouse's movement.
 ## Pointer
 
 A game that draws its own menus can let the mouse point and click in them. `input::PointerWant(true)` while a menu is
-up asks for the pointer; `input::GetPointer()` then says where it is over the game's picture and what the mouse did.
+up asks for the pointer and `input::PointerWant(false)` lets it go; `input::GetPointer()` then says where it is over the
+game's picture and what the mouse did. Each caller pairs its own calls, and the pointer is wanted while any of them wants
+it, so a game's menus and an overlay of its own can each ask without undoing the other.
 
 **Figure 2.** Who the mouse belongs to.
 

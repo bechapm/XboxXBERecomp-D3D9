@@ -40,8 +40,9 @@ struct Pointer {
     int32_t wheel = 0;     // notches turned while wanted, up positive; a running total
 };
 Pointer GetPointer();  // any thread
-// any thread: a menu wants the pointer. While wanted, mouse_look lets the pointer go and the mouse's buttons and wheel
-// are the pointer's, not the controls'; a button held when the want ends stays the pointer's until let go
+// any thread: a menu wants the pointer, or no longer does. Each caller pairs its own calls, and the pointer is wanted
+// while any caller wants it. While wanted, mouse_look lets the pointer go and the mouse's buttons and wheel are the
+// pointer's, not the controls'; a button held when the want ends stays the pointer's until let go
 void PointerWant(bool on);
 enum class Device : uint8_t { pad, keyboard, mouse };
 Device LastUsed();  // the last controller 1 used: a key, the mouse or a pad

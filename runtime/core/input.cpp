@@ -115,7 +115,8 @@ bool g_captured = false;  // mouse_look holds the pointer in the window, window 
 
 // the pointer (input.h): wanted by a game's menu, which takes the mouse's buttons and wheel from the controls
 constexpr UINT kPointerSync = WM_APP + 0x40;  // to the window thread: the capture and the cursor follow the want
-std::atomic<bool> g_want{false};
+std::atomic<int> g_wants{0};       // callers wanting the pointer now
+std::atomic<bool> g_want{false};  // any of them
 bool g_shown = false;           // under g_lock, as the rest of the pointer's state
 Device g_last = Device::keyboard;
 uint32_t g_moved = 0, g_presses[5] = {};
@@ -624,6 +625,9 @@ Pointer GetPointer() {
 }
 
 void PointerWant(bool on) {
+    int n = on ? ++g_wants : --g_wants;
+    if (n < 0) g_wants = n = 0;  // a let go with no want before it
+    on = n > 0;
     if (g_want.exchange(on) == on) return;
     {
         std::lock_guard lock(g_lock);
