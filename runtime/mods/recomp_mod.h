@@ -89,10 +89,13 @@ typedef struct RecompModDraw {
     uint32_t index_count;
     int32_t  base_vertex;
     int      fixed_transform;       /* the program (`program` is set) is a plain
-                                       transform and D3D9's fixed function draws
-                                       it (d3d9_fixed_transform): no vertex shader
+                                       transform D3D9's fixed function may draw
+                                       (d3d9_fixed_transform): no vertex shader
                                        is bound, WORLD is its model-view and VIEW
-                                       identity, and PROJECTION its projection */
+                                       identity, and PROJECTION its projection.
+                                       Its pixel shader is still bound: remove it
+                                       in before and fixed function draws this,
+                                       leave it and it stays a program */
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */
@@ -243,7 +246,7 @@ typedef struct RecompModApi {
      * the fixed-function transforms and otherwise has to read each vertex
      * back out of the shader. Such a draw comes with fixed_transform set
      * (RecompModDraw). `keep`, if given, is asked first, and a 0 leaves that
-     * draw a program. RECOMP_D3D9_FIXED_TRANSFORM has the last word. */
+     * draw a program. XBE_D3D9_FIXED_TRANSFORM has the last word. */
     void (*d3d9_fixed_transform)(int on, RecompModFixedFn keep, void *user);
 } RecompModApi;
 

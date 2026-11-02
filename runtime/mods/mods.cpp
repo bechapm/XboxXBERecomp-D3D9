@@ -152,8 +152,11 @@ uint32_t DrawVertexBuffer(uint32_t* data, uint32_t* stride, uint32_t* first) {
     return vb;
 }
 
-// plain transforms are drawn as programs here: no draw comes with fixed_transform set
-void D3d9FixedTransform(int, RecompModFixedFn, void*) {}
+void D3d9FixedTransform(int on, RecompModFixedFn keep, void* user) {
+    g_d3d9.fixed_transform = on != 0;
+    g_d3d9.fixed_keep = keep;
+    g_d3d9.fixed_keep_user = user;
+}
 
 RecompModApi MakeApi() {
     RecompModApi a{};

@@ -915,6 +915,151 @@ int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, si
 
 }  // namespace
 
+namespace {
+
+constexpr uint32_t kMacMov = 1, kMacMul = 2, kMacMad = 4, kMacDp4 = 7, kIluRcc = 3, kMuxConst = 3;
+constexpr uint32_t kTempPos = 12;  // R12 is oPos
+constexpr int kOutT3 = 12;
+
+struct Operand {
+    uint32_t neg, sw[4], reg, mux;
+    bool relative;
+};
+
+// operand A 0, B 1, C 2, as Src reads them
+Operand ReadOperand(const Tok& k, int which) {
+    Operand o{};
+    if (which == 0) {
+        o.neg = k.f(1, 8, 1);
+        o.sw[0] = k.f(1, 6, 2), o.sw[1] = k.f(1, 4, 2), o.sw[2] = k.f(1, 2, 2), o.sw[3] = k.f(1, 0, 2);
+        o.reg = k.f(2, 28, 4), o.mux = k.f(2, 26, 2);
+    } else if (which == 1) {
+        o.neg = k.f(2, 25, 1);
+        o.sw[0] = k.f(2, 23, 2), o.sw[1] = k.f(2, 21, 2), o.sw[2] = k.f(2, 19, 2), o.sw[3] = k.f(2, 17, 2);
+        o.reg = k.f(2, 13, 4), o.mux = k.f(2, 11, 2);
+    } else {
+        o.neg = k.f(2, 10, 1);
+        o.sw[0] = k.f(2, 8, 2), o.sw[1] = k.f(2, 6, 2), o.sw[2] = k.f(2, 4, 2), o.sw[3] = k.f(2, 2, 2);
+        o.reg = k.f(2, 0, 2) << 2 | k.f(3, 30, 2), o.mux = k.f(3, 28, 2);
+    }
+    if (o.mux == kMuxInput) o.reg = k.f(1, 9, 4);
+    if (o.mux == kMuxConst) o.reg = k.f(1, 13, 8), o.relative = k.f(3, 1, 1) != 0;
+    return o;
+}
+
+bool Swizzled(const Operand& o, uint32_t x, uint32_t y, uint32_t z, uint32_t w) {
+    return o.sw[0] == x && o.sw[1] == y && o.sw[2] == z && o.sw[3] == w;
+}
+bool Is(const Operand& o, uint32_t mux) { return o.mux == mux && !o.neg && !o.relative; }
+bool Whole(const Operand& o, uint32_t mux) { return Is(o, mux) && Swizzled(o, 0, 1, 2, 3); }
+
+// one row of a matrix: a dp4 into lane k of its target with c[first + k]; rows in any order, from one run of four
+bool MatrixRow(const Operand& b, uint32_t mask, int& first, uint32_t& rows) {
+    if (!Whole(b, kMuxConst)) return false;
+    int k = 0;
+    while (k < 4 && mask != (8u >> k)) k++;
+    if (k == 4 || (rows & (1u << k))) return false;
+    if (!rows) first = int(b.reg) - k;
+    if (first < 0 || int(b.reg) != first + k) return false;
+    rows |= 1u << k;
+    return true;
+}
+
+}  // namespace
+
+bool PlainTransform(const std::vector<uint32_t>& prog, PlainProgram& out) {
+    PlainProgram t;
+    uint32_t mv_rows = 0, proj_rows = 0;
+    int mv_temp = -1;
+    bool recip = false;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3), r = k.f(3, 20, 4), m = k.f(3, 24, 4);
+        uint32_t omask = k.f(3, 12, 4), last = k.f(3, 0, 1);
+        bool to_out = omask != 0 && k.f(3, 11, 1) != 0;
+        if (omask && !to_out) return false;  // a write to a constant
+        if (to_out && k.f(3, 2, 1) != 0) return false;  // an output from the ILU
+        Operand a = ReadOperand(k, 0), b = ReadOperand(k, 1), c = ReadOperand(k, 2);
+        // what the MAC writes: an output, or oPos under its other name, R12
+        int target = -1;
+        uint32_t mask = 0;
+        if (mac && to_out && !m) target = int(k.f(3, 3, 8) & 0xF), mask = omask;
+        else if (mac && r == kTempPos && m && !to_out) target = kOutPos, mask = m;
+        // the one ILU operation there may be: the first screen line's reciprocal, rcc r1.x, r12.w
+        if (ilu) {
+            if (ilu != kIluRcc || recip || mac != kMacMul || k.f(3, 16, 4) != 8 || !Is(c, kMuxTemp) || c.reg != kTempPos ||
+                c.sw[0] != 3)
+                return false;
+            recip = true;
+        }
+        switch (mac) {
+            case 0: break;
+            case kMacDp4:
+                if (target == kOutPos) {  // the projection, of the model-view's result or of the position
+                    if (Whole(a, kMuxTemp)) {
+                        if (int(a.reg) != mv_temp || mv_rows != 0xF) return false;
+                    } else if (Whole(a, kMuxInput)) {
+                        if (mv_temp >= 0 || (t.position >= 0 && t.position != int(a.reg))) return false;
+                        t.position = int(a.reg);
+                    } else {
+                        return false;
+                    }
+                    if (!MatrixRow(b, mask, t.projection, proj_rows)) return false;
+                } else if (target < 0 && !to_out && r < kTempPos) {  // the model-view, into a temporary
+                    if (!Whole(a, kMuxInput) || proj_rows || (mv_temp >= 0 && mv_temp != int(r)) ||
+                        (t.position >= 0 && t.position != int(a.reg)))
+                        return false;
+                    mv_temp = int(r);
+                    t.position = int(a.reg);
+                    if (!MatrixRow(b, m, t.modelview, mv_rows)) return false;
+                } else {
+                    return false;
+                }
+                break;
+            case kMacMov:
+                if (mask != 0xF || !Is(a, kMuxInput)) return false;
+                if (target == kOutD0) {
+                    if (t.colour >= 0) return false;
+                    if (Swizzled(a, 2, 1, 0, 3)) t.colour_swapped = true;
+                    else if (!Swizzled(a, 0, 1, 2, 3)) return false;
+                    t.colour = int(a.reg);
+                } else if (target >= kOutT0 && target <= kOutT3 && Swizzled(a, 0, 1, 2, 3)) {
+                    if (t.tex[target - kOutT0] >= 0) return false;
+                    t.tex[target - kOutT0] = int(a.reg);
+                } else {
+                    return false;
+                }
+                break;
+            case kMacMul:
+                if (target >= kOutT0 && target <= kOutT3) {
+                    int s = target - kOutT0;
+                    if (mask != 0xF || t.tex[s] >= 0 || !Whole(a, kMuxInput) || !Whole(b, kMuxConst)) return false;
+                    t.tex[s] = int(a.reg);
+                    t.tex_scale[s] = int(b.reg);
+                } else if (target == kOutPos) {  // the first screen line, once the projection is done
+                    if (mask != 0xE || proj_rows != 0xF || t.screen_scale >= 0 || !recip || !Whole(a, kMuxTemp) ||
+                        a.reg != kTempPos || !Whole(b, kMuxConst))
+                        return false;
+                    t.screen_scale = int(b.reg);
+                } else {
+                    return false;
+                }
+                break;
+            case kMacMad:  // the second screen line
+                if (target != kOutPos || mask != 0xE || t.screen_scale < 0 || t.screen_offset >= 0 || !Whole(a, kMuxTemp) ||
+                    a.reg != kTempPos || !Is(b, kMuxTemp) || b.reg != 1 || !Swizzled(b, 0, 0, 0, 0) || !Whole(c, kMuxConst))
+                    return false;
+                t.screen_offset = int(c.reg);
+                break;
+            default: return false;
+        }
+        if (last) break;
+    }
+    if (proj_rows != 0xF || t.position < 0 || (t.screen_scale >= 0) != (t.screen_offset >= 0)) return false;
+    out = t;
+    return true;
+}
+
 void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputUsages& out) {
     uint16_t temp[13] = {}, feeds[16] = {}, dp3 = 0, named = 0;
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {

@@ -34,6 +34,7 @@ struct Press {
 
 std::mutex g_lock;
 std::atomic<uint64_t> g_frames{0};
+std::atomic<uint64_t> g_draws{0};
 std::atomic<bool> g_snap{false};
 std::vector<Press> g_script;
 std::vector<Press> g_live;  // presses from the cmd file, under g_lock
@@ -181,6 +182,12 @@ uint64_t ClockNs() {
 
 uint64_t Frames() { return g_frames.load(); }
 
+void CountDraw() {
+    if (On()) g_draws.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint64_t Draws() { return g_draws.load(); }
+
 void Pad(int port, input::Pad& p) {
     if (port != 0 || !On()) return;
     static const bool loaded = LoadScript();
@@ -225,6 +232,27 @@ void Presented() {
 }
 
 bool SnapDue() { return g_snap.load(); }
+
+void ReportLog(uint32_t va, double pixels, size_t queries, float samples_per_pixel) {
+    static const std::vector<std::pair<uint64_t, uint64_t>> spans = [] {
+        std::vector<std::pair<uint64_t, uint64_t>> v;
+        const char* s = std::getenv("XBE_REPORT_LOG");
+        for (int used = 0; s && *s; s += used + (s[used] == ',')) {
+            unsigned long long a, b;
+            if (std::sscanf(s, "%llu-%llu%n", &a, &b, &used) < 2) break;
+            v.push_back({a, b});
+        }
+        return v;
+    }();
+    if (spans.empty() || Dir().empty()) return;
+    uint64_t n = g_frames.load();
+    if (std::none_of(spans.begin(), spans.end(), [&](auto& x) { return n >= x.first && n <= x.second; })) return;
+    static FILE* f = std::fopen((Dir() / "reports.log").string().c_str(), "w");
+    if (!f) return;
+    std::fprintf(f, "present %llu report %08X pixels %.0f queries %zu samples_per_pixel %.3f\n", (unsigned long long)n, va, pixels,
+                 queries, samples_per_pixel);
+    std::fflush(f);
+}
 
 void SnapAs(const char* name) {
     std::lock_guard lock(g_lock);

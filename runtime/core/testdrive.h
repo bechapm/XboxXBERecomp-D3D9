@@ -26,8 +26,12 @@ bool KeyHeld(int vk);               // a scripted key, for code that reads the k
 void Presented();                   // each present: counts frames, reads the folder
 bool SnapDue();                     // a frame is to be saved: the renderer then calls Snap
 void SnapAs(const char* name);      // the next presented frame goes to <name>.bmp in XBE_TEST_DIR
+// XBE_REPORT_LOG=from-to,from-to: what visibility tests were answered in those presents, in reports.log in XBE_TEST_DIR
+void ReportLog(uint32_t va, double pixels, size_t queries, float samples_per_pixel);
 // top-down rows of 32 bit BGRA (or BGRX), written as a .bmp in XBE_TEST_DIR
 void Snap(uint32_t width, uint32_t height, const uint8_t* rows, uint32_t pitch);
 uint64_t Frames();
+void CountDraw();                   // each draw the renderer makes
+uint64_t Draws();
 
 }  // namespace testdrive

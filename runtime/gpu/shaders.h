@@ -75,6 +75,17 @@ void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, Inp
 // usages: Shader Model 3's input names, the habit's without them
 std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0,
                               const InputUsages* usages = nullptr);
+// A vertex program that is only a plain transform: position through a model-view then a projection or one matrix, the
+// XDK's two screen lines, a colour and coordinates moved or scaled, nothing else. Registers in hardware order, -1 none.
+struct PlainProgram {
+    int position = -1, modelview = -1, projection = -1;
+    int screen_scale = -1, screen_offset = -1;
+    int colour = -1;              // what reaches oD0
+    bool colour_swapped = false;  // as .zyxw: red and blue change places
+    int tex[4] = {-1, -1, -1, -1};        // what reaches oTn
+    int tex_scale[4] = {-1, -1, -1, -1};  // the constant oTn is multiplied by
+};
+bool PlainTransform(const std::vector<uint32_t>& program, PlainProgram& out);
 // the program reads constant register reg (hardware order: c-96 is 0) by its number, not through a0
 bool ReadsConstant(const std::vector<uint32_t>& program, uint32_t reg);
 // the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
