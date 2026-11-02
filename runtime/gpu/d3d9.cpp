@@ -20,6 +20,7 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <unordered_map>
@@ -30,6 +31,7 @@
 #include <backends/imgui_impl_win32.h>
 
 #include "app/app.h"
+#include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "gpu/shaders.h"
@@ -1830,7 +1832,8 @@ IDirect3DPixelShader9* D3D9Backend::EnsurePixelShader(const PixelKey& pk, uint64
     auto it = pshaders_.find(key);
     if (it != pshaders_.end()) return it->second.Get();
     ComPtr<IDirect3DPixelShader9> ps;
-    if (ID3DBlob* code = Compile(PixelHlsl(pk), "ps_3_0");
+    std::string src = diag::D3d9Solid() ? "float4 main() : COLOR { return float4(1, 0, 1, 1); }" : PixelHlsl(pk);
+    if (ID3DBlob* code = Compile(src, "ps_3_0");
         code && FAILED(dev_->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &ps))) {
         LOGE("d3d9: a pixel shader was refused");
     }
@@ -2755,6 +2758,33 @@ void D3D9Backend::ApplySettings() {
     LOGI("d3d9: render scale %.3f, %ux%u back buffer", scale_, bb_w_, bb_h_);
 }
 
+// the mean colour and the share of pixels not black of a render target, for the early reports
+std::string PixelStats(IDirect3DDevice9* dev, IDirect3DSurface9* rt) {
+    D3DSURFACE_DESC d;
+    ComPtr<IDirect3DSurface9> sys;
+    D3DLOCKED_RECT lr;
+    if (!rt || FAILED(rt->GetDesc(&d)) ||
+        FAILED(dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) ||
+        FAILED(dev->GetRenderTargetData(rt, sys.Get())) || FAILED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+        return "unreadable";
+    }
+    uint64_t sum[3] = {}, lit = 0;
+    for (uint32_t y = 0; y < d.Height; y++) {
+        const uint8_t* row = static_cast<const uint8_t*>(lr.pBits) + size_t(y) * lr.Pitch;
+        for (uint32_t x = 0; x < d.Width; x++) {
+            const uint8_t* px = row + x * 4;
+            for (int i = 0; i < 3; i++) sum[i] += px[i];
+            lit += (px[0] | px[1] | px[2]) != 0;
+        }
+    }
+    sys->UnlockRect();
+    uint64_t n = uint64_t(d.Width) * d.Height;
+    char text[96];
+    std::snprintf(text, sizeof(text), "mean rgb %u %u %u, %.1f%% not black", unsigned(sum[2] / n), unsigned(sum[1] / n),
+                  unsigned(sum[0] / n), 100.0 * double(lit) / double(n));
+    return text;
+}
+
 void D3D9Backend::Present(const Surface& front) {
     if (!Usable()) return;
     if (g_capture.exchange(false)) LOG_FIRST(1, "d3d9: frame capture (F3) is D3D12's alone");
@@ -2788,6 +2818,10 @@ void D3D9Backend::Present(const Surface& front) {
     dev_->SetViewport(&vp);
     RenderUi();
     Scene(false);
+    bool report = presents_ + 1 == 60 || presents_ + 1 == 1800;
+    if (report)
+        LOGR("d3d9: presented target %s; back buffer %s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
+             PixelStats(dev_.Get(), bb.Get()).c_str());
     // a smaller picture than before leaves its old edges in the window: the window thread paints them black
     RECT frame = FrameRect();
     if (!EqualRect(&frame, &last_frame_rect_)) {
@@ -2803,12 +2837,13 @@ void D3D9Backend::Present(const Surface& front) {
     Bind(nullptr, nullptr);
     bound_rt_surf_ = nullptr;
     presents_++;
-    if (presents_ == 60 || presents_ == 1800) {
+    if (report) {
         const DrawCounts& c = counts_;
         LOGR("d3d9: %llu frames, %u draws made (%u fixed function); refused: %u assembly, %u targets, %u declarations, "
-             "%u shaders, %u geometry, %u by mods; front %08X %ux%u%s",
+             "%u shaders, %u geometry, %u by mods; front %08X %ux%u%s, Present %08X",
              (unsigned long long)presents_, c.made, c.ffp, c.assemble, c.targets, c.decl, c.shader, c.geometry, c.mods,
-             front.data, t ? t->gw : 0, t ? t->gh : 0, t ? (t->drawn ? ", drawn" : ", never drawn") : ", no target");
+             front.data, t ? t->gw : 0, t ? t->gh : 0, t ? (t->drawn ? ", drawn" : ", never drawn") : ", no target",
+             unsigned(hr));
     }
     frame_++;
     DeliverReports(false);

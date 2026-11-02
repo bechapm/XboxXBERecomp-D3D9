@@ -24,4 +24,10 @@ inline const std::filesystem::path& CaptureDir() {
     return dir;
 }
 
+// XBE_D3D9_SOLID set: Direct3D 9's pixel shaders draw magenta, which shows where its draws land
+inline bool D3d9Solid() {
+    static const bool on = std::getenv("XBE_D3D9_SOLID") != nullptr;
+    return on;
+}
+
 }  // namespace diag
