@@ -885,7 +885,7 @@ private:
         std::vector<Jump> jumps;
         uint32_t probe_draws;
         float probe_mean = -1;
-        ComPtr<IDirect3DSurface9> small, small_sys;
+        ComPtr<IDirect3DSurface9> thumb, thumb_sys;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
     float MeanBrightness(IDirect3DSurface9* rt);
@@ -2498,17 +2498,17 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
 float D3D9Backend::MeanBrightness(IDirect3DSurface9* rt) {
     constexpr UINT kW = 160, kH = 120;
     CameraCounts& c = camera_;
-    if (!c.small && (FAILED(dev_->CreateRenderTarget(kW, kH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &c.small,
+    if (!c.thumb && (FAILED(dev_->CreateRenderTarget(kW, kH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &c.thumb,
                                                      nullptr)) ||
-                     FAILED(dev_->CreateOffscreenPlainSurface(kW, kH, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &c.small_sys,
+                     FAILED(dev_->CreateOffscreenPlainSurface(kW, kH, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &c.thumb_sys,
                                                               nullptr)))) {
-        c.small = nullptr;
+        c.thumb = nullptr;
         return -1;
     }
     D3DLOCKED_RECT lr;
-    if (FAILED(dev_->StretchRect(rt, nullptr, c.small.Get(), nullptr, D3DTEXF_LINEAR)) ||
-        FAILED(dev_->GetRenderTargetData(c.small.Get(), c.small_sys.Get())) ||
-        FAILED(c.small_sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+    if (FAILED(dev_->StretchRect(rt, nullptr, c.thumb.Get(), nullptr, D3DTEXF_LINEAR)) ||
+        FAILED(dev_->GetRenderTargetData(c.thumb.Get(), c.thumb_sys.Get())) ||
+        FAILED(c.thumb_sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
         return -1;
     }
     uint64_t sum = 0;
@@ -2516,7 +2516,7 @@ float D3D9Backend::MeanBrightness(IDirect3DSurface9* rt) {
         const uint8_t* row = static_cast<const uint8_t*>(lr.pBits) + size_t(y) * lr.Pitch;
         for (UINT x = 0; x < kW; x++) sum += row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2];
     }
-    c.small_sys->UnlockRect();
+    c.thumb_sys->UnlockRect();
     return float(sum) / float(kW * kH * 3);
 }
 
