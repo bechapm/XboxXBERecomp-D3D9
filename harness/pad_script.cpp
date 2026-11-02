@@ -100,5 +100,6 @@ void PointerWant(bool) {}
 Device LastUsed() { return Device::pad; }
 std::string KeyName(int) { return ""; }
 std::string ControlName(const char*) { return ""; }
+void SaveControls(void*) {}
 
 }  // namespace input
