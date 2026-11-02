@@ -870,6 +870,10 @@ private:
             uint8_t write, blend, src, dst;  // colour write mask, and the blend if on
         };
         std::vector<After> after, after_last;
+        // the frame before a report: the picture in the target of the first marked draw just before and after it, and
+        // what Present is given; whether RTX Remix's picture went in there and stayed
+        bool probe, probed;
+        std::string before_mark, after_mark, at_present;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
     void NoteAfterMark(const char* op, uint32_t from, uint32_t to);
@@ -2364,6 +2368,9 @@ bool D3D9Backend::Offscreen() const {
     return true;
 }
 
+// the mean colour of a target and how much of it is not black, read back (D3D9Backend::Present)
+std::string PixelStats(IDirect3DDevice9* dev, IDirect3DSurface9* rt);
+
 bool Orthographic(const float* p) { return p[3] == 0 && p[7] == 0 && p[11] == 0 && p[15] == 1; }
 
 // the mods' befores, in the order they asked; false leaves the draw out, and no later before or any after is called
@@ -2523,6 +2530,9 @@ void D3D9Backend::ReportCamera() {
              l.offscreen ? "offscreen" : "screen", l.w, l.h);
     else
         LOGR("d3d9: camera: last frame: %u 3D draws on screen, none marked", l.three_d);
+    if (!c.before_mark.empty())
+        LOGR("d3d9: camera: the frame before: its first marked draw's target before it %s; after it %s; presented %s",
+             c.before_mark.c_str(), c.after_mark.c_str(), c.at_present.c_str());
     for (size_t i = 0; i < c.after_last.size(); i++) {
         const CameraCounts::After& a = c.after_last[i];
         auto where = [this](uint32_t data) {
@@ -2763,10 +2773,20 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     CountCamera(sh, drawn);
     if (drawn) {
         CopyFeedback(stages);
+        IDirect3DSurface9* probe = nullptr;
+        if (camera_.probe && !camera_.probed && camera_.frame.marked) {
+            camera_.probed = true;
+            dev_->GetRenderTarget(0, &probe);
+            if (probe) camera_.before_mark = PixelStats(dev_.Get(), probe);
+        }
         IDirect3DQuery9* query = BeginCountedDraw(s);
         if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
         else dev_->DrawPrimitive(g.type, 0, g.prims);
         EndCountedDraw(query);
+        if (probe) {
+            camera_.after_mark = PixelStats(dev_.Get(), probe);
+            probe->Release();
+        }
         ModsAfter();
         counts_.made++;
         if (sh.ffp) counts_.ffp++;
@@ -2984,6 +3004,7 @@ void D3D9Backend::Present(const Surface& front) {
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (ramp_dirty_) UpdateGammaLut();
+    if (camera_.probe && t) camera_.at_present = PixelStats(dev_.Get(), t->surf.Get());
     ComPtr<IDirect3DSurface9> bb;
     dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
     Bind(bb.Get(), nullptr);
@@ -3035,6 +3056,8 @@ void D3D9Backend::Present(const Surface& front) {
     if (!mods::D3d9().draw.empty()) {
         EndCameraFrame();
         if (presents_ % 600 == 0) ReportCamera();
+        camera_.probe = presents_ % 600 == 599;
+        camera_.probed = false;
     }
     frame_++;
     DeliverReports(false);
