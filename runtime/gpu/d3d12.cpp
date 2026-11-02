@@ -2769,6 +2769,7 @@ void D3D12Backend::DeliverReports() {
         const Report& r = reports_.front();
         double pixels = 0;
         for (const Query& q : r.queries) pixels += double(query_counts_[q.index]) / q.samples_per_pixel;
+        testdrive::ReportLog(r.va, pixels, r.queries.size(), r.queries.empty() ? 0.0f : r.queries[0].samples_per_pixel);
         kernel::W32(r.va + kTime, uint32_t(presents_));
         kernel::W32(r.va + kTimeHigh, 0);
         kernel::W32(r.va + kCount, uint32_t(std::lround(pixels)));
