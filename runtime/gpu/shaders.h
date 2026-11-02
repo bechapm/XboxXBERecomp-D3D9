@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -80,6 +81,8 @@ bool ReadsViewportOffset(const std::vector<uint32_t>& program);
 // the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
 // names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
 inline int g_projection_register = -1;
+// every draw as lines, whatever the game's fill mode: a game's debugging tools set it while it runs
+inline std::atomic<bool> g_wireframe{false};
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:

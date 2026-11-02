@@ -2005,7 +2005,7 @@ void D3D9Backend::SetOutputState(const State& s, const Assembled& a, bool ffp) {
     if (a.topology == Topology::Triangles && cull == kCullCw) dcull = D3DCULL_CW;
     if (a.topology == Topology::Triangles && cull == kCullCcw) dcull = D3DCULL_CCW;
     Rs(D3DRS_CULLMODE, dcull);
-    uint32_t fill = s.rs[kRsFillMode];
+    uint32_t fill = g_wireframe ? kFillWireframe : s.rs[kRsFillMode];
     Rs(D3DRS_FILLMODE, fill == kFillWireframe ? D3DFILL_WIREFRAME : fill == kFillPoint ? D3DFILL_POINT : D3DFILL_SOLID);
     Rs(D3DRS_SHADEMODE, SimpleState(s, kMShadeMode) == kShadeFlat ? D3DSHADE_FLAT : D3DSHADE_GOURAUD);
     // the shaders test alpha and fog themselves
