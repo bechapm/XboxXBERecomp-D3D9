@@ -377,7 +377,8 @@ struct PsoKey {
     int32_t zbias;
     float zslope;
     uint32_t rtfmt;
-    uint32_t sprite;  // DrawShaders::sprite
+    uint32_t sprite;   // DrawShaders::sprite
+    uint32_t counted;  // points drawn while the title counts visible pixels
 };
 
 // Blit's settings past the source and its rectangle
@@ -565,7 +566,7 @@ private:
     void KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k);
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
-    void ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool sprite);
+    void ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool sprite, bool counted);
     float TargetScale() const;  // host pixels per console pixel of the bound target
     float RenderTargetShift(const State& s, const DrawShaders& sh) const;
     void FillDepthConstants(const State& s, const DrawShaders& sh, const PsoKey& k, DrawConstants& c) const;
@@ -1640,9 +1641,9 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
 
 // a point is drawn as its whole console pixel, or a sprite as its square, by a geometry shader, solid, front facing
 // and never culled
-void D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool sprite) {
+void D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool sprite, bool counted) {
     uint64_t hash;
-    ID3DBlob* gs = Compile(sprite ? SpriteHlsl() : PointHlsl(), "main", "gs_5_0", hash);
+    ID3DBlob* gs = Compile(sprite ? SpriteHlsl() : PointHlsl(counted), "main", "gs_5_0", hash);
     if (!gs) return;
     d.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
     d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -1672,7 +1673,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
     d.InputLayout = {el, n};
     FillPipelineDesc(k, vs, ps, d);
-    if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d, k.sprite);
+    if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d, k.sprite, k.counted);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
     if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) LOGE("d3d12: pipeline creation failed");
@@ -2840,6 +2841,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     PsoKey k;
     BuildPipelineKey(s, a, sh.vh, sh.ph, k);
     k.sprite = sh.sprite;
+    // a point grown half a host pixel to the top left counts (k + 0.5)^2 / k^2 pixels for one at scale k, 1.56 at 2:
+    // TS2 Siberia read 78 for 50 points and its light glows, sized from that share, filled the screen white
+    k.counted = a.topology == Topology::Points && s.simple[kMCountEnable >> 2];
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
     if (ext_) binds_ = {};  // the extension may set anything
