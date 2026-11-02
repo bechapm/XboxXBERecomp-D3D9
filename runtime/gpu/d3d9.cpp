@@ -895,7 +895,7 @@ private:
         ComPtr<IDirect3DSurface9> thumb, thumb_sys;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
-    void Prime();
+    void Prime(const Geometry* g);
     ComPtr<IDirect3DSurface9> prime_;  // XBE_D3D9_PRIME's target, a row taller than the back buffer
     bool prime_due_ = false;
     float MeanBrightness(IDirect3DSurface9* rt);
@@ -2478,20 +2478,24 @@ static const char* RemixCamera(const float* world, const float* view, const floa
     return min_z >= 1 ? "sky" : "main";
 }
 
-// XBE_D3D9_PRIME, a test: before each frame's first draw, 1 binds a target a row taller than the back buffer and binds
-// the title's back, 2 also draws one pixel into it. RTX Remix puts its picture in at the first UI draw of a frame only
-// after the frame drew into another target first (TS2's scanner map, from the TS2-RTX mod): this finds what of that it
-// needs
-void D3D9Backend::Prime() {
+// XBE_D3D9_PRIME, a test of what RTX Remix needs from a frame before it puts its picture in at the first UI draw: it does
+// only after the frame drew into another target first (TS2's scanner map, from the TS2-RTX mod). Before each frame's
+// first draw, into a target a row taller than the back buffer: 1 binds it and binds the title's back, 2 also draws a
+// pixel into it, 3 draws the frame's first draw into it as well, as the title made it, 4 fills it black
+void D3D9Backend::Prime(const Geometry* g) {
     static const int mode = [] {
         const char* e = std::getenv("XBE_D3D9_PRIME");
         return e ? std::atoi(e) : 0;
     }();
-    if (!mode || !prime_due_) return;
+    if (!mode || !prime_due_ || (mode >= 3) != (g != nullptr)) return;
     prime_due_ = false;
     if (!prime_ && FAILED(dev_->CreateRenderTarget(bb_w_, bb_h_ + 1, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
                                                    &prime_, nullptr))) {
         prime_ = nullptr;
+        return;
+    }
+    if (mode == 4) {
+        dev_->ColorFill(prime_.Get(), nullptr, D3DCOLOR_ARGB(255, 0, 0, 0));
         return;
     }
     ComPtr<IDirect3DSurface9> rt, ds;
@@ -2503,10 +2507,15 @@ void D3D9Backend::Prime() {
     dev_->GetScissorRect(&sc);
     dev_->SetDepthStencilSurface(nullptr);
     dev_->SetRenderTarget(0, prime_.Get());
-    if (mode >= 2) {
+    if (mode == 2) {
         Rs(D3DRS_ALPHABLENDENABLE, FALSE);
         Rs(D3DRS_COLORWRITEENABLE, 15);
         DrawQuad(nullptr, RECT{0, 0, 1, 1}, 0xFF000000, nullptr);
+    } else if (mode == 3) {
+        dev_->SetViewport(&vp);
+        dev_->SetScissorRect(&sc);
+        if (g->indexed) dev_->DrawIndexedPrimitive(g->type, 0, 0, g->vertices, g->first_index, g->prims);
+        else dev_->DrawPrimitive(g->type, 0, g->prims);
     }
     dev_->SetRenderTarget(0, rt.Get());
     dev_->SetDepthStencilSurface(ds.Get());
@@ -2874,7 +2883,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         counts_.targets++;
         return;
     }
-    Prime();
+    Prime(nullptr);
     Scene(true);
 
     // textures first: what the stages hold decides whether fixed function can draw them
@@ -2954,6 +2963,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     CountCamera(sh, drawn);
     if (drawn) {
         CopyFeedback(stages);
+        Prime(&g);
         IDirect3DSurface9* probe = nullptr;
         if (camera_.probe && !camera_.probed && camera_.frame.marked) {
             camera_.probed = true;
