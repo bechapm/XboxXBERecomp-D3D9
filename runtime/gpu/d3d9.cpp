@@ -854,7 +854,7 @@ private:
     // plain transforms (PlainDraw), by program hash; position -1 is a program that is not one
     std::unordered_map<uint64_t, PlainProgram> plain_;
     struct PlainCounts {
-        uint32_t fixed, not_plain, two_d, fog, w_buffer, layout, shader, stage, keep;
+        uint32_t fixed, not_plain, two_d, fog, w_buffer, layout, pixel, shader, stage, keep;
     } plain_counts_{};
     // what Remix is given to find the camera in, reported every ten seconds while a mod hooks the draws: the program
     // draws, and the first that draws the screen in 3D with the transforms it left on the device
@@ -2133,6 +2133,30 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
     }
     Rs(D3DRS_TEXTUREFACTOR, s.rs[kRsTextureFactor]);
 
+    if (sh.plain && s.ps) {
+        // under a title's pixel shader the stages' operations mean nothing: stage 0's texture and the vertex colour, and
+        // every texture bound with the coordinates the program sends it, for what a mod sets and a tool reads
+        Tss(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+        Tss(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        Tss(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+        Tss(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+        Tss(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        Tss(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+        Tss(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        Tss(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        for (DWORD n = 0; n < 4; n++) {
+            int in = sh.plain->tex[n], scale = sh.plain->tex_scale[n];
+            Tss(n, D3DTSS_TEXCOORDINDEX, in >= 0 ? sh.usages[size_t(in)].index : 0);
+            Tss(n, D3DTSS_TEXTURETRANSFORMFLAGS, scale >= 0 ? D3DTTFF_COUNT2 : 0);
+            if (scale >= 0) {
+                const auto& c = s.vsc[size_t(scale)];
+                const float m[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                dev_->SetTransform(D3DTRANSFORMSTATETYPE(D3DTS_TEXTURE0 + n), reinterpret_cast<const D3DMATRIX*>(m));
+            }
+            SetTexture(n, stages.res[n]);
+        }
+        return;
+    }
     DWORD i = 0;
     for (; i < 4; i++) {
         const auto& t = s.tss[i];
@@ -2457,7 +2481,11 @@ const PlainProgram* D3D9Backend::PlainDraw(const State& s, const Assembled& a, c
         return n.layout++, nullptr;
     for (int t : p.tex)
         if (t >= 0 && usages[size_t(t)].usage != 5) return n.layout++, nullptr;
-    if (!FixedFunctionDraws(s, a, stages)) return n.shader++, nullptr;  // a pixel shader, or a stage it cannot draw
+    // a title's pixel shader has no fixed function form here: ps_3_0 cannot follow fixed function and its constants do
+    // not fit ps_2_x. A mod that asked takes the draw with the stages it sets itself (TS2-RTX does for every 3D draw, as
+    // RTX Remix takes colour from no pixel shader); forced with no mod, the draw stays a program
+    if (s.ps && !hooks.fixed_transform) return n.pixel++, nullptr;
+    if (!s.ps && !FixedFunctionDraws(s, a, stages)) return n.shader++, nullptr;  // a stage fixed function cannot draw
     for (int i = 0; i < 4; i++)
         if (stages.res[i] && p.tex[i] < 0) return n.stage++, nullptr;  // a stage reading coordinates the program does not write
     bool zen = bound_ds_ && s.rs[kRsZEnable];
@@ -3419,9 +3447,9 @@ void D3D9Backend::Present(const Surface& front) {
     bool report = presents_ + 1 == 60 || presents_ + 1 == 1800;
     if ((presents_ + 1) % 1800 == 0 && (plain_counts_.fixed || plain_counts_.not_plain)) {
         const PlainCounts& n = plain_counts_;
-        LOGR("d3d9: plain transforms: %u drawn fixed, stayed programs: %u not plain, %u 2D, %u fog, %u W buffer, %u layout, "
-             "%u pixel shader or stage state, %u stage texture, %u a mod's choice", n.fixed, n.not_plain, n.two_d, n.fog,
-             n.w_buffer, n.layout, n.shader, n.stage, n.keep);
+        LOGR("d3d9: plain transforms: %u drawn fixed, stayed programs: %u not plain, %u 2D, %u fog, %u W buffer, %u layout, %u pixel shader, "
+             "%u stage state, %u stage texture, %u a mod's choice", n.fixed, n.not_plain, n.two_d, n.fog,
+             n.w_buffer, n.layout, n.pixel, n.shader, n.stage, n.keep);
     }
     if (report)
         LOGR("d3d9: presented target %s; back buffer %s%s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
