@@ -32,6 +32,7 @@
 #include "app/app.h"
 #include "core/diag.h"
 #include "core/log.h"
+#include "core/testdrive.h"
 #include "gpu/backend.h"
 #include "gpu/ext.h"
 #include "gpu/shaders.h"
@@ -3370,6 +3371,11 @@ void D3D12Backend::Present(const Surface& front) {
 
     presents_++;
     presents_seen_.store(presents_);
+    testdrive::Presented();
+    if (testdrive::SnapDue()) {
+        LOG_FIRST(1, "testdrive: frames are saved by Direct3D 9 alone");
+        testdrive::Snap(0, 0, nullptr, 0);
+    }
     frame_++;
     ReleaseOldTextures();
     ResetFrame();
