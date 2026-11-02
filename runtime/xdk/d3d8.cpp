@@ -214,9 +214,11 @@ void SyncDeferred() {
     for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) g_state.rs[i] = R32(kRenderState + i * 4);
     for (int s = 0; s < 4; s++)
         for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
-    // the title's own fill mode, kept in its memory by SetComplex, or lines for gpu::g_wireframe
+    // the title's own fill mode, kept in its memory by SetComplex, or lines for gpu::g_wireframe. Not for a draw a
+    // visibility test counts: the title reads that count back (fades, glows), and lines would change what it decides
     constexpr uint32_t kFillWireframe = 0x1B01;  // D3DFILL_WIREFRAME
-    g_state.rs[gpu::kRsFillMode] = gpu::g_wireframe ? kFillWireframe : R32(kRenderState + gpu::kRsFillMode * 4);
+    bool counted = g_state.simple[gpu::kMCountEnable >> 2] != 0;
+    g_state.rs[gpu::kRsFillMode] = gpu::g_wireframe && !counted ? kFillWireframe : R32(kRenderState + gpu::kRsFillMode * 4);
 }
 
 float ZScale(const gpu::Surface& zs) {
