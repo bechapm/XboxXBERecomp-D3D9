@@ -223,6 +223,7 @@ struct DrawTextures {
     bool rt[4] = {};       // stage samples a render target
     float wide[4] = {};    // host texels per console texel of a target read into a smaller one, 0 otherwise
     uint64_t id[4] = {};   // what each holds, for mods
+    Target* feedback[4] = {};  // the target drawn into, read through its copy: copied once the draw is made
 };
 
 // a draw as the device will make it, its streams and indices in place (DrawGeometry)
@@ -692,6 +693,7 @@ private:
     void ClearDepth(Target& t, const std::vector<D3DRECT>& rs, DWORD flags, float z, uint32_t stencil);
     void ClearChannels(Target& t, D3DCOLOR color, uint8_t mask, const std::vector<D3DRECT>& rs);
     IDirect3DTexture9* Feedback(Target& t);
+    void CopyFeedback(const DrawTextures& stages);
     // a texture of guest pixels, then a quad of it over (part of) the bound target
     ComPtr<IDirect3DTexture9> PixelTexture(const std::vector<uint8_t>& px, uint32_t pitch, uint32_t w, uint32_t h);
     void DrawQuad(IDirect3DBaseTexture9* tex, const RECT& to, D3DCOLOR color, IDirect3DPixelShader9* ps);
@@ -1393,16 +1395,26 @@ void D3D9Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, ui
     }
 }
 
-// the copy a draw reads of the target it renders to
+// the texture a draw reads the target it renders to through; CopyFeedback fills it
 IDirect3DTexture9* D3D9Backend::Feedback(Target& t) {
     if (!t.fb && FAILED(dev_->CreateTexture(t.w, t.h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
                                             &t.fb, nullptr))) {
         return nullptr;
     }
-    ComPtr<IDirect3DSurface9> fs;
-    t.fb->GetSurfaceLevel(0, &fs);
-    dev_->StretchRect(t.surf.Get(), nullptr, fs.Get(), nullptr, D3DTEXF_POINT);
     return t.fb.Get();
+}
+
+// the targets the draw reads as it renders to them, copied once it is sure to be made: one the mods leave out costs no
+// copy (under RTX Remix, a copy of the picture after Remix put its own in lost that picture)
+void D3D9Backend::CopyFeedback(const DrawTextures& stages) {
+    Target* done = nullptr;
+    for (Target* t : stages.feedback) {
+        if (!t || t == done || !t->fb) continue;
+        ComPtr<IDirect3DSurface9> fs;
+        t->fb->GetSurfaceLevel(0, &fs);
+        dev_->StretchRect(t->surf.Get(), nullptr, fs.Get(), nullptr, D3DTEXF_POINT);
+        done = t;
+    }
 }
 
 constexpr float kUpscaledMin = 1.01f;  // host texels per console texel past rounding: the target is upscaled
@@ -1434,7 +1446,10 @@ IDirect3DBaseTexture9* D3D9Backend::BindTargetTexture(const State& s, int stage,
         info.flags |= kTexWide;
     }
     // the console reads the pixels it is about to overwrite: give the draw a copy
-    if (&t == draw_rt_) return Feedback(t);
+    if (&t == draw_rt_) {
+        stages.feedback[stage] = &t;
+        return Feedback(t);
+    }
     return t.tex.Get();
 }
 
@@ -1688,6 +1703,7 @@ IDirect3DBaseTexture9* D3D9Backend::BindTexture(const State& s, int stage, DrawT
     TexInfo& info = stages.info[stage];
     info = {};
     stages.rt[stage] = false;
+    stages.feedback[stage] = nullptr;
     stages.wide[stage] = 0;
     stages.levels[stage] = 0;
     stages.id[stage] = 0;
@@ -2739,6 +2755,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     bool drawn = !(sh.prog && diag::D3d9SkipProgram(s.vs->hash)) && ModsBefore(s, a, sh, stages, g);
     CountCamera(sh, drawn);
     if (drawn) {
+        CopyFeedback(stages);
         IDirect3DQuery9* query = BeginCountedDraw(s);
         if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
         else dev_->DrawPrimitive(g.type, 0, g.prims);
