@@ -2848,10 +2848,11 @@ uint32_t D3D9Backend::DrawVertexBuffer(uint32_t* data, uint32_t* stride, uint32_
             const uint8_t* base = static_cast<const uint8_t*>(kernel::HostPtr(va));
             if (b.src < base) continue;
             size_t off = size_t(b.src - base);
-            if (off % b.stride || off / b.stride >= kMaxVertices) continue;
+            if (off % b.stride || off / b.stride >= kMaxVertices || off / b.stride < a.lowest_index) continue;
             *data = va;
             *stride = b.stride;
-            *first = uint32_t(off / b.stride);
+            // the base vertex (recomp_mod.h): the buffer starts at the lowest index's vertex
+            *first = uint32_t(off / b.stride) - a.lowest_index;
             return st.vb;
         }
     }

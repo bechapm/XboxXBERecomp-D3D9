@@ -187,6 +187,7 @@ void ResetAssembled(Assembled& out) {
     out.draw_count = 0;
     out.index_count = 0;
     out.base_vertex = 0;
+    out.lowest_index = 0;
 }
 
 // the draw as Assemble got it, plus the vertex range it reads
@@ -458,6 +459,7 @@ bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, con
     d.count = count;
     d.ip = ip;
     d.first = bounds.first;
+    out.lowest_index = ip ? bounds.first : 0;
     d.first_vertex = ip ? bounds.first + s.base_vertex : start;
     d.span = bounds.last - bounds.first + 1;
 
