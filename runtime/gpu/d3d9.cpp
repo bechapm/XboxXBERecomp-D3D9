@@ -831,6 +831,10 @@ private:
     uint32_t bb_h_ = 0;
     float scale_ = 1.0f;
     uint64_t presents_ = 0;
+    // where the draws went, reported twice early on: a black picture says which step refused them
+    struct DrawCounts {
+        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods;
+    } counts_{};
     uint64_t frame_ = 0;
     double fps_ = 0;
     std::chrono::steady_clock::time_point fps_t_ = std::chrono::steady_clock::now();
@@ -1814,8 +1818,10 @@ IDirect3DVertexShader9* D3D9Backend::EnsureVertexShader(const State& s, const As
                               : FixedVertexHlsl(a.regs, a.pretransformed, decode, sh.fk);
     if (sh.sprite) src = SpriteSizeHlsl(std::move(src));
     ComPtr<IDirect3DVertexShader9> vs;
-    if (ID3DBlob* code = Compile(src, "vs_3_0"))
-        dev_->CreateVertexShader(static_cast<const DWORD*>(code->GetBufferPointer()), &vs);
+    if (ID3DBlob* code = Compile(src, "vs_3_0");
+        code && FAILED(dev_->CreateVertexShader(static_cast<const DWORD*>(code->GetBufferPointer()), &vs))) {
+        LOGE("d3d9: a vertex shader was refused");
+    }
     vshaders_[key] = vs;
     return vs.Get();
 }
@@ -1824,8 +1830,10 @@ IDirect3DPixelShader9* D3D9Backend::EnsurePixelShader(const PixelKey& pk, uint64
     auto it = pshaders_.find(key);
     if (it != pshaders_.end()) return it->second.Get();
     ComPtr<IDirect3DPixelShader9> ps;
-    if (ID3DBlob* code = Compile(PixelHlsl(pk), "ps_3_0"))
-        dev_->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &ps);
+    if (ID3DBlob* code = Compile(PixelHlsl(pk), "ps_3_0");
+        code && FAILED(dev_->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &ps))) {
+        LOGE("d3d9: a pixel shader was refused");
+    }
     pshaders_[key] = ps;
     return ps.Get();
 }
@@ -2485,8 +2493,14 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     }
     if (!Usable()) return;
     Assembled& a = asm_;
-    if (!Assemble(s, prim, start, count, indices, a)) return;
-    if (!BindTargets(s)) return;
+    if (!Assemble(s, prim, start, count, indices, a)) {
+        counts_.assemble++;
+        return;
+    }
+    if (!BindTargets(s)) {
+        counts_.targets++;
+        return;
+    }
     Scene(true);
 
     // textures first: what the stages hold decides whether fixed function can draw them
@@ -2495,7 +2509,10 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     draw_ds_ = bound_ds_;
     for (int i = 0; i < 4; i++) stages.res[i] = BindTexture(s, i, stages);
     // a texture copy may have bound other targets
-    if ((bound_rt_ != draw_rt_ || bound_ds_ != draw_ds_) && !BindTargets(s)) return;
+    if ((bound_rt_ != draw_rt_ || bound_ds_ != draw_ds_) && !BindTargets(s)) {
+        counts_.targets++;
+        return;
+    }
 
     DrawShaders sh;
     sh.prog = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
@@ -2513,7 +2530,10 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     uint32_t conv_stride;
     BuildDeclaration(s, a, sh, el, decode, conv_stride);
     IDirect3DVertexDeclaration9* decl = EnsureDeclaration(el);
-    if (!decl) return;
+    if (!decl) {
+        counts_.decl++;
+        return;
+    }
 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
@@ -2528,7 +2548,10 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         if (pk.two_sided && s.rs[kRsCullMode] == kCullCw) pk.two_sided = 2;
         sh.pkey = Hash(&pk, sizeof(pk));
         sh.ps = EnsurePixelShader(pk, sh.pkey);
-        if (!sh.vs || !sh.ps) return;
+        if (!sh.vs || !sh.ps) {
+            counts_.shader++;
+            return;
+        }
         dev_->SetVertexShader(sh.vs);
         dev_->SetPixelShader(sh.ps);
         SetShaderConstants(s, sh, stages, size);
@@ -2543,9 +2566,13 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     Geometry g;
     if (!DrawGeometry(a, el, conv_stride, g)) {
         LOG_FIRST(4, "d3d9: a draw of %u vertices did not fit the buffers", a.vertex_count);
+        counts_.geometry++;
         return;
     }
-    if (!g.prims) return;
+    if (!g.prims) {
+        counts_.geometry++;
+        return;
+    }
     mod_state_ = &s;
     mod_asm_ = &a;
     mod_size_ = size;
@@ -2555,6 +2582,10 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         else dev_->DrawPrimitive(g.type, 0, g.prims);
         EndCountedDraw(query);
         ModsAfter();
+        counts_.made++;
+        if (sh.ffp) counts_.ffp++;
+    } else {
+        counts_.mods++;
     }
     mod_state_ = nullptr;
     mod_asm_ = nullptr;
@@ -2772,6 +2803,13 @@ void D3D9Backend::Present(const Surface& front) {
     Bind(nullptr, nullptr);
     bound_rt_surf_ = nullptr;
     presents_++;
+    if (presents_ == 60 || presents_ == 1800) {
+        const DrawCounts& c = counts_;
+        LOGR("d3d9: %llu frames, %u draws made (%u fixed function); refused: %u assembly, %u targets, %u declarations, "
+             "%u shaders, %u geometry, %u by mods; front %08X %ux%u%s",
+             (unsigned long long)presents_, c.made, c.ffp, c.assemble, c.targets, c.decl, c.shader, c.geometry, c.mods,
+             front.data, t ? t->gw : 0, t ? t->gh : 0, t ? (t->drawn ? ", drawn" : ", never drawn") : ", no target");
+    }
     frame_++;
     DeliverReports(false);
     ReleaseOldTextures();
