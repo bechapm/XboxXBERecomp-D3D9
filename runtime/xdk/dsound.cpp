@@ -1177,7 +1177,12 @@ STREAM(GetInfo, 2) {
     return 0;
 }
 STREAM(GetStatus, 2) {
-    W32(a[1], v.packets.size() < v.max_packets ? 1u : 0u);  // XMEDIASTATUS_ACCEPT_INPUT
+    // DSSTREAMSTATUS: READY (XMEDIASTATUS_ACCEPT_INPUT) in bit 0, PLAYING 0x10000 and PAUSED 0x20000 above it.
+    // TimeSplitters 2 lifts its story intro's fade once its music tests (status & 0x30000) == 0x10000
+    uint32_t status = v.packets.size() < v.max_packets ? 1u : 0u;
+    if (v.paused) status |= 0x20000;
+    else if (!v.packets.empty()) status |= 0x10000;
+    W32(a[1], status);
     return 0;
 }
 STREAM(Process, 3) {
