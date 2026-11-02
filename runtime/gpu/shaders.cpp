@@ -20,10 +20,22 @@ std::string F(const char* fmt, ...) {
     return buf;
 }
 
-// Shader Model 3's vertex shaders end on Direct3D 9's pixel centres, half a host pixel up-left of D3D12's, and on
-// whatever a mod does to the position
-std::string Sm3Position(std::string s) {
-    const char* fix = "    o.pos.xy += hostpx.xy * o.pos.w;\n#ifdef RHI_MOD_POSITION\n    RHI_MOD_POSITION(o.pos);\n#endif\n";
+// A draw's place on a picture wider than the console's (gpu/picture.h, DrawConstants::place): x squeezed by k about an
+// anchor, and under FILL a vertex at the screen's edge kept at the picture's, the rest in proportion, as a nine-slice
+// does. place.x is 1 - k, so constants left at 0 change nothing
+const char* kPlacePosition = R"(    if (place.x != 0) {
+        float sx = (o.pos.x / o.pos.w + 1) * 0.5 * surf.x;
+        float edge = place.z != 0 && abs(sx) <= 0.75 ? -1 : place.z != 0 && sx >= surf.x - 1.75 && sx <= surf.x + 0.75 ? 1 : 0;
+        o.pos.x = edge != 0 ? edge * o.pos.w : o.pos.x * (1 - place.x) + place.y * o.pos.w;
+    }
+)";
+
+// after a vertex shader's position is final: the placement, then under Shader Model 3 Direct3D 9's pixel centres, half
+// a host pixel up-left of D3D12's, and whatever a mod does to the position
+std::string FinishPosition(std::string s) {
+    std::string fix = kPlacePosition;
+    if (g_shader_model3)
+        fix += "    o.pos.xy += hostpx.xy * o.pos.w;\n#ifdef RHI_MOD_POSITION\n    RHI_MOD_POSITION(o.pos);\n#endif\n";
     for (const char* at : {"    o.pos = q;\n", "    o.pos = cp;\n"}) {
         size_t p = s.find(at);
         if (p != std::string::npos) s.insert(p + std::strlen(at), fix);
@@ -66,6 +78,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 lt[56];
     float4 rtshift;
     float4 zparams;
+    float4 place;
 };
 )";
 
@@ -126,7 +139,8 @@ std::string Sm3Common(For f) {
     // a mod's HLSL first: VOut has a NORMAL when it defines RHI_MOD_NORMAL
     std::string s;
     if (f != For::Pixel) {
-        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\n", kSm3DepthClamp, kSm3HostPixel);
+        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\nfloat4 place : register(c%u);\n",
+               kSm3DepthClamp, kSm3HostPixel, kSm3Place);
         s += g_sm3_vertex_prelude + "\n";
     }
     s += kSm3Head;
@@ -1006,7 +1020,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         size_t at = s.rfind("    return o;\n");
         s.insert(at, "#ifdef RHI_MOD_NORMAL\n    o.normal = xnormal;\n    RHI_MOD_NORMAL(o.normal);\n#endif\n");
     }
-    return g_shader_model3 ? Sm3Position(std::move(s)) : s;
+    return FinishPosition(std::move(s));
 }
 
 FixedKey MakeFixedKey(const State& s) {
@@ -1119,7 +1133,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    }\n";
     }
     s += "    oFog = " + v(5, "float4(0,0,0,0)") + ";\n";
-    if (pretransformed) return g_shader_model3 ? Sm3Position(s + kVsEpilogue) : s + kVsEpilogue;
+    if (pretransformed) return FinishPosition(s + kVsEpilogue);
     s += R"(
     VOut o;
     // like the pretransformed ones, target sized passes end half a console pixel short of the far edges
@@ -1139,7 +1153,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     return o;
 }
 )";
-    return g_shader_model3 ? Sm3Position(std::move(s)) : s;
+    return FinishPosition(std::move(s));
 }
 
 std::string PixelHlsl(const PixelKey& k) {
@@ -1295,12 +1309,14 @@ std::string PointHlsl(bool counted) {
 [maxvertexcount(4)]
 void main(point VOut v[1], inout TriangleStream<VOut> strip) {
     float2 half_pixel = v[0].pos.w / surf.xy;  // in clip units, the target spans 2 across surf.xy pixels
-    // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
+    // host pixels per console pixel, across (zparams.w) and down (surf.w): a target at the picture's shape has more
+    // across; a target is read half a host pixel back, so left and top reach that far
+    float2 scale = float2(zparams.w, surf.w);
 #ifdef COUNTED_POINT
-    half_pixel /= surf.w;
+    half_pixel /= scale;
     float2 back = 0;
 #else
-    float2 back = (0.5 - 1e-3) * 2 * half_pixel / surf.w;
+    float2 back = (0.5 - 1e-3) * 2 * half_pixel / scale;
 #endif
     for (int i = 0; i < 4; i++) {
         VOut o = v[0];

@@ -49,6 +49,7 @@ inline bool g_shader_model3 = false;
 // from kSm3ProgramDraw (surf to spread); a fixed function shader's DrawConstants from c0. kSm3ModFirst on are a mod's
 // (d3d9_vertex_hlsl), then rhi_depth_clamp and the host pixel offset. Pixel shaders take DrawConstants from c0.
 constexpr uint32_t kSm3ProgramDraw = 192;
+constexpr uint32_t kSm3Place = 247;     // DrawConstants::place, for every vertex shader
 constexpr uint32_t kSm3ModFirst = 248;
 constexpr uint32_t kSm3DepthClamp = 254;  // rhi_depth_clamp, as a mod knows it; its w is always 0
 constexpr uint32_t kSm3HostPixel = 255;   // host pixels per clip unit: -1 / width, 1 / height of the bound target
@@ -140,6 +141,7 @@ struct DrawConstants {
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
     float rtshift[4];    // per kTexTarget stage: host pixels its reads move along x and y, negative up and left
     float zparams[4];    // ReversedDepthHlsl: a w buffer's scale (0 for a z buffer), its far w, the polygon offset
+    float place[4];      // gpu/picture.h, a 2D draw on a picture wider than the console's: 1 - k, offset, FILL's edges, 0
 };
 
 }  // namespace gpu

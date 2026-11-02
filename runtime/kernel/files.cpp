@@ -94,6 +94,8 @@ struct Link : Object {
     Link() : Object(ObjType::SymLink) {}
 };
 
+// to FATX's two seconds, so the low byte is 0 as on the console: TS2 writes a save folder's time right after its
+// 16-character name in a 16-byte field, and that byte ends the string
 uint64_t ToFileTime(fs::file_time_type t) {
     using namespace std::chrono;
     // one pair of readings for the run: two read per call put the same file a few ticks apart from one query to the
@@ -101,7 +103,8 @@ uint64_t ToFileTime(fs::file_time_type t) {
     static const auto file_now = fs::file_time_type::clock::now();
     static const auto sys_now = system_clock::now();
     auto sys = time_point_cast<nanoseconds>(t - file_now + sys_now);
-    return uint64_t(sys.time_since_epoch().count() / 100 + 116444736000000000ll);
+    uint64_t ft = uint64_t(sys.time_since_epoch().count() / 100 + 116444736000000000ll);
+    return ft - ft % 20000000;
 }
 
 void FillNetworkInfo(uint32_t out, uint64_t t, uint64_t size, bool dir) {
