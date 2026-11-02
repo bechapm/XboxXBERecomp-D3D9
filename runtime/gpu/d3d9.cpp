@@ -867,6 +867,7 @@ private:
             bool drawn, marked, two_d;
             const char* op;  // not a draw: what the renderer did to which target
             uint32_t from, to;
+            uint8_t write, blend, src, dst;  // colour write mask, and the blend if on
         };
         std::vector<After> after, after_last;
     } camera_{};
@@ -2442,9 +2443,13 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
         }
     }
     if (f.marked && c.after.size() < 48) {
-        CameraCounts::After a{d.program_id, d.primitives, 0, uint8_t(d.screen_copies), drawn, false, bool(d.two_d), nullptr, 0, 0};
+        CameraCounts::After a{d.program_id, d.primitives, 0, uint8_t(d.screen_copies), drawn, false, bool(d.two_d), nullptr, 0, 0, 0, 0, 0, 0};
         for (int i = 0; i < 4; i++)
             if (d.textures[i]) a.textures |= uint8_t(1u << i);
+        a.write = uint8_t(rs_ok_[D3DRS_COLORWRITEENABLE] ? rs_[D3DRS_COLORWRITEENABLE] : 15);
+        a.blend = rs_ok_[D3DRS_ALPHABLENDENABLE] && rs_[D3DRS_ALPHABLENDENABLE];
+        a.src = uint8_t(rs_[D3DRS_SRCBLEND]);
+        a.dst = uint8_t(rs_[D3DRS_DESTBLEND]);
         IDirect3DBaseTexture9* vt = nullptr;
         if (drawn && SUCCEEDED(dev_->GetTexture(D3DVERTEXTEXTURESAMPLER3, &vt)) && vt) {
             vt->Release();
@@ -2530,9 +2535,11 @@ void D3D9Backend::ReportCamera() {
                  where(a.to));
             continue;
         }
-        LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, %s", i,
-             (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies,
-             !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
+        char blend[24] = "no blend";
+        if (a.blend) std::snprintf(blend, sizeof(blend), "blend %u %u", a.src, a.dst);
+        LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, %s",
+             i, (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
+             blend, !a.drawn ? "left out" : a.marked ? "marked" : "drawn");
     }
     c = {};
 }
