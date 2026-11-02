@@ -102,4 +102,11 @@ bool MouseTake(float* dx, float* dy) {  // no mouse here
 void LoadControls(const void*) {}  // no bindings here
 void SaveControls(void*) {}
 
+// no mouse either: the pointer is never over the picture, and the pad is what was used
+Pointer GetPointer() { return {}; }
+void PointerWant(bool) {}
+Device LastUsed() { return Device::pad; }
+std::string KeyName(int) { return ""; }
+std::string ControlName(const char*) { return ""; }
+
 }  // namespace input

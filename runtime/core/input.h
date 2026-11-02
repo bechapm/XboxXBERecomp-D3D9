@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 
 namespace input {
 
@@ -30,5 +31,26 @@ bool MouseTake(float* dx, float* dy);  // counts since the last take, right and 
 // window thread, from the game window's messages
 void Window(void* hwnd);  // the window is up: its mouse movement comes as WM_INPUT under mouse_look
 bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);  // true: handled
+
+// the mouse as a pointer over the game's picture, for a game's own menus (docs/controls.md, "Pointer")
+struct Pointer {
+    bool inside = false;   // over the picture, the window in front and the pointer wanted
+    bool shown = false;    // wanted, and the mouse used since a key or a pad was
+    float x = 0, y = 0;    // across and down the picture, 0 to 1 inside it, past them in its bars
+    float aspect = 4.0f / 3.0f;  // the picture's width over its height, as shown
+    uint32_t moved = 0;    // counts the pointer's moves
+    uint8_t held = 0;      // buttons: 1 left, 2 right, 4 middle, 8 x1, 16 x2
+    uint32_t presses[5] = {};  // counts each button's presses, the order of held's bits
+    int32_t wheel = 0;     // notches turned while wanted, up positive; a running total
+};
+Pointer GetPointer();  // any thread
+// any thread: a menu wants the pointer, or no longer does. Each caller pairs its own calls, and the pointer is wanted
+// while any caller wants it. While wanted, mouse_look lets the pointer go and the mouse's buttons and wheel are the
+// pointer's, not the controls'; a button held when the want ends stays the pointer's until let go
+void PointerWant(bool on);
+enum class Device : uint8_t { pad, keyboard, mouse };
+Device LastUsed();  // the last controller 1 used: a key, the mouse or a pad
+std::string KeyName(int vk);  // a Windows virtual key as the keyboard calls it ("Enter", "Esc"), "" for none
+std::string ControlName(const char* control);  // the first key or mouse button bound to a control, "" for none
 
 }  // namespace input
