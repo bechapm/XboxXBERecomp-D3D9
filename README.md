@@ -63,6 +63,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 - **Direct3D 8** - Implements Direct3D 8 as the XDK does it, including immediate mode draws, palettes, gamma ramps and Direct3D code built into the game.
 - **Native Direct3D 12 Renderer** - Translates the Xbox's vertex programs, pixel combiners and fixed function pipeline to HLSL, with rendering on its own thread.
 - **Native Direct3D 9 Renderer** - Draws with Direct3D 9 instead when `renderer = "d3d9"` is in the settings file, using its fixed function pipeline wherever it matches the Xbox, for tools that hook Direct3D 9 such as RTX Remix. See [docs/d3d9.md](docs/d3d9.md).
+- **Any Picture Shape** - Shows a game that widens its own camera at any shape from 4:3 to 32:9 (`aspect_ratio` in the settings file), with its 2D placed by anchors the game names, as in a modern UI layout. See [docs/widescreen.md](docs/widescreen.md).
 - **Host Code in Game Tables** - Gives host functions guest addresses (`dispatch::HostThunk`, `runtime/cpu/dispatch.h`), so a game's own function tables, callbacks and menu classes can hold host code.
 - **Renderer Extensions** - Allows a game to change render targets, add passes and add to the generated shaders through `gpu::Extension`, set with `gpu::SetExtension` from `GameInfo::init`.
 

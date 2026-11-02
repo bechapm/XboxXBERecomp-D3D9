@@ -35,6 +35,7 @@
 #include "core/testdrive.h"
 #include "gpu/backend.h"
 #include "gpu/ext.h"
+#include "gpu/picture.h"
 #include "gpu/shaders.h"
 #include "gpu/texture.h"
 #include "gpu/texturedumper.h"
@@ -566,7 +567,8 @@ private:
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
     void ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool sprite);
-    float TargetScale() const;  // host pixels per console pixel of the bound target
+    float TargetScale() const;  // host pixels per console pixel of the bound target, down
+    bool ScreenSized(uint32_t gw, uint32_t gh) const { return gw == guest_w_ && gh == guest_h_; }
     float RenderTargetShift(const State& s, const DrawShaders& sh) const;
     void FillDepthConstants(const State& s, const DrawShaders& sh, const PsoKey& k, DrawConstants& c) const;
     uint8_t* UploadVertexConstants(const State& s);
@@ -584,7 +586,7 @@ private:
     void SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages);
     uint32_t EnsureViewSet(const DrawTextures& stages);
     uint32_t EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const Placed& pl);
     void SetBlendFactorStencilRef(const State& s);
     void UpdateTargetUsed(uint32_t data);
     void DrawGeometry(const Assembled& a);
@@ -767,6 +769,10 @@ private:
     uint32_t bb_w_ = 0;
     uint32_t bb_h_ = 0;
     float scale_ = 1.0f;
+    // the screen's targets' host width over their render scale width: the picture's shape over the console's, 1 but for
+    // a game that widens its own view (gpu/picture.h)
+    float wide_ = 1.0f;
+    Placed place_;  // the draw in hand's
     // surfaces locked without a wait: copies in flight, the newest finished one goes to guest memory
     struct Late {
         ComPtr<ID3D12Resource> rb[kFrames];
@@ -824,7 +830,8 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
                         ui_heap_->GetCPUDescriptorHandleForHeapStart(), ui_heap_->GetGPUDescriptorHandleForHeapStart());
     LoadSettings();
     Begin();
-    LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f", width, height, bb_w_, bb_h_, scale_);
+    LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f, picture %.3f wide", width, height, bb_w_, bb_h_, scale_,
+         app::PictureAspect());
     return true;
 }
 
@@ -961,6 +968,7 @@ void D3D12Backend::CreateGammaLut() {
 
 void D3D12Backend::LoadSettings() {
     scale_ = app::RenderScale(guest_h_);
+    wide_ = PictureWide(guest_w_, guest_h_);
     texturedumper::Update();
     ext_ = g_extension.get();
     if (ext_) {
@@ -1080,7 +1088,8 @@ void D3D12Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator 
 bool D3D12Backend::CreateTargetResource(Target& t, const Surface& s) {
     float sc = scale_;
     if (ext_) ext_->MakeTarget(s, t.depth, t.gw, t.gh, sc, t.fmt);
-    t.w = std::max(1u, uint32_t(std::lround(t.gw * sc)));
+    // the screen's size: at the picture's shape
+    t.w = std::max(1u, uint32_t(std::lround(t.gw * sc * (ScreenSized(t.gw, t.gh) ? wide_ : 1.0f))));
     t.h = std::max(1u, uint32_t(std::lround(t.gh * sc)));
     D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
     D3D12_RESOURCE_DESC td = Texture2DDesc(DXGI_FORMAT_UNKNOWN, t.w, t.h);
@@ -1652,8 +1661,8 @@ void D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool spri
 
 float D3D12Backend::TargetScale() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
-    if (!t || !t->gw) return 1;
-    return float(t->w) / float(t->gw);
+    if (!t || !t->gh) return 1;
+    return float(t->h) / float(t->gh);  // down: across, a target at the picture's shape has more
 }
 
 // the XDK's screen space offset puts the console's positions half a pixel right and down of the host's, unless a
@@ -1704,7 +1713,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     info.kind = kTex2D;
     // a pass shrinking it averages each tap over a console texel, else upscaled taps skip texels and ghost
     Target* rt = FindTarget(s.rt, false);
-    float k = float(t.w) / (t.gw * stages.k[stage]);
+    float k = float(t.h) / (t.gh * stages.k[stage]);
     if (!t.depth && box && k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) {
         stages.wide[stage] = k;
         info.flags |= kTexWide;
@@ -2147,7 +2156,7 @@ bool OffsetsPolygons(const State& s, Topology topology) {
 
 // polygon offset slopes are per console pixel, an upscaled target's pixels are smaller
 float HostSlopeScale(const State& s, const Target* ds) {
-    return Bits(SimpleState(s, kMSlopeScale)) * (ds ? float(ds->w) / ds->gw : 1.0f);
+    return Bits(SimpleState(s, kMSlopeScale)) * (ds ? float(ds->h) / ds->gh : 1.0f);
 }
 
 void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k) {
@@ -2460,6 +2469,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
+    PlaceConstant(place_, c.place);
     if (!last_dc_gpu_ || std::memcmp(&last_dc_, &c, sizeof(c))) {
         Alloc dc = Upload(sizeof(DrawConstants), 256);
         std::memcpy(dc.cpu, &c, sizeof(c));
@@ -2618,22 +2628,24 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
     binds_.samplers = samplers;
 }
 
-// viewport covers the target, the guest viewport is in the shader; scissor clips to it
-void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
+// viewport covers the target, the guest viewport is in the shader; scissor clips to it, placed with the draw
+void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const Placed& pl) {
     float W = float(bound_rt_ ? bound_rt_->w : bound_ds_->w);
     float H = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
+    uint32_t gh = bound_rt_ ? bound_rt_->gh : bound_ds_->gh;
     D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
-    float sc = W / gw;
-    LONG x0 = LONG(s.viewport.x * sc);
-    LONG y0 = LONG(s.viewport.y * sc);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sc);
-    LONG y1 = LONG((s.viewport.y + s.viewport.h) * sc);
+    float sy = H / float(std::max(gh, 1u));
+    float gx0 = float(s.viewport.x), gx1 = float(s.viewport.x + s.viewport.w);
+    LONG y0 = LONG(s.viewport.y * sy);
+    LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sc));
-        y0 = std::max(y0, LONG(s.scissors[1] * sc));
-        x1 = std::min(x1, LONG(s.scissors[2] * sc));
-        y1 = std::min(y1, LONG(s.scissors[3] * sc));
+        gx0 = std::max(gx0, float(s.scissors[0]));
+        y0 = std::max(y0, LONG(s.scissors[1] * sy));
+        gx1 = std::min(gx1, float(s.scissors[2]));
+        y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
+    long x0, x1;
+    pl.Scissor(gx0, gx1, gw, uint32_t(W), x0, x1);
     D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
                     std::clamp<LONG>(x1, 0, LONG(W)), std::clamp<LONG>(y1, 0, LONG(H))};
     bool same = binds_.rasterizer && !std::memcmp(&vp, &binds_.viewport, sizeof(vp)) &&
@@ -2850,6 +2862,11 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
+    // its place on a picture wider than the console's: the screen's targets are that shape, wide_ across
+    {
+        const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+        place_ = t && ScreenSized(t->gw, t->gh) ? Place(s, a, sh.prog, t->gw, t->gh, wide_) : Placed{};
+    }
     UploadConstants(s, sh, k, stages, size, c);
     if (ext_) binds_ = {};
 
@@ -2861,7 +2878,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
     // texture views and samplers, viewport and scissor, blend factor and stencil reference
     SetTextureViewsAndSamplers(s, a, stages);
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, place_);
     SetBlendFactorStencilRef(s);
 
     // geometry, counted while the title runs a visibility test
@@ -2872,9 +2889,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
 // a guest rect scaled to the target and clamped to it
 D3D12_RECT ScaledRect(const Target& t, int x0, int y0, int x1, int y1) {
-    float sc = float(t.w) / t.gw;
-    return {std::clamp<LONG>(LONG(x0 * sc), 0, t.w), std::clamp<LONG>(LONG(y0 * sc), 0, t.h),
-            std::clamp<LONG>(LONG(x1 * sc), 0, t.w), std::clamp<LONG>(LONG(y1 * sc), 0, t.h)};
+    float sx = float(t.w) / t.gw, sy = float(t.h) / t.gh;
+    return {std::clamp<LONG>(LONG(x0 * sx), 0, t.w), std::clamp<LONG>(LONG(y0 * sy), 0, t.h),
+            std::clamp<LONG>(LONG(x1 * sx), 0, t.w), std::clamp<LONG>(LONG(y1 * sy), 0, t.h)};
 }
 
 // rs: the rects buffer, reused across targets
@@ -3049,8 +3066,8 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
     Transition(dst_t.res.Get(), dst_t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), dst_t.view, rtv_inc_);
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
-    float src_scale = float(src_t.w) / src_t.gw;
-    float dst_scale = float(dst_t.w) / dst_t.gw;
+    float src_x = float(src_t.w) / src_t.gw, src_y = float(src_t.h) / src_t.gh;
+    float dst_x = float(dst_t.w) / dst_t.gw, dst_y = float(dst_t.h) / dst_t.gh;
     bool listed = l.count && l.src_rects;
     uint32_t n = listed ? l.count : 1;
     for (uint32_t i = 0; i < n; i++) {
@@ -3059,8 +3076,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         DrawnRect r{.x0 = 0, .y0 = 0, .x1 = whole_w, .y1 = whole_h};
         if (listed) r = ReadDrawnRect(l.src_rects, l.dst_points, i);
         if (r.x1 <= r.x0 || r.y1 <= r.y0) continue;
-        D3D12_VIEWPORT vp{r.dx * dst_scale, r.dy * dst_scale, (r.x1 - r.x0) * dst_scale, (r.y1 - r.y0) * dst_scale,
-                          0, 1};
+        D3D12_VIEWPORT vp{r.dx * dst_x, r.dy * dst_y, (r.x1 - r.x0) * dst_x, (r.y1 - r.y0) * dst_y, 0, 1};
         LONG right = std::min(LONG(vp.TopLeftX + vp.Width), LONG(dst_t.w));
         LONG bottom = std::min(LONG(vp.TopLeftY + vp.Height), LONG(dst_t.h));
         D3D12_RECT scissor{LONG(vp.TopLeftX), LONG(vp.TopLeftY), right, bottom};
@@ -3069,7 +3085,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         cl_->RSSetScissorRects(1, &scissor);
         binds_ = {};
         float uv[4] = {r.x0 / src_t.gw, r.y0 / src_t.gh, (r.x1 - r.x0) / src_t.gw, (r.y1 - r.y0) / src_t.gh};
-        uint32_t taps = uint32_t(std::ceil(std::max(src_scale / dst_scale, 1.0f) - kTapsSlack));
+        uint32_t taps = uint32_t(std::ceil(std::max({src_x / dst_x, src_y / dst_y, 1.0f}) - kTapsSlack));
         float mul = 1 / dst_t.range;
         BlitOptions o{.alpha = true, .taps = taps, .mul = mul, .rtv = dst_t.fmt};
         Blit(src_res, src_t.fmt, uv, o);
@@ -3085,7 +3101,7 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
     Transition(dst_t.res.Get(), dst_t.state, D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION dl{dst_t.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     D3D12_TEXTURE_COPY_LOCATION sl{src_res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-    float dst_scale = float(dst_t.w) / dst_t.gw;
+    float dst_x = float(dst_t.w) / dst_t.gw, dst_y = float(dst_t.h) / dst_t.gh;
     bool listed = l.count && l.src_rects;
     uint32_t n = listed ? l.count : 1;
     for (uint32_t i = 0; i < n; i++) {
@@ -3094,16 +3110,16 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
         uint32_t dy = 0;
         if (listed) {
             GuestRect r = ReadGuestRect(l.src_rects, i);
-            b.left = ScaleUnsigned(r.left, dst_scale);
-            b.top = ScaleUnsigned(r.top, dst_scale);
-            b.right = std::min(ScaleUnsigned(r.right, dst_scale), src_t.w);
-            b.bottom = std::min(ScaleUnsigned(r.bottom, dst_scale), src_t.h);
+            b.left = ScaleUnsigned(r.left, dst_x);
+            b.top = ScaleUnsigned(r.top, dst_y);
+            b.right = std::min(ScaleUnsigned(r.right, dst_x), src_t.w);
+            b.bottom = std::min(ScaleUnsigned(r.bottom, dst_y), src_t.h);
             dx = b.left;
             dy = b.top;
             if (l.dst_points) {
                 GuestPoint p = ReadGuestPoint(l.dst_points, i);
-                dx = ScaleUnsigned(p.x, dst_scale);
-                dy = ScaleUnsigned(p.y, dst_scale);
+                dx = ScaleUnsigned(p.x, dst_x);
+                dy = ScaleUnsigned(p.y, dst_y);
             }
         }
         if (b.right <= b.left || b.bottom <= b.top || dx >= dst_t.w || dy >= dst_t.h) continue;
@@ -3137,8 +3153,9 @@ void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
     Target* dst_t = EnsureTarget(dst, false);
     if (!dst_t || src_t == dst_t) return;
     CopyList l{.count = count, .src_rects = src_rects, .dst_points = dst_points};
-    if (src_t->fmt != dst_t->fmt) {
-        // formats differ: drawn across
+    // formats or scales differ (a target at the picture's shape into a smaller one): drawn across
+    if (src_t->fmt != dst_t->fmt || uint64_t(src_t->w) * dst_t->gw != uint64_t(dst_t->w) * src_t->gw ||
+        uint64_t(src_t->h) * dst_t->gh != uint64_t(dst_t->h) * src_t->gh) {
         CopyByDraw(*src_t, src_t->res.Get(), src_t->state, *dst_t, l);
         return;
     }
@@ -3225,9 +3242,8 @@ void D3D12Backend::UploadGammaRamp() {
 }
 
 void D3D12Backend::BlitFrame(Target& t) {
-    // 16:9 when the console reports a widescreen display, else 4:3
-    bool wide = app::Widescreen();
-    float aspect = wide ? 16.0f / 9.0f : 4.0f / 3.0f;
+    // at the picture's shape (app::PictureAspect)
+    float aspect = app::PictureAspect();
     float w = float(bb_w_);
     float h = float(bb_h_);
     float vw = std::min(w, h * aspect);
@@ -3372,6 +3388,7 @@ void D3D12Backend::Present(const Surface& front) {
     presents_++;
     presents_seen_.store(presents_);
     testdrive::Presented();
+    PlacementFrame();
     if (testdrive::SnapDue()) {
         LOG_FIRST(1, "testdrive: frames are saved by Direct3D 9 alone");
         testdrive::Snap(0, 0, nullptr, 0);
@@ -3393,12 +3410,14 @@ void D3D12Backend::WaitGpuFrame(uint64_t n) {
 void D3D12Backend::ApplySettings() {
     if (texturedumper::Update()) ReleasePackTextures();
     float want = app::RenderScale(guest_h_);
-    bool remake = ext_ && ext_->Settings();
+    float wide = PictureWide(guest_w_, guest_h_);
+    bool remake = (ext_ && ext_->Settings()) || std::fabs(wide - wide_) > 1e-4f;
     if (std::fabs(want - scale_) > 1e-4f || remake) {
         Flush();
         for (auto& [key, tg] : targets_) (tg.depth ? free_dsv_ : free_rtv_).push_back(tg.view);
         targets_.clear();
         scale_ = want;
+        wide_ = wide;
         if (ext_) ext_->Reset(*this);
         bound_rt_ = bound_ds_ = nullptr;
     }
