@@ -56,6 +56,8 @@ private:
 };
 
 std::unique_ptr<Backend> CreateBackend();
+// Direct3D 9, for tools that hook it (d3d9.cpp)
+std::unique_ptr<Backend> CreateD3D9Backend();
 // the same backend driven from a thread of its own: calls return once recorded
 std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner);
 

@@ -62,6 +62,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 ### Graphics
 - **Direct3D 8** - Implements Direct3D 8 as the XDK does it, including immediate mode draws, palettes, gamma ramps and Direct3D code built into the game.
 - **Native Direct3D 12 Renderer** - Translates the Xbox's vertex programs, pixel combiners and fixed function pipeline to HLSL, with rendering on its own thread.
+- **Native Direct3D 9 Renderer** - Draws with Direct3D 9 instead when `renderer = "d3d9"` is in the settings file, using its fixed function pipeline wherever it matches the Xbox, for tools that hook Direct3D 9 such as RTX Remix. See [docs/d3d9.md](docs/d3d9.md).
 - **Renderer Extensions** - Allows a game to change render targets, add passes and add to the generated shaders through `gpu::Extension`, set with `gpu::SetExtension` from `GameInfo::init`.
 
 ### Audio
@@ -69,16 +70,18 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### Input
 - **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
+- **Keyboard and Mouse** - Plays as controller 1 beside any pad, with keys and mouse buttons bound in the settings file and the mouse on the right stick. See [docs/controls.md](docs/controls.md).
 
 ### General
 - **Disc Images** - Runs the game from an ISO in the `assets` folder, either a whole disc dump or the game partition, or from the extracted data files.
 - **System Link** - System Link can be played over LAN, or by directly connecting to a friend's IP address.
 - **Bink Movies** - Fixes Bink movies playing too fast above 30 FPS and crashing on fast reads, for games that use Bink.
+- **Mods** - Loads libraries from a `mods` folder beside the exe, with hooks into each frame and, under Direct3D 9, each draw. See [docs/mods.md](docs/mods.md).
 - **Crash Dumps** - Writes crash dumps to a `CrashDumps` folder beside the exe.
 
 ### Miscellaneous
 - **Boot Splash** - Place a `splash.png` (or `.bmp`) beside the exe to display a splash screen at launch.
-- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures a frame with F3 when `XBE_CAPTURE_DIR` is set and enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG`.
+- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures a frame with F3 when `XBE_CAPTURE_DIR` is set, enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG` and silences the sound for test runs with `XBE_MUTE`.
 - **Headless Harness** - Builds and runs a game on Linux without a window, GPU, audio or controller, for testing.
 - **SDK Sync** - Keeps the `sdk/` copies in game repositories in step with this repository.
 

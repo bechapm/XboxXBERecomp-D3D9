@@ -25,9 +25,13 @@ enum : uint32_t {
     WM_LBUTTONUP = 0x0202,
 };
 enum { WA_INACTIVE = 0, HTCLIENT = 1 };
-enum { VK_RETURN = 0x0D, VK_ESCAPE = 0x1B, VK_F3 = 0x72, VK_F10 = 0x79, VK_OEM_3 = 0xC0 };
+enum { VK_RETURN = 0x0D, VK_ESCAPE = 0x1B, VK_SPACE = 0x20, VK_F3 = 0x72, VK_F10 = 0x79, VK_OEM_3 = 0xC0 };
 #define LOWORD(v) ((uint16_t)((uintptr_t)(v) & 0xFFFF))
 #define MAKEINTRESOURCEW(i) ((const wchar_t*)(uintptr_t)(uint16_t)(i))
 inline HCURSOR LoadCursorW(void*, const wchar_t*) { return nullptr; }
 inline HCURSOR SetCursor(HCURSOR) { return nullptr; }
 inline short GetAsyncKeyState(int) { return 0; }
+inline HWND GetForegroundWindow() { return nullptr; }
+// no desktop to show a message on: the text goes nowhere, the caller logs it as well
+enum : UINT { MB_ICONERROR = 0x10, MB_TOPMOST = 0x40000 };
+inline int MessageBoxW(HWND, const wchar_t*, const wchar_t*, UINT) { return 1; }

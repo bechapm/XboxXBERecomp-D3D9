@@ -125,6 +125,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
     }
     if (intptr_t result = 0; kGame.message && kGame.message(hwnd, msg, wp, lp, &result)) return result;
+    if (intptr_t result = 0; input::Message(hwnd, msg, wp, lp, &result)) return result;
     switch (msg) {
         case WM_KEYDOWN:
             if (wp == VK_F3) DumpThreads();
@@ -286,6 +287,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     ImGui_ImplWin32_Init(app::g_hwnd);
 
     input::Init();
+    input::Window(app::g_hwnd);
     if (app::kGame.window) app::kGame.window(app::g_hwnd);
     std::wstring hdd = app::Instance() > 1 ? L"hdd" + std::to_wstring(app::Instance()) : L"hdd";
     if (app::Instance())

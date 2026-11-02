@@ -16,6 +16,7 @@
 #include <toml++/toml.hpp>
 
 #include "app/app.h"
+#include "core/input.h"
 #include "core/log.h"
 
 namespace app {
@@ -35,10 +36,12 @@ Settings& Get() {
 
 void Load() {
     Settings& s = Get();
+    s.mouse_look = kGame.mouse_look;
     toml::table t;
     try {
         t = toml::parse_file(File().string());
     } catch (...) {
+        input::LoadControls(nullptr);
         return;
     }
     std::string mode = t["display_mode"].value_or(std::string(kModes[uint32_t(s.display_mode)]));
@@ -54,6 +57,11 @@ void Load() {
     s.dump_textures = t["dump_textures"].value_or(s.dump_textures);
     s.texture_dump_format = std::min(t["texture_dump_format"].value_or(s.texture_dump_format), 1u);
     s.join_ip = t["join_ip"].value_or(s.join_ip);
+    s.renderer = t["renderer"].value_or(s.renderer);
+    s.keyboard_mouse = t["keyboard_mouse"].value_or(s.keyboard_mouse);
+    s.mouse_look = t["mouse_look"].value_or(s.mouse_look);
+    s.mouse_sensitivity = std::clamp(t["mouse_sensitivity"].value_or(s.mouse_sensitivity), 1u, 100u);
+    input::LoadControls(t["controls"].as_table());
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
         else *o.value = t[o.key].value_or(*o.value);
@@ -75,11 +83,18 @@ toml::table Table() {
                   {"custom_textures", s.custom_textures},
                   {"dump_textures", s.dump_textures},
                   {"texture_dump_format", int64_t(s.texture_dump_format)},
-                  {"join_ip", s.join_ip}};
+                  {"join_ip", s.join_ip},
+                  {"renderer", s.renderer},
+                  {"keyboard_mouse", s.keyboard_mouse},
+                  {"mouse_look", s.mouse_look},
+                  {"mouse_sensitivity", int64_t(s.mouse_sensitivity)}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
     }
+    toml::table controls;
+    input::SaveControls(&controls);
+    t.insert("controls", std::move(controls));
     if (kGame.save) kGame.save(&t);
     return t;
 }

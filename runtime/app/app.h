@@ -27,6 +27,10 @@ struct Settings {
     bool dump_textures = false;      // each texture once into textures\dumps\ beside the exe
     uint32_t texture_dump_format = 0;  // 0 PNG, 1 DDS
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
+    std::string renderer = "d3d12";        // "d3d9" draws with Direct3D 9, for D3D9 tools such as RTX Remix
+    bool keyboard_mouse = true;      // controller 1 is the keyboard and mouse too, bound in [controls]
+    bool mouse_look = false;         // the mouse turns controller 1's right stick; GameInfo::mouse_look by default
+    uint32_t mouse_sensitivity = 80;  // 1 to 100
 };
 
 Settings& Get();
@@ -98,6 +102,9 @@ struct GameInfo {
     void (*ui)(double fps);        // each frame inside the ImGui frame, UiLock held
     void (*pad)(int port, input::Pad& pad);  // a polled pad before the game gets it
     void (*rumble)(int port, uint16_t& left, uint16_t& right);
+    // keyboard and mouse defaults: control and sources, "a" = "key:E mouse:left", over the built-in keys (input.cpp)
+    std::vector<std::pair<const char*, const char*>> controls;
+    bool mouse_look;  // the mouse_look setting's default
 };
 extern const GameInfo kGame;
 
