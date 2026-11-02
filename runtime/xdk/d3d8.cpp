@@ -18,6 +18,7 @@
 
 #include "app/app.h"
 #include "core/diag.h"
+#include "core/testdrive.h"
 #include "gpu/backend.h"
 #include "gpu/shaders.h"
 #include "gpu/simple_dirty.h"
@@ -328,6 +329,13 @@ void VerticalBlank(X86Context& ctx) {
     for (;;) {
         next = std::max(next + std::chrono::microseconds(16667), clock::now());
         std::this_thread::sleep_until(next);
+        if (testdrive::Lockstep()) {
+            // no blank until the title has swapped since the last one; a load swaps nothing, so 2 s at most
+            auto held = clock::now();
+            while (Dev(kDevSwapCount) == shown && clock::now() - held < std::chrono::seconds(2))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            next = clock::now();
+        }
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
         ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
