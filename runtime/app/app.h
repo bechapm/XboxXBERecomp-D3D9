@@ -43,6 +43,7 @@ struct Mode {
     uint32_t width, height;
 };
 Mode Desktop();
+std::vector<Mode> DisplayModes();  // the game window's monitor's modes, width then height ascending, no repeats
 Mode Output();
 float RenderScale(uint32_t guest_height);
 // the output is 3:2 or wider: the console reports a widescreen TV and the frame is shown 16:9, else 4:3 as on a 4:3 TV

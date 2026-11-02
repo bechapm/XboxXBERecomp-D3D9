@@ -33,6 +33,7 @@
 #include "app/app.h"
 #include "core/diag.h"
 #include "core/log.h"
+#include "core/testdrive.h"
 #include "gpu/backend.h"
 #include "gpu/shaders.h"
 #include "gpu/texture.h"
@@ -659,6 +660,7 @@ private:
     // Init, in order
     bool CreateDevice(HWND hwnd);
     void FillPresentParams(D3DPRESENT_PARAMETERS& pp) const;
+    void SnapBackBuffer(IDirect3DSurface9* bb);  // testdrive: the frame about to be shown, into a .bmp
     bool CreateDeviceObjects();
     // device loss of a plain (not Ex) device: false while the device cannot draw
     bool Usable();
@@ -3198,15 +3200,17 @@ void D3D9Backend::CountFps() {
     }
 }
 
-// a new render scale makes every target and the back buffer again
+// a new render scale or vsync makes every target and the back buffer again
 void D3D9Backend::ApplySettings() {
     if (texturedumper::Update()) pack_textures_.clear(), Invalidate();
     float want = app::RenderScale(guest_h_);
-    if (std::fabs(want - scale_) <= 1e-4f) return;
+    bool rescale = std::fabs(want - scale_) > 1e-4f;
+    if (!rescale && app::Get().vsync == vsync_) return;
+    vsync_ = app::Get().vsync;
     scale_ = want;
     Scene(false);
     Bind(nullptr, nullptr);
-    targets_.clear();
+    targets_.clear();  // a plain device's reset frees them either way
     dummies_.clear();
     prime_.Reset();
     bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_)));
@@ -3226,7 +3230,21 @@ void D3D9Backend::ApplySettings() {
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    LOGI("d3d9: render scale %.3f, %ux%u back buffer", scale_, bb_w_, bb_h_);
+    LOGI("d3d9: render scale %.3f, %ux%u back buffer, vsync %s", scale_, bb_w_, bb_h_, vsync_ ? "on" : "off");
+}
+
+void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
+    D3DSURFACE_DESC d;
+    ComPtr<IDirect3DSurface9> sys;
+    D3DLOCKED_RECT lr;
+    if (!bb || FAILED(bb->GetDesc(&d)) ||
+        FAILED(dev_->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) ||
+        FAILED(dev_->GetRenderTargetData(bb, sys.Get())) || FAILED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+        testdrive::Snap(0, 0, nullptr, 0);
+        return;
+    }
+    testdrive::Snap(d.Width, d.Height, static_cast<const uint8_t*>(lr.pBits), uint32_t(lr.Pitch));
+    sys->UnlockRect();
 }
 
 // the mean colour and the share of pixels not black of a render target, for the early reports
@@ -3293,6 +3311,7 @@ void D3D9Backend::Present(const Surface& front) {
     dev_->SetViewport(&vp);
     RenderUi();
     Scene(false);
+    if (testdrive::SnapDue()) SnapBackBuffer(bb.Get());
     bool report = presents_ + 1 == 60 || presents_ + 1 == 1800;
     if (report)
         LOGR("d3d9: presented target %s; back buffer %s%s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
@@ -3312,6 +3331,7 @@ void D3D9Backend::Present(const Surface& front) {
     Bind(nullptr, nullptr);
     bound_rt_surf_ = nullptr;
     presents_++;
+    testdrive::Presented();
     if (report) {
         const DrawCounts& c = counts_;
         LOGR("d3d9: %llu frames, %u draws made (%u fixed function); refused: %u assembly, %u targets, %u declarations, "

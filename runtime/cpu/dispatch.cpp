@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "cpu/dispatch.h"
 #include "cpu/x86_ops.h"
 #include "kernel/kernel.h"
 
