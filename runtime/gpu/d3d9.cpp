@@ -808,7 +808,7 @@ private:
         float title[16];  // the title's when it was set: the title setting another ends it
     };
     ModTransform mod_xf_[3];
-    uint32_t screens_[4] = {};  // the surfaces presented, by data address
+    uint32_t screens_[4] = {};  // the surfaces presented, by virtual data address
     // visibility tests: an occlusion query per counted draw, summed into report memory once the GPU is done
     struct Query {
         IDirect3DQuery9* q;
@@ -2846,9 +2846,11 @@ void D3D9Backend::Present(const Surface& front) {
     if (!Usable()) return;
     if (g_capture.exchange(false)) LOG_FIRST(1, "d3d9: frame capture (F3) is D3D12's alone");
     // the surfaces the title presents are its screen: draws into any other are offscreen, for the mods
-    if (std::find(std::begin(screens_), std::end(screens_), front.data) == std::end(screens_)) {
+    // by virtual address, as the targets are kept
+    uint32_t screen = mem::VirtualFromPhysical(front.data);
+    if (std::find(std::begin(screens_), std::end(screens_), screen) == std::end(screens_)) {
         std::copy_backward(std::begin(screens_), std::end(screens_) - 1, std::end(screens_));
-        screens_[0] = front.data;
+        screens_[0] = screen;
     }
     for (const mods::DeviceHook& h : mods::D3d9().present) h.fn(dev_.Get(), h.user);
     Target* t = EnsureTarget(front, false);
