@@ -24,6 +24,10 @@ void LoadControls(const void* table);
 void SaveControls(void* table);  // every control, as the settings file has them
 // what the keyboard and mouse alone held at controller 1's last poll: GameInfo::pad tells a key from the pad's button
 Pad KeyboardMouse();
+// direct mouse aim: under mouse_look the game takes the mouse's movement itself, in counts, and the right stick gets
+// none of it (a stick is a speed; a game that turns its camera by the counts aims as a PC game does)
+void MouseDirect(bool on);
+bool MouseTake(float* dx, float* dy);  // counts since the last take, right and down; false if nothing moved
 // window thread, from the game window's messages
 void Window(void* hwnd);  // the window is up: its mouse movement comes as WM_INPUT under mouse_look
 bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);  // true: handled

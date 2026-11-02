@@ -65,7 +65,9 @@ pushes it. While the game window is in front the pointer is hidden and held insi
 turns it on by default with `GameInfo::mouse_look`.
 
 A stick says how fast to turn, not how far, so a game whose aim should follow the mouse exactly is better served by
-a hook of its own in `src/game` that turns the camera by the mouse's movement.
+a hook of its own in `src/game` that turns the camera by the mouse's movement. `input::MouseDirect(true)` stops
+mouse_look from moving the stick, and `input::MouseTake(&dx, &dy)` hands the game the counts since it last asked
+(right and down; the pointer is still held in the window as before).
 
 ## Pointer
 
