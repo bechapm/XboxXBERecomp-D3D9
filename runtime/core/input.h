@@ -17,4 +17,12 @@ uint16_t HeldOnAnyController();  // face buttons as XINPUT_GAMEPAD_A/B/X/Y masks
 Pad Poll(int port);
 void Rumble(int port, uint16_t left, uint16_t right);
 
+// keyboard and mouse: controller 1, beside any pad on that port, while the game window is in front (keyboard_mouse)
+// the controls: the settings file's [controls] (toml::table, or null) over GameInfo::controls over the built-in keys
+void LoadControls(const void* table);
+void SaveControls(void* table);  // every control, as the settings file has them
+// window thread, from the game window's messages
+void Window(void* hwnd);  // the window is up: its mouse movement comes as WM_INPUT under mouse_look
+bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);  // true: handled
+
 }  // namespace input

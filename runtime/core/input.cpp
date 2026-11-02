@@ -1,12 +1,30 @@
-// controllers through SDL: Xbox, PlayStation and Switch pads read into the console controller's report
+// controllers through SDL: Xbox, PlayStation and Switch pads read into the console controller's report; the keyboard
+// and mouse on controller 1
 #include "core/input.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include <SDL3/SDL.h>
+#include <toml++/toml.hpp>
 
 #include "app/app.h"
 #include "core/log.h"
@@ -53,7 +71,296 @@ void UpdatePads() {
     }
 }
 
+// keyboard and mouse
+
+// the console's controls: 0-7 Pad::buttons bits, 8-15 Pad::analog, 16-23 stick halves
+constexpr const char* kControls[] = {
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right", "start", "back", "lthumb", "rthumb",
+    "a", "b", "x", "y", "black", "white", "ltrigger", "rtrigger",
+    "lstick_up", "lstick_down", "lstick_left", "lstick_right", "rstick_up", "rstick_down", "rstick_left", "rstick_right"};
+constexpr int kControlCount = int(std::size(kControls));
+constexpr int kAnalogFirst = 8, kStickFirst = 16;
+constexpr size_t kMaxSources = 4;
+
+// the keys DirectXbox-Recomp has kept for its titles: arrows are the dpad, Z X A S the face buttons
+constexpr std::pair<const char*, const char*> kBuiltIn[] = {
+    {"a", "key:Z"}, {"b", "key:X"}, {"x", "key:A"}, {"y", "key:S"}, {"black", "key:W"}, {"white", "key:Q"},
+    {"ltrigger", "key:E"}, {"rtrigger", "key:R"}, {"start", "key:RETURN"}, {"back", "key:BACK"},
+    {"dpad_up", "key:UP"}, {"dpad_down", "key:DOWN"}, {"dpad_left", "key:LEFT"}, {"dpad_right", "key:RIGHT"}};
+
+// the names DirectXbox-Recomp's input files use, so one file's bindings read the same in both
+constexpr std::pair<const char*, int> kKeys[] = {
+    {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}, {"RETURN", VK_RETURN},
+    {"ENTER", VK_RETURN}, {"BACK", VK_BACK}, {"BACKSPACE", VK_BACK}, {"SPACE", VK_SPACE}, {"TAB", VK_TAB},
+    {"ESCAPE", VK_ESCAPE}, {"SHIFT", VK_SHIFT}, {"LSHIFT", VK_LSHIFT}, {"RSHIFT", VK_RSHIFT}, {"CTRL", VK_CONTROL},
+    {"LCTRL", VK_LCONTROL}, {"RCTRL", VK_RCONTROL}, {"ALT", VK_MENU}, {"LALT", VK_LMENU}, {"RALT", VK_RMENU},
+    {"CAPSLOCK", VK_CAPITAL}, {"INSERT", VK_INSERT}, {"DELETE", VK_DELETE}, {"HOME", VK_HOME}, {"END", VK_END},
+    {"PAGEUP", VK_PRIOR}, {"PAGEDOWN", VK_NEXT}, {"F1", VK_F1}, {"F2", VK_F2}, {"F3", VK_F3}, {"F4", VK_F4},
+    {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8}, {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11},
+    {"F12", VK_F12}, {"NUMPAD0", VK_NUMPAD0}, {"NUMPAD1", VK_NUMPAD1}, {"NUMPAD2", VK_NUMPAD2},
+    {"NUMPAD3", VK_NUMPAD3}, {"NUMPAD4", VK_NUMPAD4}, {"NUMPAD5", VK_NUMPAD5}, {"NUMPAD6", VK_NUMPAD6},
+    {"NUMPAD7", VK_NUMPAD7}, {"NUMPAD8", VK_NUMPAD8}, {"NUMPAD9", VK_NUMPAD9}, {"MULTIPLY", VK_MULTIPLY},
+    {"ADD", VK_ADD}, {"SUBTRACT", VK_SUBTRACT}, {"DECIMAL", VK_DECIMAL}, {"DIVIDE", VK_DIVIDE},
+    {"SEMICOLON", VK_OEM_1}, {"EQUALS", VK_OEM_PLUS}, {"COMMA", VK_OEM_COMMA}, {"MINUS", VK_OEM_MINUS},
+    {"PERIOD", VK_OEM_PERIOD}, {"SLASH", VK_OEM_2}, {"GRAVE", VK_OEM_3}, {"LBRACKET", VK_OEM_4},
+    {"BACKSLASH", VK_OEM_5}, {"RBRACKET", VK_OEM_6}, {"QUOTE", VK_OEM_7}};
+// mouse: sources above the key codes, the wheel's two ways last
+constexpr const char* kMouse[] = {"left", "right", "middle", "x1", "x2", "wheel_up", "wheel_down"};
+constexpr int kMouseVk[] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+constexpr int kMouseFirst = 0x100, kWheelUp = kMouseFirst + 5, kWheelDown = kMouseFirst + 6;
+
+std::vector<int> g_controls[kControlCount];  // sources, under g_lock
+HWND g_hwnd = nullptr;
+bool g_captured = false;  // mouse_look holds the pointer in the window, window thread
+
+// a source from its text, 0 when it names nothing
+int Source(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+    if (text.rfind("KEY:", 0) == 0) {
+        std::string k = text.substr(4);
+        if (k.size() > 1 && k[0] == '#') {
+            int vk = std::atoi(k.c_str() + 1);
+            return vk > 0 && vk < kMouseFirst ? vk : 0;
+        }
+        if (k.size() == 1 && ((k[0] >= 'A' && k[0] <= 'Z') || (k[0] >= '0' && k[0] <= '9'))) return k[0];
+        for (auto [name, vk] : kKeys)
+            if (k == name) return vk;
+        return 0;
+    }
+    if (text.rfind("MOUSE:", 0) == 0) {
+        for (int i = 0; i < int(std::size(kMouse)); i++) {
+            std::string m = kMouse[i];
+            std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+            if (text.substr(6) == m) return kMouseFirst + i;
+        }
+    }
+    return 0;
+}
+
+std::string SourceName(int src) {
+    if (src >= kMouseFirst) return std::string("mouse:") + kMouse[src - kMouseFirst];
+    if ((src >= 'A' && src <= 'Z') || (src >= '0' && src <= '9')) return std::string("key:") + char(src);
+    for (auto [name, vk] : kKeys)
+        if (vk == src) return std::string("key:") + name;
+    return "key:#" + std::to_string(src);
+}
+
+int ControlIndex(std::string_view name) {
+    for (int i = 0; i < kControlCount; i++)
+        if (name == kControls[i]) return i;
+    return -1;
+}
+
+// "key:E mouse:left" into a control's sources; a control named again starts over
+void Bind(std::vector<int>* controls, const char* control, const std::vector<std::string>& sources) {
+    int c = ControlIndex(control);
+    if (c < 0) {
+        LOGE("input: no control %s", control);
+        return;
+    }
+    controls[c].clear();
+    for (const std::string& text : sources) {
+        if (text.empty() || text == "none") continue;
+        int src = Source(text);
+        if (!src) LOGE("input: %s: no key or mouse button %s", control, text.c_str());
+        else if (controls[c].size() < kMaxSources) controls[c].push_back(src);
+    }
+}
+
+std::vector<std::string> Words(const char* text) {
+    std::vector<std::string> words;
+    std::istringstream in(text ? text : "");
+    for (std::string w; in >> w;) words.push_back(w);
+    return words;
+}
+
+// the wheel: each notch a press held long enough for a game reading its pads once a frame, then let go
+constexpr uint64_t kWheelPressMs = 50, kWheelGapMs = 34;
+constexpr int kWheelMaxPending = 4;
+struct WheelWay {
+    int pending = 0;
+    bool down = false;
+    uint64_t until = 0;
+};
+WheelWay g_wheel[2];  // up, down; under g_lock
+
+bool WheelHeld(WheelWay& w, uint64_t now) {
+    if (now >= w.until) {
+        if (w.down) {
+            w.down = false;
+            w.until = now + kWheelGapMs;
+        } else if (w.pending > 0) {
+            w.pending--;
+            w.down = true;
+            w.until = now + kWheelPressMs;
+        }
+    }
+    return w.down;
+}
+
+// mouse look: the stick pushed in proportion to the mouse's speed, worked out again every 12 ms whatever the game's
+// polling rate and averaged with the period before, as DirectXbox-Recomp's mouse_look does
+constexpr auto kLookPeriod = std::chrono::milliseconds(12);
+constexpr float kLookFullScale = 100000.0f;  // counts a second for a full push at sensitivity 1
+std::atomic<int> g_mouse_dx{0}, g_mouse_dy{0};
+std::chrono::steady_clock::time_point g_look_at;
+float g_look_speed[2] = {}, g_look_out[2] = {};  // under g_lock
+
+void LookAxes(float out[2]) {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - g_look_at;
+    if (elapsed >= kLookPeriod) {
+        // the first look after the game stopped reading spreads what came over a quarter second
+        double secs = std::min(std::chrono::duration<double>(elapsed).count(), 0.25);
+        float moved[2] = {float(g_mouse_dx.exchange(0)), -float(g_mouse_dy.exchange(0))};  // screen y grows down
+        float sens = float(app::Get().mouse_sensitivity);
+        for (int i = 0; i < 2; i++) {
+            float speed = float(moved[i] / secs);
+            float push = (speed + g_look_speed[i]) * 0.5f * sens / kLookFullScale;
+            g_look_out[i] = std::fabs(push) < 0.0005f ? 0.0f : std::clamp(push, -1.0f, 1.0f);
+            g_look_speed[i] = speed;
+        }
+        g_look_at = now;
+    }
+    out[0] = g_look_out[0];
+    out[1] = g_look_out[1];
+}
+
+// keys only reach the game while its window is in front, mouse buttons while the pointer is over it too
+void ReadKeyboardMouse(Pad& p) {
+    if (!g_hwnd || GetForegroundWindow() != g_hwnd) return;
+    POINT pt;
+    bool over = g_captured || (GetCursorPos(&pt) && WindowFromPoint(pt) == g_hwnd);
+    uint64_t now = SDL_GetTicks();
+    bool wheel[2] = {WheelHeld(g_wheel[0], now), WheelHeld(g_wheel[1], now)};
+    int sticks[4] = {};  // left x, left y, right x, right y
+    for (int c = 0; c < kControlCount; c++) {
+        bool held = false;
+        for (int src : g_controls[c]) {
+            if (src == kWheelUp || src == kWheelDown) held |= wheel[src - kWheelUp];
+            else if (src >= kMouseFirst) held |= over && (GetAsyncKeyState(kMouseVk[src - kMouseFirst]) & 0x8000);
+            else held |= (GetAsyncKeyState(src) & 0x8000) != 0;
+        }
+        if (!held) continue;
+        if (c < kAnalogFirst) p.buttons |= uint16_t(1 << c);
+        else if (c < kStickFirst) p.analog[c - kAnalogFirst] = 0xFF;
+        else {
+            int half = c - kStickFirst;  // up, down, left, right of the left stick, then the right's
+            int stick = half / 4 * 2;
+            int way = half % 4;
+            sticks[stick + (way < 2 ? 1 : 0)] += way == 0 || way == 3 ? 1 : -1;
+        }
+    }
+    // a key pushes its half of the stick all the way, unless the pad on this port already pushes further
+    int16_t* axes[4] = {&p.lx, &p.ly, &p.rx, &p.ry};
+    for (int i = 0; i < 4; i++)
+        if (sticks[i]) *axes[i] = sticks[i] > 0 ? int16_t(32767) : int16_t(-32768);
+    if (app::Get().mouse_look && g_captured) {
+        float look[2];
+        LookAxes(look);
+        for (int i = 0; i < 2; i++) {
+            int v = std::clamp(int(*axes[2 + i]) + int(std::lround(look[i] * 32767.0f)), -32768, 32767);
+            *axes[2 + i] = int16_t(v);
+        }
+    }
+}
+
+// mouse_look keeps the pointer hidden in the client area while the window is in front
+void Capture(bool on) {
+    on = on && g_hwnd && app::Get().keyboard_mouse && app::Get().mouse_look;
+    if (on) {
+        RECT r;
+        GetClientRect(g_hwnd, &r);
+        MapWindowPoints(g_hwnd, nullptr, reinterpret_cast<POINT*>(&r), 2);
+        ClipCursor(&r);
+    } else if (g_captured) {
+        ClipCursor(nullptr);
+    }
+    g_captured = on;
+}
+
 }  // namespace
+
+void LoadControls(const void* table) {
+    std::vector<int> controls[kControlCount];
+    for (auto [control, keys] : kBuiltIn) Bind(controls, control, Words(keys));
+    for (auto [control, keys] : app::kGame.controls) Bind(controls, control, Words(keys));
+    if (const auto* t = static_cast<const toml::table*>(table)) {
+        for (auto&& [key, node] : *t) {
+            std::vector<std::string> sources;
+            if (const auto* list = node.as_array()) {
+                for (auto&& e : *list)
+                    if (auto v = e.value<std::string>()) sources.push_back(*v);
+            } else if (auto v = node.value<std::string>()) {
+                sources = Words(v->c_str());
+            }
+            Bind(controls, std::string(key.str()).c_str(), sources);
+        }
+    }
+    std::lock_guard lock(g_lock);
+    for (int c = 0; c < kControlCount; c++) g_controls[c] = std::move(controls[c]);
+}
+
+void SaveControls(void* table) {
+    auto& t = *static_cast<toml::table*>(table);
+    std::lock_guard lock(g_lock);
+    for (int c = 0; c < kControlCount; c++) {
+        toml::array sources;
+        for (int src : g_controls[c]) sources.push_back(SourceName(src));
+        t.insert(kControls[c], std::move(sources));
+    }
+}
+
+void Window(void* hwnd) {
+    g_hwnd = static_cast<HWND>(hwnd);
+    if (!app::Get().keyboard_mouse) return;
+    LOGI("input: keyboard and mouse on controller 1%s", app::Get().mouse_look ? ", the mouse on its right stick" : "");
+    if (!app::Get().mouse_look) return;
+    // raw movement, not the pointer's: the pointer stops at the window's edge
+    RAWINPUTDEVICE rid{0x01, 0x02, 0, g_hwnd};  // generic desktop, mouse
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) LOGE("input: no raw mouse input (%lu)", GetLastError());
+    if (GetForegroundWindow() == g_hwnd) Capture(true);  // shown before this, its activation went by
+}
+
+bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result) {
+    if (hwnd != g_hwnd || !app::Get().keyboard_mouse) return false;
+    switch (msg) {
+        case WM_INPUT: {
+            RAWINPUT ri;
+            UINT size = sizeof(ri);
+            if (g_captured && GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &ri, &size,
+                                              sizeof(RAWINPUTHEADER)) != UINT(-1) &&
+                ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+                g_mouse_dx += ri.data.mouse.lLastX;
+                g_mouse_dy += ri.data.mouse.lLastY;
+            }
+            return false;  // DefWindowProc cleans up after WM_INPUT
+        }
+        case WM_MOUSEWHEEL: {
+            int notches = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+            std::lock_guard lock(g_lock);
+            WheelWay& w = g_wheel[notches > 0 ? 0 : 1];
+            w.pending = std::min(w.pending + std::abs(notches), kWheelMaxPending);
+            *result = 0;
+            return true;
+        }
+        case WM_ACTIVATE:
+            Capture(LOWORD(wp) != WA_INACTIVE && !HIWORD(wp));
+            return false;
+        case WM_SIZE:
+        case WM_MOVE:
+            if (g_captured) Capture(true);
+            return false;
+        case WM_SETCURSOR:
+            if (g_captured && LOWORD(lp) == HTCLIENT) {
+                SetCursor(nullptr);
+                *result = TRUE;
+                return true;
+            }
+            return false;
+    }
+    return false;
+}
 
 void Init() {
     if (g_sdl) return;  // started already for the game code window
@@ -108,6 +415,11 @@ Pad Poll(int port) {
             p.rx = int16_t(axis(SDL_GAMEPAD_AXIS_RIGHTX));
             p.ry = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_RIGHTY));
         }
+    }
+    if (port == 0 && app::Get().keyboard_mouse) {
+        p.connected = true;
+        std::lock_guard lock(g_lock);
+        ReadKeyboardMouse(p);
     }
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
