@@ -3614,7 +3614,7 @@ void D3D9Backend::Present(const Surface& front) {
         camera_.probed = false;
     }
     frame_++;
-    DeliverReports(false);
+    DeliverReports(diag::D3d9ReportWait());
     ReleaseOldTextures();
     CountFps();
     ApplySettings();

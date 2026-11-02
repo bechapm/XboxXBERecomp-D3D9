@@ -24,6 +24,7 @@ uint64_t ClockNs();                 // the guest's time since boot, kept by pres
 void Pad(int port, input::Pad& p);  // input::Poll, before GameInfo::pad: controller 1 gets the scripted presses
 bool KeyHeld(int vk);               // a scripted key, for code that reads the keyboard itself
 void Presented();                   // each present: counts frames, reads the folder
+void FrameDelay();                  // the title's thread, each swap: XBE_FRAME_DELAY_MS, as if its frames cost that much more
 bool SnapDue();                     // a frame is to be saved: the renderer then calls Snap
 void SnapAs(const char* name);      // the next presented frame goes to <name>.bmp in XBE_TEST_DIR
 // XBE_REPORT_LOG=from-to,from-to: what visibility tests were answered in those presents, in reports.log in XBE_TEST_DIR

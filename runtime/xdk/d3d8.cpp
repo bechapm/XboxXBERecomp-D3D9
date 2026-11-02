@@ -617,6 +617,7 @@ uint32_t g_frame_pass_count = 0;  // passes over the frame this frame (FramePass
 }  // namespace
 
 HLE_STDCALL(D3DDevice_Swap, 1) {
+    testdrive::FrameDelay();
     app::SplashFirstFrame();
     // handed over from the previous instance: the window opens on the second frame, the first picture with
     // anything drawn over it right after

@@ -32,6 +32,13 @@ inline bool D3d9Solid() {
     return on;
 }
 
+// XBE_D3D9_REPORT_WAIT: each present waits for every visibility test asked for so far, so a test's answer reaches the
+// title at a fixed frame, not when the GPU happens to have it
+inline bool D3d9ReportWait() {
+    static const bool on = std::getenv("XBE_D3D9_REPORT_WAIT") != nullptr;
+    return on;
+}
+
 // XBE_D3D9_FIXED_TRANSFORM: 1 draws programs that are only a plain transform by fixed function, 0 never, whatever a mod
 // asked; unset (-1), as a mod asked
 inline int D3d9FixedTransform() {

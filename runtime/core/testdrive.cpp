@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #ifdef _WIN32
+#include <thread>
 #include <windows.h>
 #endif
 
@@ -216,6 +217,14 @@ bool KeyHeld(int vk) {
     for (const Press& x : g_script) test(x);
     for (const Press& x : g_live) test(x);
     return held;
+}
+
+void FrameDelay() {
+    static const int ms = [] {
+        const char* e = std::getenv("XBE_FRAME_DELAY_MS");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 void Presented() {

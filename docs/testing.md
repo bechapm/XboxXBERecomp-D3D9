@@ -10,6 +10,8 @@ all of it is off unless a variable below is set.
 | `XBE_LOCKSTEP` | One vertical blank for each present, and the guest's clocks kept by presents |
 | `XBE_BACKGROUND` | The window opens off screen and never takes the focus |
 | `XBE_MUTE` | Everything runs, nothing is heard |
+| `XBE_D3D9_REPORT_WAIT` | Each present waits for every visibility test so far, so an answer reaches the title at a fixed frame. Without it a test is answered when the GPU has it, which depends on timing even in lockstep |
+| `XBE_FRAME_DELAY_MS` | Sleeps that long on the title's thread at each swap, as if its frames cost that much more |
 
 `BUTTONS` are joined by `+`: `UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT L3 R3`, `LS LSD LSL LSR` for the
 left stick, `RS RSD RSL RSR` for the right, `KEY:<name or #vk>` for a key the game reads itself.
