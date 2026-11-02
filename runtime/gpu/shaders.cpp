@@ -1289,7 +1289,7 @@ std::string ReversedDepthHlsl(std::string s) {
 }
 
 // a point covers its console pixel, several host pixels on an upscaled target: drawn as a quad of that size. A counted
-// point (a visibility test) covers exactly its console pixel's host pixels, as the count is divided by their number
+// point (a visibility test) is the one host pixel under its centre, so it counts 0 or 1 as on the console at any scale
 std::string PointHlsl(bool counted) {
     return Common(For::Pixel) + (counted ? "#define COUNTED_POINT\n" : "") + R"(
 [maxvertexcount(4)]
@@ -1297,6 +1297,7 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
     float2 half_pixel = v[0].pos.w / surf.xy;  // in clip units, the target spans 2 across surf.xy pixels
     // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
 #ifdef COUNTED_POINT
+    half_pixel /= surf.w;
     float2 back = 0;
 #else
     float2 back = (0.5 - 1e-3) * 2 * half_pixel / surf.w;

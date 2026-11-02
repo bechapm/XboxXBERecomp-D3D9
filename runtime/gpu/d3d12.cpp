@@ -593,8 +593,8 @@ private:
     // visibility tests
     bool EnsureQueries();
     uint32_t BeginCountedDraw(const State& s);
-    void EndCountedDraw(uint32_t query);
-    float SamplesPerPixel() const;
+    void EndCountedDraw(uint32_t query, bool point);
+    float SamplesPerPixel(bool point) const;
     void DeliverReports();
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
@@ -2742,19 +2742,20 @@ uint32_t D3D12Backend::BeginCountedDraw(const State& s) {
     return query;
 }
 
-void D3D12Backend::EndCountedDraw(uint32_t query) {
+void D3D12Backend::EndCountedDraw(uint32_t query, bool point) {
     if (query == kNoQuery) return;
     cl_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
     uint64_t at = uint64_t(query) * sizeof(uint64_t);
     cl_->ResolveQueryData(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query, 1, query_rb_.Get(), at);
-    counted_.push_back({query, SamplesPerPixel()});
+    counted_.push_back({query, SamplesPerPixel(point)});
 }
 
-// the console counts its own pixels: the bound target's scale and multisampling come out
-float D3D12Backend::SamplesPerPixel() const {
+// the console counts its own pixels: the bound target's scale and multisampling come out; a counted point is drawn
+// as one host pixel (PointHlsl), so only multisampling comes out of its count
+float D3D12Backend::SamplesPerPixel(bool point) const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
     if (!t || !t->gw || !t->gh) return 1;
-    float area = float(t->w) * float(t->h) / (float(t->gw) * float(t->gh));
+    float area = point ? 1.0f : float(t->w) * float(t->h) / (float(t->gw) * float(t->gh));
     return area * float(t->res->GetDesc().SampleDesc.Count);
 }
 
@@ -2841,8 +2842,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     PsoKey k;
     BuildPipelineKey(s, a, sh.vh, sh.ph, k);
     k.sprite = sh.sprite;
-    // a point grown half a host pixel to the top left counts (k + 0.5)^2 / k^2 pixels for one at scale k, 1.56 at 2:
-    // TS2 Siberia read 78 for 50 points and its light glows, sized from that share, filled the screen white
+    // a point drawn over its console pixel counted up to (k + 1)^2 / k^2 pixels at scale k, more than the points
+    // drawn: TS2 Siberia read up to 96 for 50, wrapping the signed byte its light glows are sized from (0x12A07F),
+    // and the glow filled the screen white
     k.counted = a.topology == Topology::Points && s.simple[kMCountEnable >> 2];
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
@@ -2871,7 +2873,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // geometry, counted while the title runs a visibility test
     uint32_t query = BeginCountedDraw(s);
     DrawGeometry(a);
-    EndCountedDraw(query);
+    EndCountedDraw(query, k.counted);
 }
 
 // a guest rect scaled to the target and clamped to it
