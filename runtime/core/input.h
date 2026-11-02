@@ -21,6 +21,8 @@ void Rumble(int port, uint16_t left, uint16_t right);
 // the controls: the settings file's [controls] (toml::table, or null) over GameInfo::controls over the built-in keys
 void LoadControls(const void* table);
 void SaveControls(void* table);  // every control, as the settings file has them
+// what the keyboard and mouse alone held at controller 1's last poll: GameInfo::pad tells a key from the pad's button
+Pad KeyboardMouse();
 // window thread, from the game window's messages
 void Window(void* hwnd);  // the window is up: its mouse movement comes as WM_INPUT under mouse_look
 bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);  // true: handled

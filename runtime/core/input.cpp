@@ -226,8 +226,11 @@ void LookAxes(float out[2]) {
     out[1] = g_look_out[1];
 }
 
+Pad g_kbm;  // the keyboard and mouse's part of controller 1 at its last poll, under g_lock
+
 // keys only reach the game while its window is in front, mouse buttons while the pointer is over it too
 void ReadKeyboardMouse(Pad& p) {
+    p.connected = true;
     if (!g_hwnd || GetForegroundWindow() != g_hwnd) return;
     POINT pt;
     bool over = g_captured || (GetCursorPos(&pt) && WindowFromPoint(pt) == g_hwnd);
@@ -251,7 +254,7 @@ void ReadKeyboardMouse(Pad& p) {
             sticks[stick + (way < 2 ? 1 : 0)] += way == 0 || way == 3 ? 1 : -1;
         }
     }
-    // a key pushes its half of the stick all the way, unless the pad on this port already pushes further
+    // a key pushes its half of the stick all the way
     int16_t* axes[4] = {&p.lx, &p.ly, &p.rx, &p.ry};
     for (int i = 0; i < 4; i++)
         if (sticks[i]) *axes[i] = sticks[i] > 0 ? int16_t(32767) : int16_t(-32768);
@@ -263,6 +266,17 @@ void ReadKeyboardMouse(Pad& p) {
             *axes[2 + i] = int16_t(v);
         }
     }
+}
+
+// a button held on either; a stick pushed by keys or the mouse is theirs, else the pad's
+void Merge(Pad& p, const Pad& kbm) {
+    p.connected = true;
+    p.buttons |= kbm.buttons;
+    for (int i = 0; i < 8; i++) p.analog[i] = std::max(p.analog[i], kbm.analog[i]);
+    if (kbm.lx) p.lx = kbm.lx;
+    if (kbm.ly) p.ly = kbm.ly;
+    if (kbm.rx) p.rx = int16_t(std::clamp(int(p.rx) + int(kbm.rx), -32768, 32767));
+    if (kbm.ry) p.ry = int16_t(std::clamp(int(p.ry) + int(kbm.ry), -32768, 32767));
 }
 
 // mouse_look keeps the pointer hidden in the client area while the window is in front
@@ -309,6 +323,11 @@ void SaveControls(void* table) {
         for (int src : g_controls[c]) sources.push_back(SourceName(src));
         t.insert(kControls[c], std::move(sources));
     }
+}
+
+Pad KeyboardMouse() {
+    std::lock_guard lock(g_lock);
+    return g_kbm;
 }
 
 void Window(void* hwnd) {
@@ -417,9 +436,10 @@ Pad Poll(int port) {
         }
     }
     if (port == 0 && app::Get().keyboard_mouse) {
-        p.connected = true;
         std::lock_guard lock(g_lock);
-        ReadKeyboardMouse(p);
+        g_kbm = Pad{};
+        ReadKeyboardMouse(g_kbm);
+        Merge(p, g_kbm);
     }
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;

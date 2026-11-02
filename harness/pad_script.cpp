@@ -92,4 +92,6 @@ void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
 }
 
+Pad KeyboardMouse() { return {}; }  // no keyboard here
+
 }  // namespace input

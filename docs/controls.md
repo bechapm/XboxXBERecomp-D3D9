@@ -75,4 +75,5 @@ a hook of its own in `src/game` that turns the camera by the mouse's movement.
 ```
 
 `GameInfo::pad` still sees each polled pad last, keyboard and mouse included, which is where a game changes what a
-key does in its menus.
+key does in its menus. `input::KeyboardMouse()` there is what the keyboard and mouse alone held at that poll, so a
+key can be told from the pad's button it is bound to: TimeSplitters 2 turns Escape (Start) into B in its front end.
