@@ -24,6 +24,7 @@
 #include <cstring>
 #include <deque>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -715,9 +716,15 @@ private:
     void ReleaseOldTextures();
     // draws
     bool FixedFunctionDraws(const State& s, const Assembled& a, const DrawTextures& stages) const;
+    enum class StageLack { none, alpha_kill, shadow, wide, rect, two_sided };
+    struct StageLackAt {
+        StageLack what;
+        int stage;  // -1 for no one stage
+    };
+    StageLackAt Lacking(const State& s, const Assembled& a, const DrawTextures& stages) const;
     const PlainProgram* PlainDraw(const State& s, const Assembled& a, const DrawTextures& stages, const InputUsages& usages);
     void PlainTransforms(const State& s, const PlainProgram& p, GuestExtent size);
-    void CountStageRefusal(const State& s, const Assembled& a, const DrawTextures& stages);
+    void CountStageRefusal(const State& s, StageLackAt lack);
     bool PlainTakeOver(const State& s, const Assembled& a, DrawShaders& sh, const DrawTextures& stages, GuestExtent size,
                        Geometry& g);
     bool DrawPixelShader(const State& s, const DrawTextures& stages, DrawShaders& sh);
@@ -859,8 +866,9 @@ private:
     std::unordered_map<uint64_t, PlainProgram> plain_;
     struct PlainCounts {
         uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, offscreen, stage, keep, pixel;
-        uint32_t alpha_kill, shadow, wide, rect, two_sided;  // the stage states fixed function cannot draw
+        uint32_t alpha_kill, shadow, wide, rect, two_sided;  // the stage states fixed function cannot draw (Lacking)
     } plain_counts_{};
+    std::unordered_set<uint64_t> plain_refusals_;  // what CountStageRefusal has logged
     // what Remix is given to find the camera in, reported every ten seconds while a mod hooks the draws: the program
     // draws, and the first that draws the screen in 3D with the transforms it left on the device
     struct CameraCounts {
@@ -1801,17 +1809,25 @@ void D3D9Backend::ReleaseOldTextures() {
 // kill, shadow compares, a texture read at coordinates in texels after a projection, two sided lighting or the wide
 // taps of a shrinking pass; a vertex program it has no part in. Those go to the generator's shaders.
 bool D3D9Backend::FixedFunctionDraws(const State& s, const Assembled& a, const DrawTextures& stages) const {
-    if (s.ps) return false;
-    if (s.rs[kRsLighting] && s.rs[kRsTwoSidedLighting] && !a.pretransformed) return false;
+    return !s.ps && Lacking(s, a, stages).what == StageLack::none;
+}
+
+// What of a draw's state fixed function cannot draw, and on which stage. Under a pixel shader the stages are the textures
+// bound, ColorOp being unread. A rect texture's coordinates are in texels: with no shader SetFixedFunction scales them,
+// the branch for a program under one does not, and the program's own pixel shader did, so there it is not drawn fixed
+D3D9Backend::StageLackAt D3D9Backend::Lacking(const State& s, const Assembled& a, const DrawTextures& stages) const {
+    if (s.rs[kRsLighting] && s.rs[kRsTwoSidedLighting] && !a.pretransformed) return {StageLack::two_sided, -1};
     for (int i = 0; i < 4; i++) {
         const auto& t = s.tss[size_t(i)];
-        if (t[kTssColorOp] <= kTopDisable) break;
-        if (t[kTssAlphaKill] == kAlphaKillEnable) return false;
+        if (!s.ps && t[kTssColorOp] <= kTopDisable) break;
+        if (s.ps && !stages.res[i]) continue;
         const TexInfo& info = stages.info[i];
-        if (info.shadow || (info.flags & kTexWide)) return false;
-        if (info.rect && (t[kTssTextureTransformFlags] & kTtffProjected)) return false;
+        if (t[kTssAlphaKill] == kAlphaKillEnable) return {StageLack::alpha_kill, i};
+        if (info.shadow) return {StageLack::shadow, i};
+        if (info.flags & kTexWide) return {StageLack::wide, i};
+        if (info.rect && (s.ps || (t[kTssTextureTransformFlags] & kTtffProjected))) return {StageLack::rect, i};
     }
-    return true;
+    return {StageLack::none, -1};
 }
 
 // the inputs of a program drawn by fixed function: what it reads, as ProgramInputUsages names them; 0xFF unread
@@ -2464,22 +2480,18 @@ void D3D9Backend::PlainTransforms(const State& s, const PlainProgram& p, GuestEx
     SetDeviceTransform(2, proj);
 }
 
-// why FixedFunctionDraws turned down a draw with no pixel shader
-void D3D9Backend::CountStageRefusal(const State& s, const Assembled& a, const DrawTextures& stages) {
+// a plain transform kept a program by its stages: counted, and logged once for each program, state, stage and size
+void D3D9Backend::CountStageRefusal(const State& s, StageLackAt lack) {
+    static constexpr const char* kName[] = {"", "alpha kill", "shadow", "wide", "rect", "two sided"};
     PlainCounts& n = plain_counts_;
-    if (s.rs[kRsLighting] && s.rs[kRsTwoSidedLighting] && !a.pretransformed) {
-        n.two_sided++;
-        return;
-    }
-    for (int i = 0; i < 4; i++) {
-        const auto& t = s.tss[size_t(i)];
-        const TexInfo& info = stages.info[i];
-        if (t[kTssColorOp] <= kTopDisable) break;
-        if (t[kTssAlphaKill] == kAlphaKillEnable) return void(n.alpha_kill++);
-        if (info.shadow) return void(n.shadow++);
-        if (info.flags & kTexWide) return void(n.wide++);
-        if (info.rect && (t[kTssTextureTransformFlags] & kTtffProjected)) return void(n.rect++);
-    }
+    uint32_t* count[] = {nullptr, &n.alpha_kill, &n.shadow, &n.wide, &n.rect, &n.two_sided};
+    ++*count[size_t(lack.what)];
+    TextureDesc d{};
+    if (lack.stage >= 0 && s.textures[size_t(lack.stage)]) Describe(s.textures[size_t(lack.stage)], d);
+    uint64_t key = s.vs->hash ^ (uint64_t(lack.what) << 60) ^ (uint64_t(lack.stage + 1) << 56) ^ (uint64_t(d.width) << 32) ^ d.height;
+    if (plain_refusals_.size() < 64 && plain_refusals_.insert(key).second)
+        LOGR("d3d9: plain transform stays a program: %s on stage %d, %ux%u, program %016llX", kName[size_t(lack.what)],
+             lack.stage, d.width, d.height, static_cast<unsigned long long>(s.vs->hash));
 }
 
 // A program that is only a plain transform may be drawn by fixed function, for a tool that takes transforms from the
@@ -2510,8 +2522,8 @@ const PlainProgram* D3D9Backend::PlainDraw(const State& s, const Assembled& a, c
     // a target the title does not present is no camera's picture, and a mod told the draw is fixed would place it as if so
     if (Offscreen()) return n.offscreen++, nullptr;
     // the title's state: a hook cannot change it, so this is asked here, where fixed_transform can still be told the truth.
-    // Its combiners, where it has a pixel shader, are that shader's to answer for (PlainTakeOver)
-    if (!s.ps && !FixedFunctionDraws(s, a, stages)) return CountStageRefusal(s, a, stages), nullptr;
+    // Whether or not a pixel shader is bound: the mod that removes it leaves these with nothing to draw them
+    if (StageLackAt lack = Lacking(s, a, stages); lack.what != StageLack::none) return CountStageRefusal(s, lack), nullptr;
     for (int i = 0; i < 4; i++)
         if (stages.res[i] && p.tex[i] < 0) return n.stage++, nullptr;  // a stage reading coordinates the program does not write
     bool zen = bound_ds_ && s.rs[kRsZEnable];
