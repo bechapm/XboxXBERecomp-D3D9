@@ -2174,7 +2174,7 @@ void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
     uint32_t cull = s.rs[kRsCullMode];
     k.cull = cull != 0 && a.topology == Topology::Triangles;
     k.ccw = cull == kCullCw;  // culling clockwise leaves counter clockwise as the front
-    k.fill = g_wireframe ? kFillWireframe : s.rs[kRsFillMode];
+    k.fill = g_wireframe && s.rs[kRsZEnable] ? kFillWireframe : s.rs[kRsFillMode];
 }
 
 void D3D12Backend::BuildPipelineKey(const State& s, const Assembled& a, uint64_t vh, uint64_t ph, PsoKey& k) {

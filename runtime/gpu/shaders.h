@@ -81,7 +81,8 @@ bool ReadsViewportOffset(const std::vector<uint32_t>& program);
 // the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
 // names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
 inline int g_projection_register = -1;
-// every draw as lines, whatever the game's fill mode: a game's debugging tools set it while it runs
+// every depth tested draw as lines, whatever the game's fill mode: a game's debugging tools set it while it runs. 2D
+// (menus, HUD, a host overlay) draws without the depth test and stays filled, so it can be read
 inline std::atomic<bool> g_wireframe{false};
 // fixed function vertex state a shader is built for
 struct FixedKey {
