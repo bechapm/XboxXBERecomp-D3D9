@@ -849,8 +849,17 @@ private:
         bool sampled;
         float projection[16], view[16], device_projection[16];
         uint32_t w, h;
+        // each frame: its 3D draws on screen, and the first draw a mod bound a vertex texture for (RTX Remix's UI mark:
+        // the picture goes in there and the draws after are rasterised over it), after how many of them
+        struct Frame {
+            uint32_t three_d, marked_after, primitives, w, h;
+            bool marked, offscreen, two_d;
+            uint64_t program;
+        } frame, last;
+        uint32_t frames, early, unmarked, offscreen_size;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
+    void EndCameraFrame();
     void ReportCamera();
     uint64_t frame_ = 0;
     double fps_ = 0;
@@ -2388,7 +2397,25 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
     CameraCounts& c = camera_;
     c.programs++;
     if (!drawn) c.skipped++;
+    CameraCounts::Frame& f = c.frame;
+    if (drawn && !f.marked) {
+        IDirect3DBaseTexture9* vt = nullptr;
+        if (SUCCEEDED(dev_->GetTexture(D3DVERTEXTEXTURESAMPLER3, &vt)) && vt) {
+            vt->Release();
+            f.marked = true;
+            f.marked_after = f.three_d;
+            f.primitives = d.primitives;
+            f.offscreen = d.offscreen;
+            f.two_d = d.two_d;
+            f.program = d.program_id;
+            f.w = bound_rt_ ? bound_rt_->w : 0;
+            f.h = bound_rt_ ? bound_rt_->h : 0;
+        }
+    }
+    // a target other than the screen that RTX Remix takes for the picture all the same, being the back buffer's size
+    if (drawn && d.offscreen && bound_rt_ && bound_rt_->w == bb_w_ && bound_rt_->h == bb_h_) c.offscreen_size++;
     if (d.offscreen) return;
+    if (drawn && !d.two_d) f.three_d++;
     c.screen++;
     if (d.program_projection_set) c.projected++;
     if (d.two_d) c.two_d++;
@@ -2399,6 +2426,15 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
     std::memcpy(c.device_projection, dev_xf_[2], sizeof(c.device_projection));
     c.w = bound_rt_ ? bound_rt_->w : 0;
     c.h = bound_rt_ ? bound_rt_->h : 0;
+}
+
+void D3D9Backend::EndCameraFrame() {
+    CameraCounts& c = camera_;
+    c.frames++;
+    if (!c.frame.marked) c.unmarked++;
+    else if (c.frame.marked_after * 2 < c.frame.three_d) c.early++;
+    c.last = c.frame;
+    c.frame = {};
 }
 
 void D3D9Backend::ReportCamera() {
@@ -2418,6 +2454,17 @@ void D3D9Backend::ReportCamera() {
         LOGR("d3d9: camera: device VIEW %s", row(c.view).c_str());
         LOGR("d3d9: camera: device PROJECTION %s", row(c.device_projection).c_str());
     }
+    LOGR("d3d9: camera: %u frames, %u with no draw marked, %u marked before half their 3D; %u draws into other targets "
+         "of the back buffer's size",
+         c.frames, c.unmarked, c.early, c.offscreen_size);
+    const CameraCounts::Frame& l = c.last;
+    if (l.marked)
+        LOGR("d3d9: camera: last frame: %u 3D draws on screen, first marked after %u: program %016llX, %u primitives, "
+             "%s, %s %ux%u",
+             l.three_d, l.marked_after, (unsigned long long)l.program, l.primitives, l.two_d ? "2D" : "3D",
+             l.offscreen ? "offscreen" : "screen", l.w, l.h);
+    else
+        LOGR("d3d9: camera: last frame: %u 3D draws on screen, none marked", l.three_d);
     c = {};
 }
 
@@ -2907,7 +2954,10 @@ void D3D9Backend::Present(const Surface& front) {
              front.data, t ? t->gw : 0, t ? t->gh : 0, t ? (t->drawn ? ", drawn" : ", never drawn") : ", no target",
              unsigned(hr));
     }
-    if (presents_ % 600 == 0 && !mods::D3d9().draw.empty()) ReportCamera();
+    if (!mods::D3d9().draw.empty()) {
+        EndCameraFrame();
+        if (presents_ % 600 == 0) ReportCamera();
+    }
     frame_++;
     DeliverReports(false);
     ReleaseOldTextures();
