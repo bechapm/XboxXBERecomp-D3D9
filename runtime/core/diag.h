@@ -1,6 +1,8 @@
 #pragma once
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <vector>
 
 // diagnostics switched on by environment variables, read once
 namespace diag {
@@ -28,6 +30,26 @@ inline const std::filesystem::path& CaptureDir() {
 inline bool D3d9Solid() {
     static const bool on = std::getenv("XBE_D3D9_SOLID") != nullptr;
     return on;
+}
+
+// XBE_D3D9_SKIP_PROGRAMS: vertex programs, by the hashes the D3D9 camera report prints, comma separated, whose draws
+// are left out: which of a frame's draws does something can be found by leaving it out
+inline bool D3d9SkipProgram(uint64_t hash) {
+    static const std::vector<uint64_t> list = [] {
+        std::vector<uint64_t> l;
+        const char* e = std::getenv("XBE_D3D9_SKIP_PROGRAMS");
+        while (e && *e) {
+            char* end;
+            uint64_t v = std::strtoull(e, &end, 16);
+            if (end == e) break;
+            l.push_back(v);
+            e = *end == ',' ? end + 1 : end;
+        }
+        return l;
+    }();
+    for (uint64_t h : list)
+        if (h == hash) return true;
+    return false;
 }
 
 }  // namespace diag

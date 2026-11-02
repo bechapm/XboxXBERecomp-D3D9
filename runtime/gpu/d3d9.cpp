@@ -2736,7 +2736,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     mod_state_ = &s;
     mod_asm_ = &a;
     mod_size_ = size;
-    bool drawn = ModsBefore(s, a, sh, stages, g);
+    bool drawn = !(sh.prog && diag::D3d9SkipProgram(s.vs->hash)) && ModsBefore(s, a, sh, stages, g);
     CountCamera(sh, drawn);
     if (drawn) {
         IDirect3DQuery9* query = BeginCountedDraw(s);
