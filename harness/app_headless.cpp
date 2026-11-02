@@ -18,6 +18,7 @@ void Save() {}
 void ApplyDisplay() {}
 Mode Desktop() { return {1280, 720}; }
 Mode Output() { return Desktop(); }
+std::vector<Mode> DisplayModes() { return {Desktop()}; }
 float RenderScale(uint32_t) { return 1.0f; }
 bool Widescreen() { return true; }
 
