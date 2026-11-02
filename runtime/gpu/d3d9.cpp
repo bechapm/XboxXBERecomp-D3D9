@@ -874,8 +874,22 @@ private:
         // what Present is given; whether RTX Remix's picture went in there and stayed
         bool probe, probed;
         std::string before_mark, after_mark, at_present;
+        // the same frame draw by draw: the draws after which the picture's mean brightness jumped
+        struct Jump {
+            uint32_t index;
+            float from, to;
+            uint64_t program;
+            uint32_t primitives, w, h;
+            bool two_d, marked, offscreen;
+        };
+        std::vector<Jump> jumps;
+        uint32_t probe_draws;
+        float probe_mean = -1;
+        ComPtr<IDirect3DSurface9> small, small_sys;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
+    float MeanBrightness(IDirect3DSurface9* rt);
+    void TraceBrightness(const DrawShaders& sh);
     void NoteAfterMark(const char* op, uint32_t from, uint32_t to);
     void EndCameraFrame();
     void ReportCamera();
@@ -2480,6 +2494,54 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
     c.h = bound_rt_ ? bound_rt_->h : 0;
 }
 
+// the mean brightness of a target, 0 to 255, from a small copy of it
+float D3D9Backend::MeanBrightness(IDirect3DSurface9* rt) {
+    constexpr UINT kW = 160, kH = 120;
+    CameraCounts& c = camera_;
+    if (!c.small && (FAILED(dev_->CreateRenderTarget(kW, kH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &c.small,
+                                                     nullptr)) ||
+                     FAILED(dev_->CreateOffscreenPlainSurface(kW, kH, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &c.small_sys,
+                                                              nullptr)))) {
+        c.small = nullptr;
+        return -1;
+    }
+    D3DLOCKED_RECT lr;
+    if (FAILED(dev_->StretchRect(rt, nullptr, c.small.Get(), nullptr, D3DTEXF_LINEAR)) ||
+        FAILED(dev_->GetRenderTargetData(c.small.Get(), c.small_sys.Get())) ||
+        FAILED(c.small_sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+        return -1;
+    }
+    uint64_t sum = 0;
+    for (UINT y = 0; y < kH; y++) {
+        const uint8_t* row = static_cast<const uint8_t*>(lr.pBits) + size_t(y) * lr.Pitch;
+        for (UINT x = 0; x < kW; x++) sum += row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2];
+    }
+    c.small_sys->UnlockRect();
+    return float(sum) / float(kW * kH * 3);
+}
+
+// after each draw of the probed frame: where the picture changed at once, as when RTX Remix put its own in
+void D3D9Backend::TraceBrightness(const DrawShaders& sh) {
+    CameraCounts& c = camera_;
+    IDirect3DSurface9* rt = nullptr;
+    if (FAILED(dev_->GetRenderTarget(0, &rt)) || !rt) return;
+    D3DSURFACE_DESC desc;
+    rt->GetDesc(&desc);
+    float m = desc.Width == bb_w_ && desc.Height == bb_h_ ? MeanBrightness(rt) : -1;
+    rt->Release();
+    uint32_t index = c.probe_draws++;
+    if (m < 0) return;
+    if (c.probe_mean >= 0 && std::fabs(m - c.probe_mean) > 8 && c.jumps.size() < 32) {
+        IDirect3DBaseTexture9* vt = nullptr;
+        bool marked = SUCCEEDED(dev_->GetTexture(D3DVERTEXTEXTURESAMPLER3, &vt)) && vt;
+        if (vt) vt->Release();
+        const RecompModDraw& d = mod_draw_;
+        c.jumps.push_back({index, c.probe_mean, m, sh.prog ? d.program_id : 0, d.primitives, desc.Width, desc.Height,
+                           bool(d.two_d), marked, bool(d.offscreen)});
+    }
+    c.probe_mean = m;
+}
+
 // a copy, clear or upload after the frame's mark, which changes the picture behind RTX Remix's back
 void D3D9Backend::NoteAfterMark(const char* op, uint32_t from, uint32_t to) {
     CameraCounts& c = camera_;
@@ -2533,6 +2595,13 @@ void D3D9Backend::ReportCamera() {
     if (!c.before_mark.empty())
         LOGR("d3d9: camera: the frame before: its first marked draw's target before it %s; after it %s; presented %s",
              c.before_mark.c_str(), c.after_mark.c_str(), c.at_present.c_str());
+    if (c.probe_draws)
+        LOGR("d3d9: camera: the frame before, draw by draw: %u draws, %zu jumps in brightness", c.probe_draws,
+             c.jumps.size());
+    for (const CameraCounts::Jump& j : c.jumps)
+        LOGR("d3d9: camera:   after draw %u: %.0f to %.0f, program %016llX, %u primitives, %s, %s, %s %ux%u", j.index,
+             j.from, j.to, (unsigned long long)j.program, j.primitives, j.two_d ? "2D" : "3D",
+             j.marked ? "marked" : "unmarked", j.offscreen ? "offscreen" : "screen", j.w, j.h);
     for (size_t i = 0; i < c.after_last.size(); i++) {
         const CameraCounts::After& a = c.after_last[i];
         auto where = [this](uint32_t data) {
@@ -2787,6 +2856,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
             camera_.after_mark = PixelStats(dev_.Get(), probe);
             probe->Release();
         }
+        if (camera_.probe) TraceBrightness(sh);
         ModsAfter();
         counts_.made++;
         if (sh.ffp) counts_.ffp++;
