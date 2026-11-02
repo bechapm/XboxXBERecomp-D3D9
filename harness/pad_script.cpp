@@ -99,5 +99,7 @@ bool MouseTake(float* dx, float* dy) {  // no mouse here
     if (dy) *dy = 0;
     return false;
 }
+void LoadControls(const void*) {}  // no bindings here
+void SaveControls(void*) {}
 
 }  // namespace input
