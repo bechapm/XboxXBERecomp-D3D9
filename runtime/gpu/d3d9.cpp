@@ -1199,6 +1199,9 @@ void D3D9Backend::DrawQuad(IDirect3DBaseTexture9* tex, const RECT& to, D3DCOLOR 
     dev_->SetPixelShader(ps);
     dev_->SetFVF(kQuadFvf);
     Rs(D3DRS_ZENABLE, FALSE);
+    // writes nothing with depth off; a tool that takes a draw writing no depth for the game's UI (RTX Remix, which puts
+    // its picture in at the first such draw and draws the rest over it) leaves the renderer's own passes be
+    Rs(D3DRS_ZWRITEENABLE, TRUE);
     Rs(D3DRS_STENCILENABLE, FALSE);
     Rs(D3DRS_CULLMODE, D3DCULL_NONE);
     Rs(D3DRS_FILLMODE, D3DFILL_SOLID);
@@ -2879,8 +2882,8 @@ void D3D9Backend::Present(const Surface& front) {
     Scene(false);
     bool report = presents_ + 1 == 60 || presents_ + 1 == 1800;
     if (report)
-        LOGR("d3d9: presented target %s; back buffer %s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
-             PixelStats(dev_.Get(), bb.Get()).c_str());
+        LOGR("d3d9: presented target %s; back buffer %s%s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
+             PixelStats(dev_.Get(), bb.Get()).c_str(), gamma_ ? "; through the gamma ramp" : "");
     // a smaller picture than before leaves its old edges in the window: the window thread paints them black
     RECT frame = FrameRect();
     if (!EqualRect(&frame, &last_frame_rect_)) {
