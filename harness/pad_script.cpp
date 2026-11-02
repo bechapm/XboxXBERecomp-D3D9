@@ -93,7 +93,20 @@ void Rumble(int port, uint16_t left, uint16_t right) {
 }
 
 Pad KeyboardMouse() { return {}; }  // no keyboard here
+void MouseDirect(bool) {}
+bool MouseTake(float* dx, float* dy) {  // no mouse here
+    if (dx) *dx = 0;
+    if (dy) *dy = 0;
+    return false;
+}
 void LoadControls(const void*) {}  // no bindings here
 void SaveControls(void*) {}
+
+// no mouse either: the pointer is never over the picture, and the pad is what was used
+Pointer GetPointer() { return {}; }
+void PointerWant(bool) {}
+Device LastUsed() { return Device::pad; }
+std::string KeyName(int) { return ""; }
+std::string ControlName(const char*) { return ""; }
 
 }  // namespace input
