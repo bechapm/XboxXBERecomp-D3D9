@@ -2945,6 +2945,7 @@ void D3D9Backend::DeliverReports(bool wait) {
 }
 
 void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    testdrive::CountDraw();
     if (SpriteOnStage3(s, prim)) {
         Draw(SpriteStageZero(s), prim, start, count, indices);
         return;

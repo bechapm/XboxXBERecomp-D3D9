@@ -34,6 +34,7 @@ struct Press {
 
 std::mutex g_lock;
 std::atomic<uint64_t> g_frames{0};
+std::atomic<uint64_t> g_draws{0};
 std::atomic<bool> g_snap{false};
 std::vector<Press> g_script;
 std::vector<Press> g_live;  // presses from the cmd file, under g_lock
@@ -180,6 +181,12 @@ uint64_t ClockNs() {
 }
 
 uint64_t Frames() { return g_frames.load(); }
+
+void CountDraw() {
+    if (On()) g_draws.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint64_t Draws() { return g_draws.load(); }
 
 void Pad(int port, input::Pad& p) {
     if (port != 0 || !On()) return;

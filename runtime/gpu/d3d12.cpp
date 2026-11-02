@@ -2812,6 +2812,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     }
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
+    testdrive::CountDraw();
     if (cap_) CapStep(s.rt);
     if (DepthCopy(s)) return;
     DrawEnd draw_end{ext_};

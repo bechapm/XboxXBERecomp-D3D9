@@ -31,5 +31,7 @@ void ReportLog(uint32_t va, double pixels, size_t queries, float samples_per_pix
 // top-down rows of 32 bit BGRA (or BGRX), written as a .bmp in XBE_TEST_DIR
 void Snap(uint32_t width, uint32_t height, const uint8_t* rows, uint32_t pitch);
 uint64_t Frames();
+void CountDraw();                   // each draw the renderer makes
+uint64_t Draws();
 
 }  // namespace testdrive
