@@ -873,6 +873,7 @@ private:
             uint32_t w, h;       // the device's render target
             const char* remix;   // the camera RTX Remix takes from the device's transforms (RemixCamera)
             float fov, lean;     // its vertical field of view and sideways lean, degrees
+            bool counted;        // inside an occlusion query (the title counting pixels), which Remix only rasterises
         };
         std::vector<After> after, after_last;
         std::vector<After> first, first_last;  // the frame's first draws, marked or not
@@ -2530,6 +2531,7 @@ void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
             a.marked = true;
         }
         a.remix = RemixCamera(dev_xf_[0], dev_xf_[1], dev_xf_[2], a.min_z, a.fov, a.lean);
+        a.counted = drawn && mod_state_ && mod_state_->simple[kMCountEnable >> 2];
         return a;
     };
     if (f.marked && c.after.size() < 48) c.after.push_back(entry());
@@ -2680,11 +2682,11 @@ void D3D9Backend::ReportCamera() {
             if (a.drawn && a.remix)
                 std::snprintf(remix, sizeof(remix), ", Remix camera %s (fov %.1f, lean %.2f)", a.remix, a.fov, a.lean);
             LOGR("d3d9: camera:   %2zu program %016llX, %u primitives, %s, textures %X, screen copies %X, writes %X, %s, "
-                 "depth %s%s, viewport z %.2g-%.2g, %s %ux%u, %s%s",
+                 "depth %s%s, viewport z %.2g-%.2g, %s %ux%u, %s%s%s",
                  i, (unsigned long long)a.program, a.primitives, a.two_d ? "2D" : "3D", a.textures, a.copies, a.write,
                  blend, a.zenable ? "on" : "off", a.zwrite ? " written" : "", a.min_z, a.max_z,
                  a.offscreen ? "offscreen" : "screen", a.w, a.h, !a.drawn ? "left out" : a.marked ? "marked" : "drawn",
-                 remix);
+                 a.counted ? ", counted" : "", remix);
         }
     };
     print("the last frame's first draws:", c.first_last);
