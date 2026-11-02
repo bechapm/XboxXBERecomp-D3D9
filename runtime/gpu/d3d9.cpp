@@ -895,6 +895,9 @@ private:
         ComPtr<IDirect3DSurface9> thumb, thumb_sys;
     } camera_{};
     void CountCamera(const DrawShaders& sh, bool drawn);
+    void Prime();
+    ComPtr<IDirect3DSurface9> prime_;  // XBE_D3D9_PRIME's target, a row taller than the back buffer
+    bool prime_due_ = false;
     float MeanBrightness(IDirect3DSurface9* rt);
     void TraceBrightness(const DrawShaders& sh);
     void NoteAfterMark(const char* op, uint32_t from, uint32_t to);
@@ -1004,6 +1007,7 @@ void D3D9Backend::ReleaseDeviceObjects() {
     ib32_.Reset();
     white_.Reset();
     lut_.Reset();
+    prime_.Reset();
     targets_.clear();
     textures_.clear();
     pack_textures_.clear();
@@ -2474,6 +2478,42 @@ static const char* RemixCamera(const float* world, const float* view, const floa
     return min_z >= 1 ? "sky" : "main";
 }
 
+// XBE_D3D9_PRIME, a test: before each frame's first draw, 1 binds a target a row taller than the back buffer and binds
+// the title's back, 2 also draws one pixel into it. RTX Remix puts its picture in at the first UI draw of a frame only
+// after the frame drew into another target first (TS2's scanner map, from the TS2-RTX mod): this finds what of that it
+// needs
+void D3D9Backend::Prime() {
+    static const int mode = [] {
+        const char* e = std::getenv("XBE_D3D9_PRIME");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (!mode || !prime_due_) return;
+    prime_due_ = false;
+    if (!prime_ && FAILED(dev_->CreateRenderTarget(bb_w_, bb_h_ + 1, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                   &prime_, nullptr))) {
+        prime_ = nullptr;
+        return;
+    }
+    ComPtr<IDirect3DSurface9> rt, ds;
+    dev_->GetRenderTarget(0, &rt);
+    dev_->GetDepthStencilSurface(&ds);
+    D3DVIEWPORT9 vp;
+    RECT sc;
+    dev_->GetViewport(&vp);
+    dev_->GetScissorRect(&sc);
+    dev_->SetDepthStencilSurface(nullptr);
+    dev_->SetRenderTarget(0, prime_.Get());
+    if (mode >= 2) {
+        Rs(D3DRS_ALPHABLENDENABLE, FALSE);
+        Rs(D3DRS_COLORWRITEENABLE, 15);
+        DrawQuad(nullptr, RECT{0, 0, 1, 1}, 0xFF000000, nullptr);
+    }
+    dev_->SetRenderTarget(0, rt.Get());
+    dev_->SetDepthStencilSurface(ds.Get());
+    dev_->SetViewport(&vp);
+    dev_->SetScissorRect(&sc);
+}
+
 void D3D9Backend::CountCamera(const DrawShaders& sh, bool drawn) {
     if (!sh.prog || mods::D3d9().draw.empty()) return;
     const RecompModDraw& d = mod_draw_;
@@ -2834,6 +2874,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         counts_.targets++;
         return;
     }
+    Prime();
     Scene(true);
 
     // textures first: what the stages hold decides whether fixed function can draw them
@@ -3084,6 +3125,7 @@ void D3D9Backend::ApplySettings() {
     Bind(nullptr, nullptr);
     targets_.clear();
     dummies_.clear();
+    prime_.Reset();
     bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(guest_h_ * scale_)));
     D3DPRESENT_PARAMETERS pp;
@@ -3142,6 +3184,7 @@ void D3D9Backend::Present(const Surface& front) {
         screens_[0] = screen;
     }
     for (const mods::DeviceHook& h : mods::D3d9().present) h.fn(dev_.Get(), h.user);
+    prime_due_ = true;
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (ramp_dirty_) UpdateGammaLut();
