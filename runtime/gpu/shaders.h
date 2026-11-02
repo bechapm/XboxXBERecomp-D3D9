@@ -96,7 +96,7 @@ std::string QuadHlsl(std::string s);
 // depth stored reversed (1 at the near clip, 0 at the far one) from DrawConstants::zparams, for a vertex shader
 std::string ReversedDepthHlsl(std::string s);
 // the geometry shader that draws a point as its console pixel
-std::string PointHlsl();
+std::string PointHlsl(bool counted = false);
 
 // HLSL a backend extension adds; the defaults write the console path
 struct ShaderHooks {
