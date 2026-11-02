@@ -114,6 +114,27 @@ std::vector<int> g_controls[kControlCount];  // sources, under g_lock
 HWND g_hwnd = nullptr;
 bool g_captured = false;  // mouse_look holds the pointer in the window, window thread
 
+// the pointer (input.h): wanted by a game's menu, which takes the mouse's buttons and wheel from the controls
+constexpr UINT kPointerSync = WM_APP + 0x40;  // to the window thread: the capture and the cursor follow the want
+std::atomic<int> g_wants{0};       // callers wanting the pointer now
+std::atomic<bool> g_want{false};  // any of them
+bool g_shown = false;           // under g_lock, as the rest of the pointer's state
+Device g_last = Device::keyboard;
+uint32_t g_moved = 0, g_presses[5] = {};
+int32_t g_wheel_total = 0, g_wheel_part = 0;  // whole notches, and what a fine wheel turned toward the next
+uint8_t g_blocked = 0;          // mouse buttons the pointer keeps from the controls until they are let go
+LPARAM g_pos = -1;              // the last WM_MOUSEMOVE's client position
+bool g_pad_active = false;      // controller 1's pad was in use at its last poll
+
+// the mouse buttons as the player has them: Windows' left and right swapped back when they are swapped
+uint8_t MouseHeld() {
+    uint8_t held = 0;
+    for (int i = 0; i < 5; i++)
+        if (GetAsyncKeyState(kMouseVk[i]) & 0x8000) held |= uint8_t(1 << i);
+    if (GetSystemMetrics(SM_SWAPBUTTON)) held = uint8_t((held & ~3) | (held & 1) << 1 | (held & 2) >> 1);
+    return held;
+}
+
 // a source from its text, 0 when it names nothing
 int Source(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::toupper(c)); });
@@ -237,12 +258,16 @@ void ReadKeyboardMouse(Pad& p) {
     bool over = g_captured || (GetCursorPos(&pt) && WindowFromPoint(pt) == g_hwnd);
     uint64_t now = SDL_GetTicks();
     bool wheel[2] = {WheelHeld(g_wheel[0], now), WheelHeld(g_wheel[1], now)};
+    // a button the pointer took stays its own until let go: the click that closed a menu does not fire
+    uint8_t mouse = MouseHeld();
+    if (g_want) g_blocked = 0x1F;
+    else g_blocked &= mouse;
     int sticks[4] = {};  // left x, left y, right x, right y
     for (int c = 0; c < kControlCount; c++) {
         bool held = false;
         for (int src : g_controls[c]) {
             if (src == kWheelUp || src == kWheelDown) held |= wheel[src - kWheelUp];
-            else if (src >= kMouseFirst) held |= over && (GetAsyncKeyState(kMouseVk[src - kMouseFirst]) & 0x8000);
+            else if (src >= kMouseFirst) held |= over && (mouse & ~g_blocked & (1 << (src - kMouseFirst)));
             else held |= (GetAsyncKeyState(src) & 0x8000) != 0;
         }
         if (!held) continue;
@@ -282,7 +307,7 @@ void Merge(Pad& p, const Pad& kbm) {
 
 // mouse_look keeps the pointer hidden in the client area while the window is in front
 void Capture(bool on) {
-    on = on && g_hwnd && app::Get().keyboard_mouse && app::Get().mouse_look;
+    on = on && g_hwnd && app::Get().keyboard_mouse && app::Get().mouse_look && !g_want;
     if (on) {
         RECT r;
         GetClientRect(g_hwnd, &r);
@@ -292,6 +317,44 @@ void Capture(bool on) {
         ClipCursor(nullptr);
     }
     g_captured = on;
+}
+
+// window thread: the cursor over the client area, hidden while mouse_look holds it or a key or pad was used last
+bool SetClientCursor() {
+    bool hidden;
+    {
+        std::lock_guard lock(g_lock);
+        hidden = g_captured || (g_want && !g_shown);
+    }
+    SetCursor(hidden ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
+    return true;
+}
+
+bool OverClient() {
+    POINT pt;
+    if (!GetCursorPos(&pt) || WindowFromPoint(pt) != g_hwnd) return false;
+    ScreenToClient(g_hwnd, &pt);
+    RECT r;
+    GetClientRect(g_hwnd, &r);
+    return PtInRect(&r, pt) != 0;
+}
+
+// a key or pad was used: the pointer hides until the mouse moves
+void Used(Device d) {
+    bool hide;
+    {
+        std::lock_guard lock(g_lock);
+        g_last = d;
+        hide = g_shown;
+        g_shown = false;
+    }
+    if (hide && g_want && g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);
+}
+
+std::string MouseName(int i) {
+    constexpr const char* kNames[] = {"Left Mouse", "Right Mouse", "Middle Mouse", "Mouse 4", "Mouse 5", "Wheel Up",
+                                      "Wheel Down"};
+    return kNames[i];
 }
 
 }  // namespace
@@ -353,17 +416,82 @@ bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* resu
                 ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
                 g_mouse_dx += ri.data.mouse.lLastX;
                 g_mouse_dy += ri.data.mouse.lLastY;
+                if (ri.data.mouse.lLastX || ri.data.mouse.lLastY) {
+                    std::lock_guard lock(g_lock);
+                    g_last = Device::mouse;
+                }
             }
             return false;  // DefWindowProc cleans up after WM_INPUT
         }
         case WM_MOUSEWHEEL: {
+            if (g_want) {
+                std::lock_guard lock(g_lock);
+                g_wheel_part += GET_WHEEL_DELTA_WPARAM(wp);
+                g_wheel_total += g_wheel_part / WHEEL_DELTA;
+                g_wheel_part %= WHEEL_DELTA;
+                g_last = Device::mouse;
+                *result = 0;
+                return true;
+            }
             int notches = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
             std::lock_guard lock(g_lock);
+            g_last = Device::mouse;
             WheelWay& w = g_wheel[notches > 0 ? 0 : 1];
             w.pending = std::min(w.pending + std::abs(notches), kWheelMaxPending);
             *result = 0;
             return true;
         }
+        case WM_MOUSEMOVE: {
+            bool show = false;
+            {
+                std::lock_guard lock(g_lock);
+                if (lp == g_pos) return false;  // Windows sends a move when nothing moved, after a click for one
+                g_pos = lp;
+                g_last = Device::mouse;
+                if (g_want && !g_captured) {
+                    g_moved++;
+                    show = !g_shown;
+                    g_shown = true;
+                }
+            }
+            if (show) SetClientCursor();
+            return false;
+        }
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDBLCLK:
+        case WM_XBUTTONDBLCLK: {
+            int b = msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK   ? 0
+                    : msg == WM_RBUTTONDOWN || msg == WM_RBUTTONDBLCLK ? 1
+                    : msg == WM_MBUTTONDOWN || msg == WM_MBUTTONDBLCLK ? 2
+                                                                       : 2 + GET_XBUTTON_WPARAM(wp);
+            bool show = false;
+            {
+                std::lock_guard lock(g_lock);
+                g_last = Device::mouse;
+                if (g_want && !g_captured && b < 5) {
+                    g_presses[b]++;
+                    show = !g_shown;
+                    g_shown = true;
+                }
+            }
+            if (show) SetClientCursor();
+            return false;
+        }
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            Used(Device::keyboard);
+            if (g_want && OverClient()) SetClientCursor();
+            return false;
+        case kPointerSync:
+            Capture(GetForegroundWindow() == g_hwnd && !IsIconic(g_hwnd));
+            if (OverClient()) SetClientCursor();
+            *result = 0;
+            return true;
         case WM_ACTIVATE:
             Capture(LOWORD(wp) != WA_INACTIVE && !HIWORD(wp));
             return false;
@@ -372,12 +500,9 @@ bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* resu
             if (g_captured) Capture(true);
             return false;
         case WM_SETCURSOR:
-            if (g_captured && LOWORD(lp) == HTCLIENT) {
-                SetCursor(nullptr);
-                *result = TRUE;
-                return true;
-            }
-            return false;
+            if (LOWORD(lp) != HTCLIENT) return false;
+            *result = TRUE;
+            return SetClientCursor();
     }
     return false;
 }
@@ -436,6 +561,14 @@ Pad Poll(int port) {
             p.ry = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_RIGHTY));
         }
     }
+    if (port == 0) {
+        // a button, or a stick or trigger past half way, where none was: the pad is in use
+        bool active = p.buttons || std::abs(int(p.lx)) > 0x4000 || std::abs(int(p.ly)) > 0x4000 ||
+                      std::abs(int(p.rx)) > 0x4000 || std::abs(int(p.ry)) > 0x4000;
+        for (uint8_t a : p.analog) active |= a > 0x80;
+        if (active && !g_pad_active) Used(Device::pad);
+        g_pad_active = active;
+    }
     if (port == 0 && app::Get().keyboard_mouse) {
         std::lock_guard lock(g_lock);
         g_kbm = Pad{};
@@ -465,6 +598,75 @@ void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
     std::lock_guard lock(g_lock);
     if (port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);
+}
+
+Pointer GetPointer() {
+    Pointer ptr;
+    bool want = g_want && g_hwnd && app::Get().keyboard_mouse;
+    POINT pt{};
+    bool over = want && !g_captured && GetForegroundWindow() == g_hwnd && GetCursorPos(&pt) &&
+                WindowFromPoint(pt) == g_hwnd && ScreenToClient(g_hwnd, &pt);
+    // the picture letterboxed in the client area, as the renderers show it (D3D9Backend::FrameRect)
+    RECT rc{};
+    if (g_hwnd) GetClientRect(g_hwnd, &rc);
+    float w = float(std::max<LONG>(rc.right - rc.left, 1));
+    float h = float(std::max<LONG>(rc.bottom - rc.top, 1));
+    ptr.aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float vw = std::min(w, h * ptr.aspect);
+    float vh = vw / ptr.aspect;
+    ptr.x = (float(pt.x) - (w - vw) / 2) / vw;
+    ptr.y = (float(pt.y) - (h - vh) / 2) / vh;
+    std::lock_guard lock(g_lock);
+    ptr.inside = over && ptr.x >= 0 && ptr.x < 1 && ptr.y >= 0 && ptr.y < 1;
+    ptr.shown = want && g_shown;
+    ptr.moved = g_moved;
+    ptr.held = over ? MouseHeld() : 0;
+    std::copy(std::begin(g_presses), std::end(g_presses), ptr.presses);
+    ptr.wheel = g_wheel_total;
+    return ptr;
+}
+
+void PointerWant(bool on) {
+    int n = on ? ++g_wants : --g_wants;
+    if (n < 0) g_wants = n = 0;  // a let go with no want before it
+    on = n > 0;
+    if (g_want.exchange(on) == on) return;
+    {
+        std::lock_guard lock(g_lock);
+        g_wheel[0] = g_wheel[1] = WheelWay{};  // notches turned for the controls do not arrive in the menu, or after it
+        g_wheel_part = 0;
+        if (on) g_shown = false;  // until the mouse moves
+    }
+    if (g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);
+}
+
+Device LastUsed() {
+    std::lock_guard lock(g_lock);
+    return g_last;
+}
+
+std::string KeyName(int vk) {
+    for (int i = 0; i < 5; i++)
+        if (vk == kMouseVk[i]) return MouseName(i);
+    UINT sc = MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC_EX);  // 0xE0 in the high byte for the keys left of the numbers
+    if (!sc) return "";
+    wchar_t name[64];
+    int n = GetKeyNameTextW(LONG((sc & 0xFF) << 16 | ((sc & 0xFF00) ? 1 << 24 : 0)), name, int(std::size(name)));
+    if (n <= 0) return "";
+    char out[256];
+    int len = WideCharToMultiByte(CP_UTF8, 0, name, n, out, int(sizeof(out)), nullptr, nullptr);
+    return std::string(out, std::max(len, 0));
+}
+
+std::string ControlName(const char* control) {
+    int c = ControlIndex(control ? control : "");
+    int src;
+    {
+        std::lock_guard lock(g_lock);
+        if (c < 0 || g_controls[c].empty()) return "";
+        src = g_controls[c][0];
+    }
+    return src >= kMouseFirst ? MouseName(src - kMouseFirst) : KeyName(src);
 }
 
 }  // namespace input

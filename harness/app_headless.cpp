@@ -50,5 +50,6 @@ std::recursive_mutex& UiLock() {
 }
 
 void Pace() {}
+std::vector<Mode> DisplayModes() { return {}; }  // no monitor
 
 }  // namespace app
