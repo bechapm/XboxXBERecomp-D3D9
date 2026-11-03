@@ -168,6 +168,7 @@ void PointerElsewhere(int on) {
         if (++n == 1) {
             input::CursorElsewhere(true);
             input::KeysElsewhere(true);
+            LOGR("[MOD] an overlay has the mouse and keys");
         }
         return;
     }
@@ -178,6 +179,7 @@ void PointerElsewhere(int on) {
     if (had == 1) {
         input::KeysElsewhere(false);
         input::CursorElsewhere(false);
+        LOGR("[MOD] the game has the mouse and keys again");
     }
     input::PointerWant(false);
 }
