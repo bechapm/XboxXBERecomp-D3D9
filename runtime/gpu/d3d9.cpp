@@ -637,6 +637,7 @@ struct DeclElement {
     int8_t reg = -1;  // converted: the input register it is made from
     uint8_t decode = kDecodeNone;
     bool swap = false;  // converted: red and blue change places
+    bool uv1 = false;   // converted: two coordinates given a third, 1 (XBE_D3D9_FIXED_UV3, a test)
 };
 
 // the shader that turns the frame into the gamma corrected picture, drawn over a screen quad
@@ -1934,6 +1935,16 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
                                                    (n == 2 && e.format == DXGI_FORMAT_R32G32_FLOAT) ||
                                                    (n == 3 && float_in) || (n == 4 && e.format == DXGI_FORMAT_R32G32B32A32_FLOAT));
             d.type = in_place ? FloatDecl(n) : BYTE(FloatDecl(n) | 0x80);
+            // XBE_D3D9_FIXED_UV3=1, a test: a plain draw's two coordinates as three, u, v and 1, as the title's own
+            // three part coordinates come (does a tool that reads the declaration take two as it takes three?)
+            static const bool uv3 = [] {
+                const char* e = std::getenv("XBE_D3D9_FIXED_UV3");
+                return e && e[0] == '1';
+            }();
+            if (uv3 && sh.plain && n == 2 && u.usage == D3DDECLUSAGE_TEXCOORD) {
+                d.type = BYTE(D3DDECLTYPE_FLOAT3 | 0x80);
+                d.uv1 = true;
+            }
         }
         if (sh.ffp && !(d.type & 0x80)) {
             el.push_back(d);
@@ -2427,6 +2438,7 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
                 if (size_t(v) * b.stride + ve.offset + 4 > b.bytes) std::fill(f, f + 4, 0.0f);
                 else ReadElement(ve.format, e.decode, src, f);
                 uint8_t* dst = out + size_t(v) * conv_stride + e.offset;
+                if (e.uv1) f[2] = 1.0f;
                 if (e.type == D3DDECLTYPE_D3DCOLOR) {
                     if (e.swap) std::swap(f[0], f[2]);
                     uint32_t c = PackColor4(f);
