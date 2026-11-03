@@ -3609,12 +3609,13 @@ void D3D9Backend::Present(const Surface& front) {
     }
     if (!mods::D3d9().draw.empty()) {
         EndCameraFrame();
-        if (presents_ % 600 == 0) ReportCamera();
+        // the camera report, and its frame in 600 read back after every draw, for diagnosing a D3D9 tool: only with
+        // XBE_D3D9_CAMERA_PROBE=1. Each read-back waits for the GPU: under RTX Remix the probed frame took about 200 ms
         static const bool probe_on = [] {
             const char* e = std::getenv("XBE_D3D9_CAMERA_PROBE");
-            return !(e && e[0] == '0');
+            return e && e[0] == '1';
         }();
-        // one frame in 600 read back after every draw: XBE_D3D9_CAMERA_PROBE=0 for none
+        if (probe_on && presents_ % 600 == 0) ReportCamera();
         camera_.probe = probe_on && presents_ % 600 == 599;
         camera_.probed = false;
     }
