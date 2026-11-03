@@ -329,15 +329,18 @@ bool Hidden() {
     return g_captured || (g_want && !g_shown);
 }
 
-// window thread: the window thread's cursor display count follows Hidden(), one step down while hidden. A cursor set by
-// anyone else in between (ImGui's frame, an overlay hooking the window, the class cursor) then stays hidden too: on its
-// own, SetCursor(nullptr) lasted only until the next of those, and the cursor flickered as the mouse moved
+// window thread: the window thread's cursor display count follows Hidden(), below 0 while hidden and 0 or more while
+// not. A cursor set by anyone else in between (ImGui's frame, an overlay hooking the window, the class cursor) then
+// stays hidden too: on its own, SetCursor(nullptr) lasted only until the next of those, and the cursor flickered as the
+// mouse moved. Set outright rather than stepped, as an overlay (RTX Remix's menu) moves the count itself
 void SyncCursor() {
-    static bool off = false;
-    bool hide = Hidden();
-    if (hide == off) return;
-    off = hide;
-    ShowCursor(hide ? FALSE : TRUE);
+    if (Hidden()) {
+        while (ShowCursor(FALSE) >= 0) {
+        }
+    } else {
+        while (ShowCursor(TRUE) < 0) {
+        }
+    }
 }
 
 bool SetClientCursor() {
