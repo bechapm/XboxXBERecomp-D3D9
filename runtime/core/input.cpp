@@ -118,6 +118,7 @@ bool g_captured = false;  // mouse_look holds the pointer in the window, window 
 constexpr UINT kPointerSync = WM_APP + 0x40;  // to the window thread: the capture and the cursor follow the want
 std::atomic<int> g_wants{0};       // callers wanting the pointer now
 std::atomic<bool> g_want{false};  // any of them
+std::atomic<bool> g_cursor_elsewhere{false};  // CursorElsewhere: an overlay has the cursor
 bool g_shown = false;           // under g_lock, as the rest of the pointer's state
 Device g_last = Device::keyboard;
 uint32_t g_moved = 0, g_presses[5] = {};
@@ -334,6 +335,7 @@ bool Hidden() {
 // stays hidden too: on its own, SetCursor(nullptr) lasted only until the next of those, and the cursor flickered as the
 // mouse moved. Set outright rather than stepped, as an overlay (RTX Remix's menu) moves the count itself
 void SyncCursor() {
+    if (g_cursor_elsewhere) return;
     if (Hidden()) {
         while (ShowCursor(FALSE) >= 0) {
         }
@@ -344,6 +346,7 @@ void SyncCursor() {
 }
 
 bool SetClientCursor() {
+    if (g_cursor_elsewhere) return false;  // left to the overlay
     SyncCursor();
     SetCursor(Hidden() ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
     return true;
@@ -671,7 +674,12 @@ void PointerWant(bool on) {
     if (g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);
 }
 
-bool CursorHidden() { return Hidden(); }
+bool CursorHidden() { return !g_cursor_elsewhere && Hidden(); }
+
+void CursorElsewhere(bool on) {
+    if (g_cursor_elsewhere.exchange(on) == on) return;
+    if (g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);  // the SDK's rule again when it ends
+}
 
 Device LastUsed() {
     std::lock_guard lock(g_lock);

@@ -54,6 +54,9 @@ Device LastUsed();  // the last controller 1 used: a key, the mouse or a pad
 // and a key or pad was used since the mouse moved). The window's WM_SETCURSOR asks this before ImGui, which would
 // otherwise show its arrow there whatever the game is doing
 bool CursorHidden();
+// any thread: an overlay draws a cursor of its own and sets the system one itself (RTX Remix's menu hides it each
+// frame): while on, the SDK leaves the cursor alone. Pair it with PointerWant, which takes the mouse from the game
+void CursorElsewhere(bool on);
 std::string KeyName(int vk);  // a Windows virtual key as the keyboard calls it ("Enter", "Esc"), "" for none
 std::string ControlName(const char* control);  // the first key or mouse button bound to a control, "" for none
 
