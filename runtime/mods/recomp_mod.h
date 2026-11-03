@@ -95,7 +95,10 @@ typedef struct RecompModDraw {
                                        identity, and PROJECTION its projection.
                                        Its pixel shader is still bound: remove it
                                        in before and fixed function draws this,
-                                       leave it and it stays a program */
+                                       leave it and it stays a program. Or clear
+                                       this in before: it stays a program either
+                                       way (a toolkit older than this one draws it
+                                       fixed if the pixel shader is gone) */
     /* version 8 (this SDK's): a 2D draw's (two_d) place on its target, in
        the target's console pixels, as the title's program or fixed function
        puts its vertices: left, top, right, bottom. 0 when it could not be
