@@ -119,6 +119,8 @@ constexpr UINT kPointerSync = WM_APP + 0x40;  // to the window thread: the captu
 std::atomic<int> g_wants{0};       // callers wanting the pointer now
 std::atomic<bool> g_want{false};  // any of them
 std::atomic<bool> g_cursor_elsewhere{false};  // CursorElsewhere: an overlay has the cursor
+std::atomic<bool> g_keys_elsewhere{false};    // KeysElsewhere: an overlay has the keyboard
+bool g_keys_blocked[256] = {};                // keys an overlay took, held back until let go; the polling thread's
 bool g_shown = false;           // under g_lock, as the rest of the pointer's state
 Device g_last = Device::keyboard;
 uint32_t g_moved = 0, g_presses[5] = {};
@@ -270,7 +272,12 @@ void ReadKeyboardMouse(Pad& p) {
         for (int src : g_controls[c]) {
             if (src == kWheelUp || src == kWheelDown) held |= wheel[src - kWheelUp];
             else if (src >= kMouseFirst) held |= over && (mouse & ~g_blocked & (1 << (src - kMouseFirst)));
-            else held |= (GetAsyncKeyState(src) & 0x8000) != 0;
+            else if (src > 0 && src < 256) {
+                // a key the overlay took stays its own until let go: typing in it does not walk the player after
+                bool down = (GetAsyncKeyState(src) & 0x8000) != 0;
+                if (g_keys_elsewhere || g_keys_blocked[src]) g_keys_blocked[src] = down || g_keys_elsewhere;
+                else held |= down;
+            }
         }
         if (!held) continue;
         if (c < kAnalogFirst) p.buttons |= uint16_t(1 << c);
@@ -675,6 +682,8 @@ void PointerWant(bool on) {
 }
 
 bool CursorHidden() { return !g_cursor_elsewhere && Hidden(); }
+
+void KeysElsewhere(bool on) { g_keys_elsewhere = on; }
 
 void CursorElsewhere(bool on) {
     if (g_cursor_elsewhere.exchange(on) == on) return;
