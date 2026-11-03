@@ -908,7 +908,7 @@ private:
     std::unordered_map<uint64_t, PlainProgram> plain_;
     std::unordered_map<uint64_t, StageSum> sums_;  // by pixel key and combiner constants
     struct PlainCounts {
-        uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, position_w, offscreen, stage, keep, pixel;
+        uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, position_w, offscreen, stage, keep, pixel, kept;
         uint32_t alpha_kill, shadow, wide, rect, two_sided;  // the stage states fixed function cannot draw (Lacking)
     } plain_counts_{};
     std::unordered_set<uint64_t> plain_refusals_;  // what CountStageRefusal has logged
@@ -2652,7 +2652,8 @@ bool D3D9Backend::PlainTakeOver(const State& s, const Assembled& a, DrawShaders&
                                 GuestExtent size, Geometry& g) {
     ComPtr<IDirect3DPixelShader9> ps;
     dev_->GetPixelShader(&ps);
-    if (!ps) {
+    // a mod that cleared fixed_transform in before keeps the draw a program, with or without its pixel shader
+    if (!ps && mod_draw_.fixed_transform) {
         // a texture past the four the title has is a mod's: RTX Remix counts stages 0 to 6 on every fixed function draw
         // and reads a UI mark there as a UI draw, which loses its picture (dbbd858)
         for (DWORD i = 4; i < 7; i++) {
@@ -2666,7 +2667,8 @@ bool D3D9Backend::PlainTakeOver(const State& s, const Assembled& a, DrawShaders&
         plain_counts_.fixed++;
         return true;
     }
-    plain_counts_.pixel++;
+    if (ps) plain_counts_.pixel++;
+    else plain_counts_.kept++;
     mod_draw_.fixed_transform = 0;
     sh.plain = nullptr;
     sh.ffp = false;
@@ -3806,8 +3808,9 @@ void D3D9Backend::Present(const Surface& front) {
         const PlainCounts& n = plain_counts_;
         LOGR("d3d9: plain transforms: %u drawn fixed, %u of them with a texture on stages 4 to 6; stayed programs: %u not "
              "plain, %u 2D, %u fog, %u W buffer, %u layout, %u position with a w, %u off screen, %u stage texture, %u a mod's choice, %u pixel shader "
-             "left; stage state: %u alpha kill, %u shadow, %u wide, %u rect, %u two sided", n.fixed, n.marked, n.not_plain,
-             n.two_d, n.fog, n.w_buffer, n.layout, n.position_w, n.offscreen, n.stage, n.keep, n.pixel, n.alpha_kill, n.shadow, n.wide,
+             "left, %u kept by a mod after seeing it; stage state: %u alpha kill, %u shadow, %u wide, %u rect, %u two sided",
+             n.fixed, n.marked, n.not_plain, n.two_d, n.fog, n.w_buffer, n.layout, n.position_w, n.offscreen, n.stage, n.keep,
+             n.pixel, n.kept, n.alpha_kill, n.shadow, n.wide,
              n.rect, n.two_sided);
     }
     if (report)
