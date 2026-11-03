@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -837,6 +838,222 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
         if (t[kTssColorOp] <= 1) break;
     }
     return k;
+}
+
+namespace {
+
+// the combiners of PixelHlsl, on numbers: registers by their PS_REGISTER number
+struct CombinerRun {
+    using V = std::array<float, 4>;
+    const PixelKey& k;
+    const float (*pc)[4];
+    V reg[16] = {};
+    int stage = 0;
+    bool clamp_sum = false, inv_v1 = false, inv_r0 = false;
+    V e{}, f{};
+
+    V Const(int i) const { return {pc[i][0], pc[i][1], pc[i][2], pc[i][3]}; }
+    V Var(uint32_t r) const {
+        uint32_t flags = k.count >> 8;
+        switch (r) {
+            case 1: return Const(stage == 8 ? 16 : ((flags & 0x10) ? stage * 2 : 0));
+            case 2: return Const(stage == 8 ? 17 : ((flags & 0x100) ? stage * 2 + 1 : 1));
+            case 3: case 4: case 5: case 8: case 9: case 10: case 11: case 12: case 13: return reg[r];
+            case 14: {
+                V o{};
+                for (int c = 0; c < 3; c++) {
+                    float v = inv_v1 ? 1 - reg[5][c] : reg[5][c], q = inv_r0 ? 1 - reg[12][c] : reg[12][c];
+                    o[c] = clamp_sum ? std::clamp(v + q, 0.0f, 1.0f) : v + q;
+                }
+                return o;
+            }
+            case 15: return {e[0] * f[0], e[1] * f[1], e[2] * f[2], 0};
+            default: return {};
+        }
+    }
+    // three channels for rgb, one (in [0]) for alpha
+    V Input(uint32_t v, bool alpha) const {
+        uint32_t r = v & 0xF, chan = v & 0x10, mod = v & 0xE0;
+        V x = Var(r), o{};
+        for (int c = 0; c < (alpha ? 1 : 3); c++) {
+            float a = alpha ? (chan ? x[3] : x[2]) : (chan ? x[3] : x[size_t(c)]), p = std::max(a, 0.0f);
+            switch (mod) {  // PS_INPUTMAPPING
+                case 0x00: a = p; break;
+                case 0x20: a = 1 - std::clamp(a, 0.0f, 1.0f); break;
+                case 0x40: a = 2 * p - 1; break;
+                case 0x60: a = -2 * p + 1; break;
+                case 0x80: a = p - 0.5f; break;
+                case 0xA0: a = -p + 0.5f; break;
+                case 0xC0: break;
+                default: a = -a; break;
+            }
+            o[size_t(c)] = a;
+        }
+        return o;
+    }
+    static float Map(float v, uint32_t m) {
+        switch (m) {  // PS_COMBINEROUTPUT bias and shift
+            case 0x08: return v - 0.5f;
+            case 0x10: return v * 2;
+            case 0x18: return (v - 0.5f) * 2;
+            case 0x20: return v * 4;
+            case 0x30: return v / 2;
+            default: return v;
+        }
+    }
+    struct Write {
+        int reg;
+        bool alpha;
+        V v;
+    };
+    // as Ps::Stage: the halves read before either writes, so the writes come back
+    void Stage(uint32_t inputs, uint32_t output, bool alpha, std::vector<Write>& w) {
+        V A = Input(inputs >> 24, alpha), B = Input((inputs >> 16) & 0xFF, alpha), C = Input((inputs >> 8) & 0xFF, alpha),
+          D = Input(inputs & 0xFF, alpha);
+        uint32_t cd_dst = output & 0xF, ab_dst = (output >> 4) & 0xF, sum_dst = (output >> 8) & 0xF, fl = output >> 12;
+        int n = alpha ? 1 : 3;
+        V ab{}, cd{}, sum{}, abm{}, cdm{};
+        float dab = 0, dcd = 0;
+        for (int c = 0; c < n; c++) dab += A[size_t(c)] * B[size_t(c)], dcd += C[size_t(c)] * D[size_t(c)];
+        bool mux_hi = (k.count >> 8) & 1 ? reg[12][3] >= 0.5f : (int(std::lround(reg[12][3] * 255)) & 1) == 1;
+        for (int c = 0; c < n; c++) {
+            size_t i = size_t(c);
+            ab[i] = (fl & 2) ? dab : A[i] * B[i];
+            cd[i] = (fl & 1) ? dcd : C[i] * D[i];
+            uint32_t m = fl & 0x38;
+            abm[i] = std::clamp(Map(ab[i], m), -1.0f, 1.0f);
+            cdm[i] = std::clamp(Map(cd[i], m), -1.0f, 1.0f);
+            float s = (fl & 4) ? (mux_hi ? cd[i] : ab[i]) : ab[i] + cd[i];
+            sum[i] = std::clamp(Map(s, m), -1.0f, 1.0f);
+        }
+        auto dest = [](uint32_t r) { return r == 4 || r == 5 || (r >= 8 && r <= 13) ? int(r) : -1; };
+        if (int r = dest(ab_dst); r >= 0) {
+            w.push_back({r, alpha, abm});
+            if (!alpha && (fl & 0x80)) w.push_back({r, true, {abm[2]}});
+        }
+        if (int r = dest(cd_dst); r >= 0) {
+            w.push_back({r, alpha, cdm});
+            if (!alpha && (fl & 0x40)) w.push_back({r, true, {cdm[2]}});
+        }
+        if (int r = dest(sum_dst); r >= 0) w.push_back({r, alpha, sum});
+    }
+    void Apply(const std::vector<Write>& w) {
+        for (const Write& x : w) {
+            if (x.alpha) reg[x.reg][3] = x.v[0];
+            else for (size_t c = 0; c < 3; c++) reg[x.reg][c] = x.v[c];
+        }
+    }
+    // false: a texture mode this cannot run
+    bool Run(const V& tex0, const V& diffuse, const V& other, V& out) {
+        for (int i = 0; i < 4; i++) {
+            uint32_t m = (k.tex_modes >> (i * 5)) & 0x1F;
+            V& t = reg[8 + i];
+            if (m == 0) t = {0, 0, 0, 1};
+            else if (m == 5) t = {};
+            else if (m == 4 || ((m >= 1 && m <= 3) && i > 0)) t = other;  // coordinates, or another texture
+            else if (m >= 1 && m <= 3 && !k.tex[i].shadow) t = tex0;
+            else return false;
+        }
+        reg[4] = diffuse;
+        reg[3] = {other[0], other[1], other[2], 1};  // fog: its colour, and none of it
+        reg[12] = {0, 0, 0, (k.tex_modes & 0x1F) ? reg[8][3] : 1};
+        reg[13] = {};
+        uint32_t n = std::min<uint32_t>(k.count & 0xFF, 8);
+        std::vector<Write> w;
+        for (uint32_t st = 0; st < n; st++) {
+            stage = int(st);
+            w.clear();
+            Stage(k.rgb_in[st], k.rgb_out[st], false, w);
+            Stage(k.a_in[st], k.a_out[st], true, w);
+            Apply(w);
+        }
+        if (k.final_abcd || k.final_efg) {
+            stage = 8;
+            uint32_t fl = k.final_efg & 0xFF;
+            clamp_sum = fl & 0x80;
+            inv_v1 = fl & 0x40;
+            inv_r0 = fl & 0x20;
+            e = Input(k.final_efg >> 24, false);
+            f = Input((k.final_efg >> 16) & 0xFF, false);
+            V A = Input(k.final_abcd >> 24, false), B = Input((k.final_abcd >> 16) & 0xFF, false),
+              C = Input((k.final_abcd >> 8) & 0xFF, false), D = Input(k.final_abcd & 0xFF, false),
+              G = Input((k.final_efg >> 8) & 0xFF, true);
+            for (size_t c = 0; c < 3; c++) out[c] = D[c] + C[c] + A[c] * (B[c] - C[c]);
+            out[3] = G[0];
+        } else {
+            out = reg[12];  // no fog
+        }
+        for (float& c : out) c = std::clamp(c, 0.0f, 1.0f);
+        return true;
+    }
+};
+
+// fixed function stage 0 alone, as PixelKey::ff has it (a missing texture already passes the current colour)
+uint8_t StageOp(uint32_t op, uint32_t a1, uint32_t a2) {
+    auto tex = [](uint32_t a) { return a == kTaTexture; };
+    auto dif = [](uint32_t a) { return a == 0 || a == kTaCurrent; };  // D3DTA_DIFFUSE, and current is diffuse at stage 0
+    if (op == kTopSelectArg1) return tex(a1) ? kSumTexture : dif(a1) ? kSumDiffuse : kSumNone;
+    if (op == kTopSelectArg2) return tex(a2) ? kSumTexture : dif(a2) ? kSumDiffuse : kSumNone;
+    if (!((tex(a1) && dif(a2)) || (dif(a1) && tex(a2)))) return kSumNone;
+    switch (op) {
+        case 4: return kSumModulate;  // D3DTOP_MODULATE, 2X and 4X, ADD: the XDK's values are Direct3D 9's up to here
+        case 5: return kSumModulate2x;
+        case 6: return kSumModulate4x;
+        case 7: return kSumAdd;
+        default: return kSumNone;
+    }
+}
+
+}  // namespace
+
+StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular) {
+    StageSum r;
+    if (!k.programmable) {
+        if (k.ff[0][0] <= 1 || k.ff[1][0] > 1 || k.ff[0][8] == 5) return r;  // no stage, several, or into temp
+        r.color = StageOp(k.ff[0][0], k.ff[0][1], k.ff[0][2]);
+        r.alpha = k.ff[0][4] <= 1 ? r.color : StageOp(k.ff[0][4], k.ff[0][5], k.ff[0][6]);
+        return r;
+    }
+    if (specular) return r;  // v1 then adds what stage 0 cannot
+    using V = CombinerRun::V;
+    // sample colours apart enough that no two operations agree on all of them
+    static const V kSample[6] = {{0.2f, 0.5f, 0.9f, 0.3f}, {0.7f, 0.15f, 0.4f, 0.8f}, {1, 1, 1, 1},
+                                 {0.05f, 0.6f, 0.25f, 0.02f}, {0.45f, 0.35f, 0.55f, 0.5f}, {0, 0, 0, 0}};
+    static const V kOther[2] = {{1, 1, 1, 1}, {0.5f, 0.3f, 0.7f, 0.6f}};
+    constexpr float kClose = 2e-3f;
+    // [0]: the half depends on something else; then each operation still agreeing
+    bool color_ok[7] = {false, true, true, true, true, true, true}, alpha_ok[7] = {false, true, true, true, true, true, true};
+    auto op = [](int o, float t, float v) {
+        switch (o) {
+            case kSumTexture: return t;
+            case kSumDiffuse: return v;
+            case kSumModulate: return t * v;
+            case kSumModulate2x: return std::min(2 * t * v, 1.0f);
+            case kSumModulate4x: return std::min(4 * t * v, 1.0f);
+            default: return std::min(t + v, 1.0f);
+        }
+    };
+    for (const V& t : kSample)
+        for (const V& v : kSample) {
+            V out[2];
+            for (int o = 0; o < 2; o++) {
+                CombinerRun run{k, pc};
+                if (!run.Run(t, v, kOther[o], out[o])) return r;
+            }
+            // another texture, the coordinates or fog count: no one stage says that half
+            for (size_t c = 0; c < 4; c++)
+                if (std::fabs(out[0][c] - out[1][c]) > kClose) (c < 3 ? color_ok : alpha_ok)[0] = true;
+            for (int o = kSumTexture; o <= kSumAdd; o++) {
+                for (size_t c = 0; c < 3; c++)
+                    if (std::fabs(op(o, t[c], v[c]) - out[0][c]) > kClose) color_ok[o] = false;
+                if (std::fabs(op(o, t[3], v[3]) - out[0][3]) > kClose) alpha_ok[o] = false;
+            }
+        }
+    for (int o = kSumTexture; o <= kSumAdd && !r.color && !color_ok[0]; o++)
+        if (color_ok[o]) r.color = uint8_t(o);
+    for (int o = kSumTexture; o <= kSumAdd && !r.alpha && !alpha_ok[0]; o++)
+        if (alpha_ok[o]) r.alpha = uint8_t(o);
+    return r;
 }
 
 constexpr uint32_t kMuxConstant = 3;

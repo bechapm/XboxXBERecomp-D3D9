@@ -43,6 +43,16 @@ uint64_t Hash(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 PixelKey MakePixelKey(const State& s, const TexInfo tex[4]);
 
+// What a draw's pixel stage makes of texture 0 and the vertex colour, as one fixed function stage would say it, for a
+// tool that reads texture stage states instead of running shaders (RTX Remix). Combiners are run on sample colours
+// with the draw's constants (pc, as DrawConstants has them), so a sum holds for those constants only. kSumNone: no one
+// stage says it (another texture or a texture shader changes it, or no operation below gives it)
+enum StageSumOp : uint8_t { kSumNone, kSumTexture, kSumDiffuse, kSumModulate, kSumModulate2x, kSumModulate4x, kSumAdd };
+struct StageSum {
+    uint8_t color = kSumNone, alpha = kSumNone;
+};
+StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular);
+
 // Shader Model 3, for the Direct3D 9 renderer: constants in registers, Direct3D 9's names for what passes between
 // the stages, inputs named by what they hold. The layouts are the kSm3 registers below.
 inline bool g_shader_model3 = false;

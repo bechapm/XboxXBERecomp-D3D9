@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 8
+#define RECOMP_MOD_API_VERSION 9
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -104,6 +104,17 @@ typedef struct RecompModDraw {
        (a sprite the title projects itself) */
     int      screen_box_set;
     float    screen_box[4];
+    /* version 9: what the title's pixel stage does with texture 0 and the
+     * vertex colour, as Direct3D 9's stage 0 would say it (D3DTOP, D3DTA): for a tool that
+     * reads texture stage states instead of running shaders. The toolkit runs
+     * a pixel shader's combiners on sample colours with the draw's constants,
+     * or reads a fixed function stage 0 used alone. A half not known (several
+     * textures or stages, a texture shader, specular, or a sum no one stage
+     * makes) says texture times vertex colour. On a draw with fixed_transform
+     * set, stage 0 is already this. */
+    uint32_t stage_known;           /* 1: the colour half is known, 2: the alpha */
+    uint32_t stage_color_op, stage_color_arg1, stage_color_arg2;
+    uint32_t stage_alpha_op, stage_alpha_arg1, stage_alpha_arg2;
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */
