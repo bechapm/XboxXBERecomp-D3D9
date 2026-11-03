@@ -774,6 +774,10 @@ private:
     void ModsAfter();
     // RecompModDraw.where: where the draw in hand lies, for a mod that asks
     static int ModWhere(const RecompModDraw* d, uint32_t samples, float box[4], float depth[2], float w[2]);
+    // RecompModDraw.pick: the nearest world surface under a point, asked for now, found in the next frame's draws
+    static int ModPick(const RecompModDraw* d, uint32_t id, float x, float y, float hit[3]);
+    void PickDraw3D(const State& s, const Assembled& a, const DrawShaders& sh);
+    void PickFrame();
     // draws a mod deferred (RECOMP_DRAW_DEFER), made at the frame's end: the device's state as the mods left it, the
     // target, and the title's vertices and indices copied, since the title's memory and the ring move on
     struct Deferred {
@@ -856,6 +860,13 @@ private:
     RecompModDraw mod_draw_{};
     bool mod_prog_ = false;  // the draw in hand is a vertex program's
     static D3D9Backend* mod_where_;  // the backend whose draw the mods hear of (ModWhere)
+    // ModPick: points asked for this frame, those the frame's world draws are tested under, and what the last whole
+    // frame found; the CPU may run kPickBudget vertices of programs that are not plain transforms a frame for them
+    static constexpr uint32_t kPickBudget = 30000;
+    std::vector<PickPoint> pick_asked_, pick_testing_;
+    std::unordered_map<uint32_t, PickPoint> pick_found_;
+    uint32_t pick_budget_ = kPickBudget;
+    bool pick_short_ = false;  // the budget ran out before the frame's world draws did
     size_t mods_called_ = 0;
     float dev_xf_[3][16] = {};
     bool dev_xf_ok_[3] = {};
@@ -2794,8 +2805,11 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
         d.screen_box_set = t && ScreenBox(s, a, sh.prog, t->gw, t->gh, d.screen_box);
     }
     d.where = &D3D9Backend::ModWhere;
+    d.pick = &D3D9Backend::ModPick;
     mod_where_ = this;
     mod_prog_ = sh.prog;
+    // a world draw of the screen's, while points are asked for: tested under them for the next frame's answers
+    if (!pick_testing_.empty() && !d.two_d && !d.offscreen) PickDraw3D(s, a, sh);
     d.indexed = g.indexed;
     d.first_vertex = 0;
     d.vertices = g.vertices;
@@ -2821,6 +2835,47 @@ int D3D9Backend::ModWhere(const RecompModDraw* d, uint32_t samples, float box[4]
     const Target* t = b->bound_rt_ ? b->bound_rt_ : b->bound_ds_;
     if (!t) return 0;
     return DrawWhere(*b->mod_state_, *b->mod_asm_, b->mod_prog_, t->gw, t->gh, samples, box, depth, w) ? 1 : 0;
+}
+
+// the nearest world surface under a point of the draw's target: asked for now, tested against the next frame's world
+// draws, so the answer given is the one found for this id in a whole frame before (hit: depth, w, and 1 when found)
+int D3D9Backend::ModPick(const RecompModDraw* d, uint32_t id, float x, float y, float hit[3]) {
+    D3D9Backend* b = mod_where_;
+    if (!b || d != &b->mod_draw_ || !hit) return 0;
+    if (b->pick_asked_.size() < 32) b->pick_asked_.push_back(PickPoint{id, x, y, false, 0, 0});
+    auto it = b->pick_found_.find(id);
+    if (it == b->pick_found_.end()) return 0;
+    hit[0] = it->second.depth;
+    hit[1] = it->second.w;
+    hit[2] = it->second.hit ? 1.0f : 0.0f;
+    return 1;
+}
+
+void D3D9Backend::PickDraw3D(const State& s, const Assembled& a, const DrawShaders& sh) {
+    const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+    if (!t || pick_short_) return;
+    if (!PickDraw(s, a, sh.prog, sh.plain, t->gw, t->gh, pick_testing_.data(), pick_testing_.size(), pick_budget_) &&
+        !pick_budget_)
+        pick_short_ = true;
+}
+
+// at the frame's end: what the frame's draws found becomes the answers, unless the budget ran out first; the points
+// asked for this frame are tested in the next
+void D3D9Backend::PickFrame() {
+    if (!pick_testing_.empty()) {
+        if (!pick_short_) {
+            pick_found_.clear();
+            for (const PickPoint& p : pick_testing_) pick_found_[p.id] = p;
+        } else {
+            LOG_FIRST(4, "d3d9: a frame's world draws were more than the pick budget (%u vertices)", kPickBudget);
+        }
+    } else if (pick_asked_.empty()) {
+        pick_found_.clear();
+    }
+    pick_testing_.swap(pick_asked_);
+    pick_asked_.clear();
+    pick_budget_ = kPickBudget;
+    pick_short_ = false;
 }
 
 // a draw kept for the frame's end; false when it cannot be (no colour target, or the frame holds enough already)
@@ -3782,6 +3837,7 @@ void D3D9Backend::Present(const Surface& front) {
     }
     Bind(nullptr, nullptr);
     bound_rt_surf_ = nullptr;
+    PickFrame();
     presents_++;
     testdrive::Presented();
     PlacementFrame();

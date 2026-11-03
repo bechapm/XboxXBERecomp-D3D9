@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 10
+#define RECOMP_MOD_API_VERSION 11
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -127,6 +127,19 @@ typedef struct RecompModDraw {
      * sprite the title placed from the world can be put back where it was. */
     int    (*where)(const struct RecompModDraw *draw, uint32_t samples, float box[4], float depth[2],
                     float w[2]);
+    /* version 11 (this SDK's): the nearest world surface under a point of
+     * the draw's target (console pixels), asked for from the draw in hand
+     * (in before; NULL on a toolkit without it). The point is tested against
+     * the next frame's world draws, on the CPU, so the answer given is the
+     * last one found for this id: hit[0] its depth (0 near to 1 far), hit[1]
+     * its clip w (the distance along the view under a perspective), hit[2]
+     * 1 when a surface covered the point. Zero until there is an answer, and
+     * again once the id is no longer asked for. It works whatever the device's
+     * depth buffer holds (a tool that ray traces the world may leave it
+     * empty). Up to 32 points a frame; plain transforms are tested by their
+     * matrices, other programs within a budget of CPU work a frame, and a
+     * frame that runs over leaves the answers as they were. */
+    int    (*pick)(const struct RecompModDraw *draw, uint32_t id, float x, float y, float hit[3]);
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */

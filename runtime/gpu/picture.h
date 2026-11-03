@@ -72,6 +72,22 @@ bool ScreenBox(const State& s, const Assembled& a, bool program, uint32_t gw, ui
 bool DrawWhere(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, uint32_t samples,
                float box[4], float depth[2], float w[2]);
 
+// a point of a target gw x gh console pixels to find the nearest surface under, and what was found: depth (0 near to
+// 1 far, as the depth buffer takes it) and clip w where a triangle covers it
+struct PickPoint {
+    uint32_t id;
+    float x, y;
+    bool hit;
+    float depth, w;
+};
+
+// tests a draw's triangles under each point, keeping each point's nearest hit. A plain transform (plain, not null) is
+// done by its matrices; another program is run on the CPU, which budget limits: the vertices it may still run this
+// frame, less those this one used. false when the draw could not be read or the budget ran out
+struct PlainProgram;
+bool PickDraw(const State& s, const Assembled& a, bool program, const PlainProgram* plain, uint32_t gw, uint32_t gh,
+              PickPoint* pts, size_t n, uint32_t& budget);
+
 // one draw's placement on a target the picture's shape (the backend's, on the render thread)
 struct Placed {
     // clip x' = x * k + offset * w: squeezed by k about the anchor (offset = anchor * (1 - k), anchor in clip units)

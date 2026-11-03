@@ -6,7 +6,7 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 the port stays the port, and a mod is something a player chooses to add.
 
 The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
-game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`), 8 (`screen_box`), 9 (`stage_known`) and 10 (`where`) are this SDK's so far, and a mod
+game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`), 8 (`screen_box`), 9 (`stage_known`), 10 (`where`) and 11 (`pick`) are this SDK's so far, and a mod
 checks for them. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
@@ -242,6 +242,7 @@ nothing is deferred and the renderer draws as ever.
 | Screen (v8) | `screen_box_set`, `screen_box[4]` | a `two_d` draw's left, top, right and bottom on its target in console pixels, as its program or fixed function puts the vertices (run on the CPU for 2D draws only). Across frames it tells the screen's 2D (stays put while the camera moves) from sprites the title projects into the world (moves with it) |
 | Pixel stage (v9) | `stage_known`, `stage_color_op`, `stage_color_arg1`, `stage_color_arg2`, `stage_alpha_op`, `stage_alpha_arg1`, `stage_alpha_arg2` | what the game's pixel stage does with texture 0 and the vertex colour, as Direct3D 9's stage 0 would say it (`D3DTOP`, `D3DTA`), for a tool that reads texture stage states and runs no shader. The renderer runs a pixel shader's combiners on sample colours with the draw's constants, or reads a fixed function stage 0 used alone; `stage_known` 1 is set when the colour is known, 2 the alpha. A half not known (another texture or stage changes it, a texture shader, specular, or a sum no one stage makes) reads texture times vertex colour. A `fixed_transform` draw already has stage 0 set so. Present when `size` covers them |
 | Where (v10) | `where` | a function, for the draw in hand only (in `before` or `after`): `where(draw, samples, box, depth, w)` gives where any draw lies, 3D or 2D, from up to `samples` of its vertices spread through it (0 for all, at most 8192), those behind the eye left out: `box` as `screen_box`, `depth` its range from 0 near to 1 far as the depth buffer takes it, and `w` its clip w range (the distance along the view under a perspective, 1 for 2D in pixels); nonzero when found. It runs the draw's vertex program or transforms on the CPU, so a mod asks for the draws it needs, not every draw. With the camera it puts a sprite the title placed from the world back where it was. NULL on a toolkit without it |
+| Pick (v11) | `pick` | a function, asked from the draw in hand (in `before`): `pick(draw, id, x, y, hit)` asks for the nearest world surface under the point (x, y) of the draw's target in console pixels. The point is tested on the CPU against the next frame's world draws, so the answer given is the last one found for that id: `hit[0]` its depth (0 near to 1 far), `hit[1]` its clip w, `hit[2]` 1 when a surface covered the point; zero until there is one, and again once the id is no longer asked for. It does not read the depth buffer, which a tool that ray traces the world (RTX Remix) may leave without the world in it. Up to 32 points a frame; plain transforms are tested by their matrices, other programs within a budget of CPU work, and a frame that runs over leaves the answers as they were. With the camera it puts a sprite the title placed from the world, which holds no depth of its own, back where it was |
 
 **Example: hide the game's 2D**, for clean screenshots.
 
@@ -348,7 +349,7 @@ Fields are only ever added at the end. A mod checks `api->size` before using one
 `RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (8 here). The contract is shared with
 DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
 Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no new field), version 8's
-`RecompModDraw.screen_box`, version 9's `stage_known` and version 10's `where` are not in DirectXbox-Recomp yet.
+`RecompModDraw.screen_box`, version 9's `stage_known`, version 10's `where` and version 11's `pick` are not in DirectXbox-Recomp yet.
 
 ## Where a change belongs
 

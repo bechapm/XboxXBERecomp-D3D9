@@ -529,6 +529,117 @@ bool DrawWhere(const State& s, const Assembled& a, bool program, uint32_t gw, ui
     return BoxOf(s, a, program, gw, gh, box, depth, w, samples, true);
 }
 
+bool PickDraw(const State& s, const Assembled& a, bool program, const PlainProgram* plain, uint32_t gw, uint32_t gh,
+              PickPoint* pts, size_t n, uint32_t& budget) {
+    if (a.topology != Topology::Triangles || !n) return true;
+    // each vertex where the screen has it: x, y in console pixels, depth, w; w at or below 0 is behind the eye
+    uint32_t count = 0;
+    if (program && !plain) {
+        for (int r = 0; r < 16; r++)
+            if ((a.regs >> r) & 1) count = std::max(count, VertexCount(a, r));
+    } else {
+        int pos = plain ? plain->position : 0;
+        if (pos >= 0 && ((a.regs >> pos) & 1)) count = VertexCount(a, pos);
+    }
+    count = std::min(count, kMeasureMax);
+    if (!count) return false;
+    // a program run on the CPU costs; a plain transform is two matrices, which are not counted
+    if (program && !plain) {
+        if (count > budget) {
+            budget = 0;
+            return false;
+        }
+        budget -= count;
+    }
+    std::vector<std::array<float, 4>> sp(count);
+    if (plain) {
+        // as the program does it: model-view rows, projection rows, then the screen lines s * clip / w + o
+        const auto& sc = s.vsc[size_t(plain->screen_scale)];
+        const auto& of = s.vsc[size_t(plain->screen_offset)];
+        auto row = [&](const Vec& v, int reg) {
+            const auto& c = s.vsc[size_t(reg)];
+            return v[0] * c[0] + v[1] * c[1] + v[2] * c[2] + v[3] * c[3];
+        };
+        for (uint32_t v = 0; v < count; v++) {
+            Vec q, m;
+            if (!ReadInput(a, plain->position, v, q)) return false;
+            if (plain->modelview >= 0) {
+                for (int k = 0; k < 4; k++) m[size_t(k)] = row(q, plain->modelview + k);
+            } else {
+                m = q;
+            }
+            Vec c;
+            for (int k = 0; k < 4; k++) c[size_t(k)] = row(m, plain->projection + k);
+            sp[v] = c[3] > 0 ? std::array<float, 4>{c[0] * sc[0] / c[3] + of[0], c[1] * sc[1] / c[3] + of[1],
+                                                    (c[2] * sc[2] / c[3] + of[2]) / s.zscale, c[3]}
+                             : std::array<float, 4>{0, 0, 0, 0};
+        }
+    } else if (program) {
+        Program p{s};
+        for (uint32_t v = 0; v < count; v++) {
+            for (int r = 0; r < 16; r++)
+                if ((a.regs >> r) & 1) ReadInput(a, r, v, p.in[r]);
+            p.Run(s.vs->program);
+            sp[v] = {p.out[0][0], p.out[0][1], p.out[0][2] / s.zscale, p.out[0][3]};
+        }
+    } else {
+        float wvp[16], wv[16];
+        if (!a.pretransformed) {
+            Mul(s.transforms[kTsWorld].data(), s.transforms[kTsView].data(), wv);
+            Mul(wv, s.transforms[kTsProjection].data(), wvp);
+        }
+        for (uint32_t v = 0; v < count; v++) {
+            Vec q;
+            if (!ReadInput(a, 0, v, q)) return false;
+            if (a.pretransformed) {
+                sp[v] = {q[0], q[1], q[2] / s.zscale, q[3] != 0 ? 1 / q[3] : 1};
+                continue;
+            }
+            float cx = q[0] * wvp[0] + q[1] * wvp[4] + q[2] * wvp[8] + wvp[12];
+            float cy = q[0] * wvp[1] + q[1] * wvp[5] + q[2] * wvp[9] + wvp[13];
+            float cz = q[0] * wvp[2] + q[1] * wvp[6] + q[2] * wvp[10] + wvp[14];
+            float cw = q[0] * wvp[3] + q[1] * wvp[7] + q[2] * wvp[11] + wvp[15];
+            sp[v] = cw > 0 ? std::array<float, 4>{(cx / cw + 1) * 0.5f * float(gw), (1 - cy / cw) * 0.5f * float(gh), cz / cw, cw}
+                           : std::array<float, 4>{0, 0, 0, 0};
+        }
+    }
+    // the triangles, as DrawGeometry gives them to the device: the title's 16 bit indices moved by base_vertex, the
+    // rebuilt 32 bit list as it is, or the vertices in order
+    uint32_t total = a.index_count ? a.index_count : a.draw_count;
+    auto index = [&](uint32_t i) -> uint32_t {
+        if (!a.index_count) return i;
+        if (a.index16) return uint32_t(int32_t(static_cast<const uint16_t*>(a.index_src)[i]) + a.base_vertex);
+        return static_cast<const uint32_t*>(a.index_src)[i];
+    };
+    uint32_t tris = a.strip ? (total >= 3 ? total - 2 : 0) : total / 3;
+    for (uint32_t t = 0; t < tris; t++) {
+        uint32_t i0 = a.strip ? t : t * 3;
+        uint32_t v0 = index(i0), v1 = index(i0 + 1), v2 = index(i0 + 2);
+        if (v0 >= count || v1 >= count || v2 >= count || v0 == v1 || v1 == v2 || v0 == v2) continue;
+        const auto &A = sp[v0], &B = sp[v1], &C = sp[v2];
+        if (A[3] <= 0 || B[3] <= 0 || C[3] <= 0) continue;
+        float area = (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0]);
+        if (std::fabs(area) < 1e-6f) continue;
+        float lo_x = std::min({A[0], B[0], C[0]}), hi_x = std::max({A[0], B[0], C[0]});
+        float lo_y = std::min({A[1], B[1], C[1]}), hi_y = std::max({A[1], B[1], C[1]});
+        for (size_t k = 0; k < n; k++) {
+            PickPoint& pt = pts[k];
+            if (pt.x < lo_x || pt.x > hi_x || pt.y < lo_y || pt.y > hi_y) continue;
+            // barycentric in screen space; depth goes linearly there, w by its reciprocal
+            float b1 = ((pt.x - A[0]) * (C[1] - A[1]) - (pt.y - A[1]) * (C[0] - A[0])) / area;
+            float b2 = ((B[0] - A[0]) * (pt.y - A[1]) - (B[1] - A[1]) * (pt.x - A[0])) / area;
+            float b0 = 1 - b1 - b2;
+            if (b0 < 0 || b1 < 0 || b2 < 0) continue;
+            float z = b0 * A[2] + b1 * B[2] + b2 * C[2];
+            if (z < 0 || z > 1 || (pt.hit && z >= pt.depth)) continue;
+            pt.hit = true;
+            pt.depth = z;
+            pt.w = 1 / (b0 / A[3] + b1 / B[3] + b2 / C[3]);
+        }
+    }
+    return true;
+}
+
 void PlaceMatrix(const Placed& p, const float* m, float* out) {
     // row vectors: x' = x * k + w * offset, the placement's first column
     for (int r = 0; r < 4; r++) {
