@@ -340,15 +340,15 @@ bool Hidden() {
 // window thread: the window thread's cursor display count follows Hidden(), below 0 while hidden and 0 or more while
 // not. A cursor set by anyone else in between (ImGui's frame, an overlay hooking the window, the class cursor) then
 // stays hidden too: on its own, SetCursor(nullptr) lasted only until the next of those, and the cursor flickered as the
-// mouse moved. Set outright rather than stepped, as an overlay (RTX Remix's menu) moves the count itself
+// mouse moved. Stepped only from the wrong side of 0, so the count stays at -1 or 0 however often this runs
 void SyncCursor() {
     if (g_cursor_elsewhere) return;
+    int level = ShowCursor(TRUE) - 1;  // read, then put back: each call moves the count
+    ShowCursor(FALSE);
     if (Hidden()) {
-        while (ShowCursor(FALSE) >= 0) {
-        }
+        while (level >= 0) level = ShowCursor(FALSE);
     } else {
-        while (ShowCursor(TRUE) < 0) {
-        }
+        while (level < 0) level = ShowCursor(TRUE);
     }
 }
 
