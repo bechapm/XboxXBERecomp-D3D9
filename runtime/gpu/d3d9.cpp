@@ -883,6 +883,28 @@ private:
     };
     ModTransform mod_xf_[3];
     uint32_t screens_[4] = {};  // the surfaces presented, by virtual data address
+    // XBE_D3D9_PART_TARGETS=1: a 3D view the title draws into its screen's top left corner (clipped there by its
+    // viewport and scissor) and then copies out (a picture in picture, TS2's camera view) is drawn into a side target
+    // from the next frame, and the copy taken from that. The side target is the screen's size and one row taller, with
+    // a depth buffer of its own, so the draws are made as they were; a tool layered on Direct3D 9 that takes any
+    // target the back buffer's size for the picture leaves it out of the picture. The picture is the same, as the
+    // title's next pass covers the corner. Either of a title's screens (it presents them in turn) may hold the corner. A corner of 2D
+    // alone (a fill, a blur's steps) stays on the screen
+    struct PartPass {
+        uint32_t w = 0, h = 0;  // the corner's size in console pixels, once learnt; 0 before
+        uint32_t seen_w = 0, seen_h = 0;
+        uint64_t seen = ~0ull;     // the frame a draw last went to a corner of a screen
+        uint64_t seen_3d = ~0ull;  // the frame a 3D draw last did
+        uint64_t live = ~0ull;     // the frame a copy of a corner with 3D in it was last made
+        uint64_t drawn = ~0ull;    // the frame the side target was last drawn or cleared
+        bool corner = false;       // the draw in hand is clipped to a corner
+        Target side, side_ds;
+    } part_;
+    bool IsScreen(uint32_t data) const;
+    static bool PartTargets();
+    bool PartDraw(const State& s);
+    bool PartSide(const Target& like);
+    void PartNote3D(const State& s, const Assembled& a, bool prog);
     // visibility tests: an occlusion query per counted draw, summed into report memory once the GPU is done
     struct Query {
         IDirect3DQuery9* q;
@@ -1098,6 +1120,7 @@ void D3D9Backend::ReleaseDeviceObjects() {
     lut_.Reset();
     prime_.Reset();
     targets_.clear();
+    part_.side = part_.side_ds = Target{};
     textures_.clear();
     pack_textures_.clear();
     dummies_.clear();
@@ -1314,6 +1337,125 @@ bool D3D9Backend::BindTargets(const State& s) {
     return true;
 }
 
+// the part targets' notes, the first n of each, at report level so a Release build keeps them
+#define PART_LOG(n, ...)                                             \
+    do {                                                             \
+        static int _told = 0;                                        \
+        if (_told++ < (n)) LOGR(__VA_ARGS__);                        \
+    } while (0)
+
+bool D3D9Backend::IsScreen(uint32_t data) const {
+    for (uint32_t d : screens_)
+        if (d && d == data) return true;
+    return false;
+}
+
+bool D3D9Backend::PartTargets() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_D3D9_PART_TARGETS");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
+// the side target and its depth buffer, the size of the screen like and a row taller, made again when that changes.
+// They keep the screen's sizes, so a draw is placed and clipped as on the screen; the extra row is never drawn
+bool D3D9Backend::PartSide(const Target& like) {
+    Target& t = part_.side;
+    Target& z = part_.side_ds;
+    if (t.surf && z.surf && t.gw == like.gw && t.gh == like.gh && t.w == like.w && t.h == like.h) return true;
+    t = z = Target{};
+    for (Target* p : {&t, &z}) {
+        p->gw = like.gw;
+        p->gh = like.gh;
+        p->w = like.w;
+        p->h = like.h;
+    }
+    z.depth = true;
+    bool made = SUCCEEDED(dev_->CreateTexture(t.w, t.h + 1, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                                              D3DPOOL_DEFAULT, &t.tex, nullptr)) &&
+                SUCCEEDED(t.tex->GetSurfaceLevel(0, &t.surf)) &&
+                SUCCEEDED(dev_->CreateDepthStencilSurface(z.w, z.h + 1, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                          &z.surf, nullptr));
+    if (!made) {
+        t = z = Target{};
+        {
+            static int told = 0;
+            if (!told++) LOGR("d3d9: a corner's side target could not be made");
+        }
+        return false;
+    }
+    dev_->ColorFill(t.surf.Get(), nullptr, 0);
+    ClearDepth(z, {}, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1, 0);
+    return true;
+}
+
+// a draw clipped to a screen's top left corner by its viewport and scissor: noted, and while that corner with 3D in
+// it is copied out (Copy, the last frame or this one), bound to the side target and its depth buffer instead
+bool D3D9Backend::PartDraw(const State& s) {
+    part_.corner = false;
+    if (!PartTargets() || !bound_rt_ || bound_rt_->depth || Offscreen()) return false;
+    const auto& v = s.viewport;
+    uint32_t x0 = v.x, y0 = v.y, x1 = v.x + v.w, y1 = v.y + v.h;
+    if (s.scissor_count) {
+        x0 = std::max(x0, s.scissors[0]);
+        y0 = std::max(y0, s.scissors[1]);
+        x1 = std::min(x1, s.scissors[2]);
+        y1 = std::min(y1, s.scissors[3]);
+    }
+    // a corner, not the whole screen less an edge (a title's scissor may stop a pixel short of it)
+    if (x0 || y0 || !x1 || !y1 || x1 * 4 > bound_rt_->gw * 3 || y1 * 4 > bound_rt_->gh * 3) return false;
+    part_.corner = true;
+    // the frame's smallest corner, which a copy of it is matched against
+    if (part_.seen != frame_ || x1 < part_.seen_w) part_.seen_w = x1;
+    if (part_.seen != frame_ || y1 < part_.seen_h) part_.seen_h = y1;
+    part_.seen = frame_;
+    // the corner copied out, or up to two pixels more (TS2 clips most of its pass to 257 x 257 and copies 256 x 256),
+    // while it holds 3D
+    bool live = part_.live != ~0ull && frame_ - part_.live <= 1;
+    if (!live || !part_.w || x1 < part_.w || x1 > part_.w + 2 || y1 < part_.h || y1 > part_.h + 2) {
+        PART_LOG(4, "d3d9: a draw clipped to a %ux%u corner of the screen (viewport %ux%u at %u,%u, %u scissors)", x1, y1,
+                 v.w, v.h, v.x, v.y, s.scissor_count);
+        return false;
+    }
+    if (!PartSide(*bound_rt_)) return false;
+    Target& t = part_.side;
+    // binding a target resets the viewport: SetViewportScissor sets it for the draw
+    if (bound_rt_surf_ != t.surf.Get()) dev_->SetRenderTarget(0, t.surf.Get());
+    bound_rt_surf_ = t.surf.Get();
+    bound_rt_ = &t;
+    if (bound_ds_) {
+        if (bound_ds_surf_ != part_.side_ds.surf.Get()) dev_->SetDepthStencilSurface(part_.side_ds.surf.Get());
+        bound_ds_surf_ = part_.side_ds.surf.Get();
+        bound_ds_ = &part_.side_ds;
+    }
+    t.drawn = true;
+    part_.drawn = frame_;
+    return true;
+}
+
+bool Orthographic(const float* p);
+
+// a corner draw (PartDraw) that projects in perspective: the corner holds a 3D view this frame. The same test as the
+// mods' two_d: a program through the projection the game names, or fixed function under its PROJECTION
+void D3D9Backend::PartNote3D(const State& s, const Assembled& a, bool prog) {
+    if (!part_.corner) return;
+    bool three_d;
+    if (prog) {
+        int preg = g_projection_register;
+        three_d = preg >= 0 && preg + 4 <= int(s.vsc.size()) && ReadsConstant(s.vs->program, uint32_t(preg));
+        if (three_d) {
+            float p[16];
+            for (int r = 0; r < 4; r++)
+                for (int c = 0; c < 4; c++) p[r * 4 + c] = s.vsc[size_t(preg + c)][size_t(r)];
+            three_d = !Orthographic(p);
+        }
+    } else {
+        three_d = !a.pretransformed && !Orthographic(s.transforms[kTsProjection].data());
+    }
+    if (three_d) part_.seen_3d = frame_;
+}
+
 // BGRA pixels into a new w x h texture
 ComPtr<IDirect3DTexture9> D3D9Backend::PixelTexture(const std::vector<uint8_t>& px, uint32_t pitch, uint32_t w,
                                                     uint32_t h) {
@@ -1492,6 +1634,27 @@ void D3D9Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, ui
     }
     Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false) : nullptr;
     Target* ds = (flags & (kClearZ | kClearStencil)) ? EnsureTarget(s.zs, true) : nullptr;
+    // a clear of a screen over the corner it copies out (PartPass) clears that corner of the side target too
+    int32_t g[4] = {int32_t(s.viewport.x), int32_t(s.viewport.y), int32_t(s.viewport.x + s.viewport.w),
+                    int32_t(s.viewport.y + s.viewport.h)};
+    if (count == 1 && rects) std::memcpy(g, rects, sizeof(g));
+    Target* screen = rt ? rt : EnsureTarget(s.rt, false);
+    if (PartTargets() && part_.w && count <= 1 && screen && IsScreen(screen->data) && g[0] <= 0 && g[1] <= 0 &&
+        g[2] >= int32_t(part_.w) && g[3] >= int32_t(part_.h) && PartSide(*screen)) {
+        std::vector<D3DRECT> corner{ScaledRect(part_.side, 0, 0, int(part_.w), int(part_.h))};
+        if (rt) {
+            uint32_t m = (flags & kClearTarget) >> 4;
+            uint8_t mask = uint8_t((m >> 2 & 1) | (m >> 1 & 1) << 1 | (m & 1) << 2 | (m >> 3 & 1) << 3);
+            RECT rc{corner[0].x1, corner[0].y1, corner[0].x2, corner[0].y2};
+            if (mask == 15) dev_->ColorFill(part_.side.surf.Get(), &rc, color);
+            else ClearChannels(part_.side, color, mask, corner);
+        }
+        if (ds) {
+            DWORD f = ((flags & kClearZ) ? D3DCLEAR_ZBUFFER : 0) | ((flags & kClearStencil) ? D3DCLEAR_STENCIL : 0);
+            ClearDepth(part_.side_ds, corner, f, z, stencil);
+        }
+        part_.drawn = frame_;
+    }
     std::vector<D3DRECT> rs;
     for (Target* t : {rt, ds}) {
         if (!t) continue;
@@ -3483,9 +3646,11 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         counts_.targets++;
         return;
     }
+    PartDraw(s);
 
     DrawShaders sh;
     sh.prog = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+    PartNote3D(s, a, sh.prog);
     sh.fixed_transform = !sh.prog && !a.pretransformed;
     sh.sprite = a.topology == Topology::Points && sh.prog && s.rs[kRsPointSpriteEnable];
     // its place on a picture wider than the console's: the screen's targets are that shape, wide_ across
@@ -3638,6 +3803,29 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
                 dy = int32_t(kernel::R32(dst_points + i * 8 + 4));
             }
         }
+        // the top left corner of a screen, drawn this frame clipped to it with 3D in it and now copied out (PartPass):
+        // drawn into the side target in the next frame, and the copy taken from there
+        bool corner = PartTargets() && !x0 && !y0 && x1 > 0 && y1 > 0 && IsScreen(src_t->data);
+        if (PartTargets() && IsScreen(src_t->data))
+            PART_LOG(4, "d3d9: a copy out of the screen, %d,%d-%d,%d; corner draws this frame %s (%ux%u%s)", x0, y0, x1,
+                     y1, part_.seen == frame_ ? "seen" : "not seen", part_.seen_w, part_.seen_h,
+                     part_.seen_3d == frame_ ? ", 3D" : "");
+        // the frame's smallest corner, the same as the copy or up to two pixels more
+        if (corner && part_.seen == frame_ && part_.seen_3d == frame_ && part_.seen_w >= uint32_t(x1) &&
+            part_.seen_w <= uint32_t(x1) + 2 && part_.seen_h >= uint32_t(y1) && part_.seen_h <= uint32_t(y1) + 2) {
+            if (part_.w != uint32_t(x1) || part_.h != uint32_t(y1)) {
+                part_.w = uint32_t(x1);
+                part_.h = uint32_t(y1);
+                LOGR("d3d9: the title draws a 3D view into a %ux%u corner of its screen and copies it out: drawn into a "
+                     "side target from the next frame (XBE_D3D9_PART_TARGETS)", part_.w, part_.h);
+            }
+            part_.live = frame_;
+        }
+        Target* side = corner && part_.drawn == frame_ && uint32_t(x1) == part_.w && uint32_t(y1) == part_.h &&
+                               part_.side.surf && part_.side.w == src_t->w && part_.side.h == src_t->h
+                           ? &part_.side
+                           : nullptr;
+        if (side) PART_LOG(1, "d3d9: a corner's copy taken from the side target");
         // clamped to both targets
         x1 = std::min(x1, int32_t(std::min<int64_t>(src_t->gw, x0 + int64_t(dst_t->gw) - dx)));
         y1 = std::min(y1, int32_t(std::min<int64_t>(src_t->gh, y0 + int64_t(dst_t->gh) - dy)));
@@ -3649,9 +3837,10 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
         dr.right = std::min<LONG>(dr.right, dst_t->w);
         dr.bottom = std::min<LONG>(dr.bottom, dst_t->h);
         if (sr.right <= sr.left || sr.bottom <= sr.top || dr.right <= dr.left || dr.bottom <= dr.top) continue;
+        // the side target has the screen's sizes, so the same rectangle of it
+        IDirect3DSurface9* from = side ? side->surf.Get() : src_t->surf.Get();
         bool same = sr.right - sr.left == dr.right - dr.left && sr.bottom - sr.top == dr.bottom - dr.top;
         // a mod may hand a surface to read instead, the first answer standing
-        IDirect3DSurface9* from = src_t->surf.Get();
         if (!mods::D3d9().copy.empty()) {
             RecompModCopy c{sizeof(RecompModCopy), dev_.Get(), from, dst_t->surf.Get(), 1, sr.left, sr.top, sr.right, sr.bottom};
             for (const mods::CopyHook& h : mods::D3d9().copy)
@@ -3750,6 +3939,7 @@ void D3D9Backend::ApplySettings() {
     Scene(false);
     Bind(nullptr, nullptr);
     targets_.clear();  // a plain device's reset frees them either way
+    part_.side = part_.side_ds = Target{};
     dummies_.clear();
     prime_.Reset();
     bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_ * wide_)));
