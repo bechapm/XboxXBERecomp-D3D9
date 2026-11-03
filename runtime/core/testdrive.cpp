@@ -10,7 +10,9 @@
 
 #include "core/testdrive.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,6 +38,17 @@ std::atomic<bool> g_snap{false};
 std::vector<Press> g_script;
 std::vector<Press> g_live;  // presses from the cmd file, under g_lock
 int g_snaps = 0;
+std::string g_snap_name;  // the next snap's, under g_lock
+
+constexpr uint64_t kFrameNs = 16666667;   // what a present is worth to the guest's clocks
+constexpr uint64_t kHoldNs = 2000000000;  // a load presents nothing: the real clock runs after this long
+std::atomic<uint64_t> g_clock_base{0}, g_clock_at{0}, g_clock_seen{0};
+
+uint64_t RealNs() {
+    using namespace std::chrono;
+    static const auto start = steady_clock::now();
+    return uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
+}
 
 std::filesystem::path Dir() {
     static const std::filesystem::path dir = [] {
@@ -144,9 +157,26 @@ void ReadDir() {
 
 }  // namespace
 
-bool On() {
-    static const bool on = std::getenv("XBE_PAD_SCRIPT") || std::getenv("XBE_TEST_DIR");
+bool Lockstep() {
+    static const bool on = std::getenv("XBE_LOCKSTEP") != nullptr;
     return on;
+}
+
+bool On() {
+    static const bool on = std::getenv("XBE_PAD_SCRIPT") || std::getenv("XBE_TEST_DIR") || Lockstep();
+    return on;
+}
+
+uint64_t ClockNs() {
+    uint64_t real = RealNs();
+    if (!Lockstep() || !g_frames.load()) return real;
+    uint64_t at = g_clock_at.load(), e = real > at ? real - at : 0;
+    uint64_t v = g_clock_base.load() + (e < kFrameNs ? e : e < kHoldNs ? kFrameNs - 1 : e - kHoldNs + kFrameNs);
+    // never backwards: Presented moves the two apart
+    uint64_t seen = g_clock_seen.load();
+    while (seen < v && !g_clock_seen.compare_exchange_weak(seen, v)) {
+    }
+    return std::max(seen, v);
 }
 
 uint64_t Frames() { return g_frames.load(); }
@@ -183,6 +213,11 @@ bool KeyHeld(int vk) {
 
 void Presented() {
     if (!On()) return;
+    if (Lockstep()) {
+        uint64_t real = RealNs(), at = g_clock_at.load(), e = real > at ? real - at : 0;
+        g_clock_base = g_frames.load() ? g_clock_base.load() + kFrameNs + (e > kHoldNs ? e - kHoldNs : 0) : real;
+        g_clock_at = real;
+    }
     uint64_t n = ++g_frames;
     if (n % 2 == 0) ReadDir();  // every other frame: a file system check per frame is enough for scripts
     std::lock_guard lock(g_lock);
@@ -191,10 +226,22 @@ void Presented() {
 
 bool SnapDue() { return g_snap.load(); }
 
+void SnapAs(const char* name) {
+    std::lock_guard lock(g_lock);
+    g_snap_name = name;
+    g_snap = true;
+}
+
 void Snap(uint32_t width, uint32_t height, const uint8_t* rows, uint32_t pitch) {
     g_snap = false;
     if (Dir().empty() || !width || !height) return;
-    std::filesystem::path path = Dir() / ("snap_" + std::to_string(++g_snaps) + ".bmp");
+    std::string name;
+    {
+        std::lock_guard lock(g_lock);
+        name.swap(g_snap_name);
+    }
+    if (name.empty()) name = "snap_" + std::to_string(++g_snaps);
+    std::filesystem::path path = Dir() / (name + ".bmp");
     FILE* f = std::fopen(path.string().c_str(), "wb");
     if (!f) return;
     uint32_t row = width * 3, padded = (row + 3) & ~3u, image = padded * height;

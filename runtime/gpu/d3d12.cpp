@@ -616,6 +616,7 @@ private:
     void LoadSettings();
     // Present, in call order, each callee right after its caller; DrawFrame runs the two after it
     void FinishCapture(const Surface& front);
+    void SnapBackBuffer(uint32_t bi);
     void StartCapture();
     void ResizeSwap();
     void UploadGammaRamp();
@@ -3299,6 +3300,17 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
 }
 
+// testdrive: the frame about to be shown, into a .bmp
+void D3D12Backend::SnapBackBuffer(uint32_t bi) {
+    D3D12_RESOURCE_STATES bs = D3D12_RESOURCE_STATE_PRESENT;
+    Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    std::vector<uint8_t> px;
+    bool ok = ReadBack(bb_[bi].Get(), bb_w_, bb_h_, px);
+    Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
+    if (ok) testdrive::Snap(bb_w_, bb_h_, px.data(), bb_w_ * 4);
+    else testdrive::Snap(0, 0, nullptr, 0);
+}
+
 void D3D12Backend::ReleaseOldTextures() {
     constexpr uint64_t kSweepEvery = 60;    // presents between sweeps
     constexpr size_t kTexturesKept = 2048;  // no sweep below this many
@@ -3393,6 +3405,7 @@ void D3D12Backend::Present(const Surface& front) {
 
     uint32_t bi = swap_->GetCurrentBackBufferIndex();
     DrawFrame(t, bi);
+    if (testdrive::SnapDue()) SnapBackBuffer(bi);
     Submit(false);
     present_fence_[presents_ % (kFrames + 1)].store(fence_value_);
     DeliverReports();
@@ -3405,10 +3418,6 @@ void D3D12Backend::Present(const Surface& front) {
     presents_seen_.store(presents_);
     testdrive::Presented();
     PlacementFrame();
-    if (testdrive::SnapDue()) {
-        LOG_FIRST(1, "testdrive: frames are saved by Direct3D 9 alone");
-        testdrive::Snap(0, 0, nullptr, 0);
-    }
     frame_++;
     ReleaseOldTextures();
     ResetFrame();

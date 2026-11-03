@@ -5,6 +5,7 @@
 #include <ctime>
 
 #include "app/app.h"
+#include "core/testdrive.h"
 #include "kernel/crypto.h"
 #include "kernel/exports.h"
 #include "xbe/xbe.h"
@@ -67,11 +68,7 @@ void PutSystemTime(uint32_t va, uint64_t t) {
     W32(va + 4, uint32_t(t >> 32));
 }
 
-uint64_t InterruptTime() {
-    using namespace std::chrono;
-    static const auto start = steady_clock::now();
-    return uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count() / 100);
-}
+uint64_t InterruptTime() { return testdrive::ClockNs() / 100; }
 
 }  // namespace
 
@@ -236,9 +233,7 @@ KERNEL_EXPORT(228, NtSetSystemTime, 2) {
 constexpr uint64_t kPerfFrequency = 3375000;
 
 KERNEL_EXPORT(126, KeQueryPerformanceCounter, 0) {
-    using namespace std::chrono;
-    static const auto start = steady_clock::now();
-    uint64_t ns = uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
+    uint64_t ns = testdrive::ClockNs();
     uint64_t v = ns / 1000000000ull * kPerfFrequency + ns % 1000000000ull * kPerfFrequency / 1000000000ull;
     ctx.edx = uint32_t(v >> 32);
     return uint32_t(v);
