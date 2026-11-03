@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 5
+#define RECOMP_MOD_API_VERSION 6
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -248,6 +248,15 @@ typedef struct RecompModApi {
      * (RecompModDraw). `keep`, if given, is asked first, and a 0 leaves that
      * draw a program. XBE_D3D9_FIXED_TRANSFORM has the last word. */
     void (*d3d9_fixed_transform)(int on, RecompModFixedFn keep, void *user);
+
+    /* ---- version 6 (this SDK's; not in the DirectXbox-Recomp toolkit yet) ---- */
+
+    /* An overlay the mod knows of has the mouse, one with a cursor of its own
+     * (a D3D9 tool's menu, say): on, the game lets go of it -- mouse look stops
+     * holding it, its buttons and wheel stop pressing the game's controls --
+     * and leaves the cursor to the overlay; off gives it back. Counted: pair
+     * each on with an off. Any thread. */
+    void (*pointer_elsewhere)(int on);
 } RecompModApi;
 
 typedef int (*RecompModInitFn)(const RecompModApi *api);

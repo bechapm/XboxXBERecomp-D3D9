@@ -5,14 +5,15 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 [`runtime/mods/recomp_mod.h`](../runtime/mods/recomp_mod.h), so a change to a game can live outside the game's build:
 the port stays the port, and a mod is something a player chooses to add.
 
-The contract is the DirectXbox-Recomp toolkit's, field for field (version 5), so one build of a mod loads under a game
-built with either. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
+The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
+game built with either; version 6 (`pointer_elsewhere`) is this SDK's so far, and a mod checks for it. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
 **Contents:** [At a glance](#at-a-glance) · [Where a mod sits](#where-a-mod-sits) · [Your first mod](#your-first-mod) ·
 [Loading](#loading) · [A frame, hook by hook](#a-frame-hook-by-hook) · [Hook reference](#hook-reference) ·
 [Changing a draw](#changing-a-draw) · [The camera](#the-camera) · [Telling models apart](#telling-models-apart) ·
-[Vertex shaders](#vertex-shaders) · [Threads](#threads) · [Versions](#versions) ·
+[Vertex shaders](#vertex-shaders) · [Threads](#threads) · [An overlay's mouse](#an-overlays-mouse) ·
+[Versions](#versions) ·
 [Where a change belongs](#where-a-change-belongs) · [Troubleshooting](#troubleshooting) ·
 [Keeping this guide current](#keeping-this-guide-current)
 
@@ -28,6 +29,7 @@ when it is called. The header is the field by field reference; this page is the 
 | Tell which of the game's models a draw is | `draw_vertex_buffer` from `before` | D3D9 |
 | Replace what a mirror, monitor or blur reads | `d3d9_on_copy` | D3D9 |
 | Do something at the start or end of a frame | `d3d9_on_clear`, `d3d9_on_present` | D3D9 |
+| Give the mouse and keyboard to an overlay with its own cursor | `pointer_elsewhere` | any |
 
 The D3D9 renderer is picked with `renderer = "d3d9"` in the settings file ([d3d9.md](d3d9.md)). Nothing in the
 contract names a game or a tool: a mod for one game checks the game it is loaded into and unloads itself from any
@@ -188,6 +190,7 @@ returns 0 / NULL).
 | `d3d9_on_copy` | before each copy of a target | – | ✓ | 8 |
 | `draw_vertex_buffer` (v4) | inside a draw hook | – (0) | ✓ | |
 | `d3d9_fixed_transform` (v5) | once the device is made; see Changing a draw | – | ✓ | |
+| `pointer_elsewhere` (v6) | any time, any thread; each on paired with one off | ✓ | ✓ | |
 | `replaying` | any time | ✓ (0) | ✓ (0) | |
 | `capture_on_draw`, `capture_note`, `replay_on_note` | accepted, never called: this SDK makes no frame captures for replay | – | – | |
 
@@ -314,11 +317,21 @@ The renderer normally runs on a thread of its own, a frame behind the game. A mo
 the log says `a mod hooks draws, the renderer runs on the game's thread`. Every hook is called on the thread that
 draws; `recomp_mod_init` on the game's.
 
+## An overlay's mouse
+
+A mod that knows of an overlay with its own cursor (a D3D9 tool's menu, drawn over the game) calls
+`pointer_elsewhere(1)` when it opens and `pointer_elsewhere(0)` when it shuts. While any such overlay is up the game lets
+the mouse and keyboard go, as for one of its own menus: mouse look stops holding the mouse, the mouse's buttons and wheel
+and the keyboard stop pressing the game's controls, and the SDK leaves the cursor alone, for the overlay to show or
+hide. The calls are counted across mods, so each on is paired with exactly one off; an off with no on before it is
+ignored.
+
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (5 here). The contract is shared with
-DirectXbox-Recomp: a change to it is made in both, so one mod build keeps loading under either.
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (6 here). The contract is shared with
+DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
+Version 6's `pointer_elsewhere` is not in DirectXbox-Recomp yet.
 
 ## Where a change belongs
 
