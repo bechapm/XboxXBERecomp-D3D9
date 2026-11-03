@@ -321,13 +321,13 @@ void Capture(bool on) {
 }
 
 // window thread: the cursor over the client area, hidden while mouse_look holds it or a key or pad was used last
+bool Hidden() {
+    std::lock_guard lock(g_lock);
+    return g_captured || (g_want && !g_shown);
+}
+
 bool SetClientCursor() {
-    bool hidden;
-    {
-        std::lock_guard lock(g_lock);
-        hidden = g_captured || (g_want && !g_shown);
-    }
-    SetCursor(hidden ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
+    SetCursor(Hidden() ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
     return true;
 }
 
@@ -652,6 +652,8 @@ void PointerWant(bool on) {
     }
     if (g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);
 }
+
+bool CursorHidden() { return Hidden(); }
 
 Device LastUsed() {
     std::lock_guard lock(g_lock);
