@@ -100,6 +100,9 @@ While the pointer is wanted:
 - the cursor shows when the mouse moves or clicks and hides when a key or controller 1's pad is used, so a player who
   never touches the mouse never sees it.
 
+Not wanted, with mouse_look holding the mouse, the cursor stays hidden over the game. The window asks
+`input::CursorHidden()` on each `WM_SETCURSOR` before ImGui's handler, which would otherwise show its arrow.
+
 | `input::Pointer` | |
 | --- | --- |
 | `inside` | over the picture, the window in front and the pointer wanted |
