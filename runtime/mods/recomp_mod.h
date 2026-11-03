@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 9
+#define RECOMP_MOD_API_VERSION 10
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -115,6 +115,18 @@ typedef struct RecompModDraw {
     uint32_t stage_known;           /* 1: the colour half is known, 2: the alpha */
     uint32_t stage_color_op, stage_color_arg1, stage_color_arg2;
     uint32_t stage_alpha_op, stage_alpha_arg1, stage_alpha_arg2;
+    /* version 10 (this SDK's): where any draw lies, 3D or 2D, asked for the
+     * draw in hand only (in before or after; NULL on a toolkit without it).
+     * It runs the draw's vertex program, or its transforms, on the CPU for up
+     * to `samples` of its vertices spread through it (0 for all, at most
+     * 8192), leaving out those behind the eye, so a mod asks for the draws it
+     * needs rather than every draw. It gives the box as screen_box does, the
+     * depth range (0 near to 1 far, as the depth buffer takes it) and the clip
+     * w range (the distance along the view under a perspective, 1 for 2D in
+     * pixels). Nonzero when found. With the camera (VIEW, PROJECTION), a 2D
+     * sprite the title placed from the world can be put back where it was. */
+    int    (*where)(const struct RecompModDraw *draw, uint32_t samples, float box[4], float depth[2],
+                    float w[2]);
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */

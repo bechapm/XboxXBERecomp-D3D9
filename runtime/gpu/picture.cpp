@@ -274,16 +274,33 @@ bool Extent(const State& s, const Assembled& a, bool program, uint32_t gw, float
     return n > 0;
 }
 
-// where a 2D draw lies on its target, in console pixels: the leftmost, topmost, rightmost and lowest its vertices reach;
-// false when it cannot be found (ScreenBox)
-bool BoxOf(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4]) {
+// where a draw lies on its target, in console pixels: the leftmost, topmost, rightmost and lowest its vertices reach;
+// with depth and w, the range of its depth (0 near to 1 far, as the depth buffer takes it) and of its clip w. samples
+// limits the vertices measured, spread through the draw (0 for all, up to kMeasureMax); with front, vertices behind
+// the eye (w at or below 0) are left out. false when it cannot be found (ScreenBox, DrawWhere)
+bool BoxOf(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4],
+           float* depth = nullptr, float* w = nullptr, uint32_t samples = 0, bool front = false) {
+    float zr[2] = {3.4e38f, -3.4e38f}, wr[2] = {3.4e38f, -3.4e38f};
     box[0] = box[1] = 3.4e38f;
     box[2] = box[3] = -3.4e38f;
-    auto take = [&](float x, float y) {
+    bool any = false;
+    auto take = [&](float x, float y, float z, float cw) {
+        if (front && cw <= 0) return;
+        any = true;
         box[0] = std::min(box[0], x);
         box[1] = std::min(box[1], y);
         box[2] = std::max(box[2], x);
         box[3] = std::max(box[3], y);
+        zr[0] = std::min(zr[0], z);
+        zr[1] = std::max(zr[1], z);
+        wr[0] = std::min(wr[0], cw);
+        wr[1] = std::max(wr[1], cw);
+    };
+    auto step = [&](uint32_t n) { return samples && n > samples ? (n + samples - 1) / samples : 1u; };
+    auto done = [&] {
+        if (depth) depth[0] = zr[0], depth[1] = zr[1];
+        if (w) w[0] = wr[0], w[1] = wr[1];
+        return any;
     };
     if (program) {
         Program p{s};
@@ -291,13 +308,14 @@ bool BoxOf(const State& s, const Assembled& a, bool program, uint32_t gw, uint32
         for (int r = 0; r < 16; r++)
             if ((a.regs >> r) & 1) n = std::max(n, VertexCount(a, r));
         n = std::min(n, kMeasureMax);
-        for (uint32_t v = 0; v < n; v++) {
+        for (uint32_t v = 0, d = step(n); v < n; v += d) {
             for (int r = 0; r < 16; r++)
                 if ((a.regs >> r) & 1) ReadInput(a, r, v, p.in[r]);
             p.Run(s.vs->program);
-            take(p.out[0][0], p.out[0][1]);  // oPos is in screen pixels
+            // oPos is in screen pixels and depth buffer units, its w what the hardware divides the rest by
+            take(p.out[0][0], p.out[0][1], p.out[0][2] / s.zscale, p.out[0][3]);
         }
-        return n > 0;
+        return done();
     }
     if (!(a.regs & 1)) return false;
     uint32_t n = std::min(VertexCount(a, 0), kMeasureMax);
@@ -306,20 +324,25 @@ bool BoxOf(const State& s, const Assembled& a, bool program, uint32_t gw, uint32
         Mul(s.transforms[kTsWorld].data(), s.transforms[kTsView].data(), wv);
         Mul(wv, s.transforms[kTsProjection].data(), wvp);
     }
-    for (uint32_t v = 0; v < n; v++) {
+    for (uint32_t v = 0, d = step(n); v < n; v += d) {
         Vec p;
         if (!ReadInput(a, 0, v, p)) return false;
-        float x = p[0], y = p[1];
-        if (!a.pretransformed) {
-            float cx = p[0] * wvp[0] + p[1] * wvp[4] + p[2] * wvp[8] + wvp[12];
-            float cy = p[0] * wvp[1] + p[1] * wvp[5] + p[2] * wvp[9] + wvp[13];
-            float cw = p[0] * wvp[3] + p[1] * wvp[7] + p[2] * wvp[11] + wvp[15];
-            x = cw != 0 ? (cx / cw + 1) * 0.5f * float(gw) : 0;
-            y = cw != 0 ? (1 - cy / cw) * 0.5f * float(gh) : 0;
+        if (a.pretransformed) {
+            // x, y in pixels, z in depth buffer units, and 1/w
+            take(p[0], p[1], p[2] / s.zscale, p[3] != 0 ? 1 / p[3] : 1);
+            continue;
         }
-        take(x, y);
+        float cx = p[0] * wvp[0] + p[1] * wvp[4] + p[2] * wvp[8] + wvp[12];
+        float cy = p[0] * wvp[1] + p[1] * wvp[5] + p[2] * wvp[9] + wvp[13];
+        float cz = p[0] * wvp[2] + p[1] * wvp[6] + p[2] * wvp[10] + wvp[14];
+        float cw = p[0] * wvp[3] + p[1] * wvp[7] + p[2] * wvp[11] + wvp[15];
+        if (cw == 0) {
+            take(0, 0, 0, cw);  // as ScreenBox has always taken it
+            continue;
+        }
+        take((cx / cw + 1) * 0.5f * float(gw), (1 - cy / cw) * 0.5f * float(gh), cz / cw, cw);
     }
-    return n > 0;
+    return done();
 }
 
 // the viewport and scissor's horizontal span in console pixels
@@ -499,6 +522,11 @@ void PlacementFrame() {
 
 bool ScreenBox(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4]) {
     return BoxOf(s, a, program, gw, gh, box);
+}
+
+bool DrawWhere(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, uint32_t samples,
+               float box[4], float depth[2], float w[2]) {
+    return BoxOf(s, a, program, gw, gh, box, depth, w, samples, true);
 }
 
 void PlaceMatrix(const Placed& p, const float* m, float* out) {

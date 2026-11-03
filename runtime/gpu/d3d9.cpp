@@ -772,6 +772,8 @@ private:
     ModsSay ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
                        const Geometry& g);
     void ModsAfter();
+    // RecompModDraw.where: where the draw in hand lies, for a mod that asks
+    static int ModWhere(const RecompModDraw* d, uint32_t samples, float box[4], float depth[2], float w[2]);
     // draws a mod deferred (RECOMP_DRAW_DEFER), made at the frame's end: the device's state as the mods left it, the
     // target, and the title's vertices and indices copied, since the title's memory and the ring move on
     struct Deferred {
@@ -852,6 +854,8 @@ private:
     const Assembled* mod_asm_ = nullptr;
     GuestExtent mod_size_{};
     RecompModDraw mod_draw_{};
+    bool mod_prog_ = false;  // the draw in hand is a vertex program's
+    static D3D9Backend* mod_where_;  // the backend whose draw the mods hear of (ModWhere)
     size_t mods_called_ = 0;
     float dev_xf_[3][16] = {};
     bool dev_xf_ok_[3] = {};
@@ -2789,6 +2793,9 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
         const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
         d.screen_box_set = t && ScreenBox(s, a, sh.prog, t->gw, t->gh, d.screen_box);
     }
+    d.where = &D3D9Backend::ModWhere;
+    mod_where_ = this;
+    mod_prog_ = sh.prog;
     d.indexed = g.indexed;
     d.first_vertex = 0;
     d.vertices = g.vertices;
@@ -2803,6 +2810,17 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
         if (say == RECOMP_DRAW_DEFER) return ModsSay::defer;
     }
     return ModsSay::draw;
+}
+
+D3D9Backend* D3D9Backend::mod_where_ = nullptr;
+
+// where the draw the mods hear of lies (RecompModDraw.where): only that draw, only while the mods hear of it
+int D3D9Backend::ModWhere(const RecompModDraw* d, uint32_t samples, float box[4], float depth[2], float w[2]) {
+    D3D9Backend* b = mod_where_;
+    if (!b || !b->mod_state_ || !b->mod_asm_ || d != &b->mod_draw_ || !box || !depth || !w) return 0;
+    const Target* t = b->bound_rt_ ? b->bound_rt_ : b->bound_ds_;
+    if (!t) return 0;
+    return DrawWhere(*b->mod_state_, *b->mod_asm_, b->mod_prog_, t->gw, t->gh, samples, box, depth, w) ? 1 : 0;
 }
 
 // a draw kept for the frame's end; false when it cannot be (no colour target, or the frame holds enough already)

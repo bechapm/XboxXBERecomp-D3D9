@@ -67,6 +67,11 @@ float PictureWide(uint32_t gw, uint32_t gh);
 // where a 2D draw lies on a target gw x gh console pixels: left, top, right, bottom; false when it cannot be found
 bool ScreenBox(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4]);
 
+// where any draw lies, as ScreenBox, from up to samples of its vertices (0 for all), those behind the eye left out: also
+// its depth range (0 near to 1 far, as the depth buffer takes it) and its clip w range; false when it cannot be found
+bool DrawWhere(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, uint32_t samples,
+               float box[4], float depth[2], float w[2]);
+
 // one draw's placement on a target the picture's shape (the backend's, on the render thread)
 struct Placed {
     // clip x' = x * k + offset * w: squeezed by k about the anchor (offset = anchor * (1 - k), anchor in clip units)
