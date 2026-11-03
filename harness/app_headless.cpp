@@ -21,6 +21,8 @@ Mode Output() { return Desktop(); }
 std::vector<Mode> DisplayModes() { return {Desktop()}; }
 float RenderScale(uint32_t) { return 1.0f; }
 bool Widescreen() { return true; }
+float PictureAspect() { return 4.0f / 3; }
+float HorPlus() { return 1.0f; }
 
 std::filesystem::path ExeDir() {
     static const std::filesystem::path dir = std::filesystem::current_path();
