@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -20,10 +21,22 @@ std::string F(const char* fmt, ...) {
     return buf;
 }
 
-// Shader Model 3's vertex shaders end on Direct3D 9's pixel centres, half a host pixel up-left of D3D12's, and on
-// whatever a mod does to the position
-std::string Sm3Position(std::string s) {
-    const char* fix = "    o.pos.xy += hostpx.xy * o.pos.w;\n#ifdef RHI_MOD_POSITION\n    RHI_MOD_POSITION(o.pos);\n#endif\n";
+// A draw's place on a picture wider than the console's (gpu/picture.h, DrawConstants::place): x squeezed by k about an
+// anchor, and under FILL a vertex at the screen's edge kept at the picture's, the rest in proportion, as a nine-slice
+// does. place.x is 1 - k, so constants left at 0 change nothing
+const char* kPlacePosition = R"(    if (place.x != 0) {
+        float sx = (o.pos.x / o.pos.w + 1) * 0.5 * surf.x;
+        float edge = place.z != 0 && abs(sx) <= 0.75 ? -1 : place.z != 0 && sx >= surf.x - 1.75 && sx <= surf.x + 0.75 ? 1 : 0;
+        o.pos.x = edge != 0 ? edge * o.pos.w : o.pos.x * (1 - place.x) + place.y * o.pos.w;
+    }
+)";
+
+// after a vertex shader's position is final: the placement, then under Shader Model 3 Direct3D 9's pixel centres, half
+// a host pixel up-left of D3D12's, and whatever a mod does to the position
+std::string FinishPosition(std::string s) {
+    std::string fix = kPlacePosition;
+    if (g_shader_model3)
+        fix += "    o.pos.xy += hostpx.xy * o.pos.w;\n#ifdef RHI_MOD_POSITION\n    RHI_MOD_POSITION(o.pos);\n#endif\n";
     for (const char* at : {"    o.pos = q;\n", "    o.pos = cp;\n"}) {
         size_t p = s.find(at);
         if (p != std::string::npos) s.insert(p + std::strlen(at), fix);
@@ -66,6 +79,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 lt[56];
     float4 rtshift;
     float4 zparams;
+    float4 place;
 };
 )";
 
@@ -126,7 +140,8 @@ std::string Sm3Common(For f) {
     // a mod's HLSL first: VOut has a NORMAL when it defines RHI_MOD_NORMAL
     std::string s;
     if (f != For::Pixel) {
-        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\n", kSm3DepthClamp, kSm3HostPixel);
+        s += F("float4 rhi_depth_clamp : register(c%u);\nfloat4 hostpx : register(c%u);\nfloat4 place : register(c%u);\n",
+               kSm3DepthClamp, kSm3HostPixel, kSm3Place);
         s += g_sm3_vertex_prelude + "\n";
     }
     s += kSm3Head;
@@ -825,6 +840,222 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
     return k;
 }
 
+namespace {
+
+// the combiners of PixelHlsl, on numbers: registers by their PS_REGISTER number
+struct CombinerRun {
+    using V = std::array<float, 4>;
+    const PixelKey& k;
+    const float (*pc)[4];
+    V reg[16] = {};
+    int stage = 0;
+    bool clamp_sum = false, inv_v1 = false, inv_r0 = false;
+    V e{}, f{};
+
+    V Const(int i) const { return {pc[i][0], pc[i][1], pc[i][2], pc[i][3]}; }
+    V Var(uint32_t r) const {
+        uint32_t flags = k.count >> 8;
+        switch (r) {
+            case 1: return Const(stage == 8 ? 16 : ((flags & 0x10) ? stage * 2 : 0));
+            case 2: return Const(stage == 8 ? 17 : ((flags & 0x100) ? stage * 2 + 1 : 1));
+            case 3: case 4: case 5: case 8: case 9: case 10: case 11: case 12: case 13: return reg[r];
+            case 14: {
+                V o{};
+                for (int c = 0; c < 3; c++) {
+                    float v = inv_v1 ? 1 - reg[5][c] : reg[5][c], q = inv_r0 ? 1 - reg[12][c] : reg[12][c];
+                    o[c] = clamp_sum ? std::clamp(v + q, 0.0f, 1.0f) : v + q;
+                }
+                return o;
+            }
+            case 15: return {e[0] * f[0], e[1] * f[1], e[2] * f[2], 0};
+            default: return {};
+        }
+    }
+    // three channels for rgb, one (in [0]) for alpha
+    V Input(uint32_t v, bool alpha) const {
+        uint32_t r = v & 0xF, chan = v & 0x10, mod = v & 0xE0;
+        V x = Var(r), o{};
+        for (int c = 0; c < (alpha ? 1 : 3); c++) {
+            float a = alpha ? (chan ? x[3] : x[2]) : (chan ? x[3] : x[size_t(c)]), p = std::max(a, 0.0f);
+            switch (mod) {  // PS_INPUTMAPPING
+                case 0x00: a = p; break;
+                case 0x20: a = 1 - std::clamp(a, 0.0f, 1.0f); break;
+                case 0x40: a = 2 * p - 1; break;
+                case 0x60: a = -2 * p + 1; break;
+                case 0x80: a = p - 0.5f; break;
+                case 0xA0: a = -p + 0.5f; break;
+                case 0xC0: break;
+                default: a = -a; break;
+            }
+            o[size_t(c)] = a;
+        }
+        return o;
+    }
+    static float Map(float v, uint32_t m) {
+        switch (m) {  // PS_COMBINEROUTPUT bias and shift
+            case 0x08: return v - 0.5f;
+            case 0x10: return v * 2;
+            case 0x18: return (v - 0.5f) * 2;
+            case 0x20: return v * 4;
+            case 0x30: return v / 2;
+            default: return v;
+        }
+    }
+    struct Write {
+        int reg;
+        bool alpha;
+        V v;
+    };
+    // as Ps::Stage: the halves read before either writes, so the writes come back
+    void Stage(uint32_t inputs, uint32_t output, bool alpha, std::vector<Write>& w) {
+        V A = Input(inputs >> 24, alpha), B = Input((inputs >> 16) & 0xFF, alpha), C = Input((inputs >> 8) & 0xFF, alpha),
+          D = Input(inputs & 0xFF, alpha);
+        uint32_t cd_dst = output & 0xF, ab_dst = (output >> 4) & 0xF, sum_dst = (output >> 8) & 0xF, fl = output >> 12;
+        int n = alpha ? 1 : 3;
+        V ab{}, cd{}, sum{}, abm{}, cdm{};
+        float dab = 0, dcd = 0;
+        for (int c = 0; c < n; c++) dab += A[size_t(c)] * B[size_t(c)], dcd += C[size_t(c)] * D[size_t(c)];
+        bool mux_hi = (k.count >> 8) & 1 ? reg[12][3] >= 0.5f : (int(std::lround(reg[12][3] * 255)) & 1) == 1;
+        for (int c = 0; c < n; c++) {
+            size_t i = size_t(c);
+            ab[i] = (fl & 2) ? dab : A[i] * B[i];
+            cd[i] = (fl & 1) ? dcd : C[i] * D[i];
+            uint32_t m = fl & 0x38;
+            abm[i] = std::clamp(Map(ab[i], m), -1.0f, 1.0f);
+            cdm[i] = std::clamp(Map(cd[i], m), -1.0f, 1.0f);
+            float s = (fl & 4) ? (mux_hi ? cd[i] : ab[i]) : ab[i] + cd[i];
+            sum[i] = std::clamp(Map(s, m), -1.0f, 1.0f);
+        }
+        auto dest = [](uint32_t r) { return r == 4 || r == 5 || (r >= 8 && r <= 13) ? int(r) : -1; };
+        if (int r = dest(ab_dst); r >= 0) {
+            w.push_back({r, alpha, abm});
+            if (!alpha && (fl & 0x80)) w.push_back({r, true, {abm[2]}});
+        }
+        if (int r = dest(cd_dst); r >= 0) {
+            w.push_back({r, alpha, cdm});
+            if (!alpha && (fl & 0x40)) w.push_back({r, true, {cdm[2]}});
+        }
+        if (int r = dest(sum_dst); r >= 0) w.push_back({r, alpha, sum});
+    }
+    void Apply(const std::vector<Write>& w) {
+        for (const Write& x : w) {
+            if (x.alpha) reg[x.reg][3] = x.v[0];
+            else for (size_t c = 0; c < 3; c++) reg[x.reg][c] = x.v[c];
+        }
+    }
+    // false: a texture mode this cannot run
+    bool Run(const V& tex0, const V& diffuse, const V& other, V& out) {
+        for (int i = 0; i < 4; i++) {
+            uint32_t m = (k.tex_modes >> (i * 5)) & 0x1F;
+            V& t = reg[8 + i];
+            if (m == 0) t = {0, 0, 0, 1};
+            else if (m == 5) t = {};
+            else if (m == 4 || ((m >= 1 && m <= 3) && i > 0)) t = other;  // coordinates, or another texture
+            else if (m >= 1 && m <= 3 && !k.tex[i].shadow) t = tex0;
+            else return false;
+        }
+        reg[4] = diffuse;
+        reg[3] = {other[0], other[1], other[2], 1};  // fog: its colour, and none of it
+        reg[12] = {0, 0, 0, (k.tex_modes & 0x1F) ? reg[8][3] : 1};
+        reg[13] = {};
+        uint32_t n = std::min<uint32_t>(k.count & 0xFF, 8);
+        std::vector<Write> w;
+        for (uint32_t st = 0; st < n; st++) {
+            stage = int(st);
+            w.clear();
+            Stage(k.rgb_in[st], k.rgb_out[st], false, w);
+            Stage(k.a_in[st], k.a_out[st], true, w);
+            Apply(w);
+        }
+        if (k.final_abcd || k.final_efg) {
+            stage = 8;
+            uint32_t fl = k.final_efg & 0xFF;
+            clamp_sum = fl & 0x80;
+            inv_v1 = fl & 0x40;
+            inv_r0 = fl & 0x20;
+            e = Input(k.final_efg >> 24, false);
+            f = Input((k.final_efg >> 16) & 0xFF, false);
+            V A = Input(k.final_abcd >> 24, false), B = Input((k.final_abcd >> 16) & 0xFF, false),
+              C = Input((k.final_abcd >> 8) & 0xFF, false), D = Input(k.final_abcd & 0xFF, false),
+              G = Input((k.final_efg >> 8) & 0xFF, true);
+            for (size_t c = 0; c < 3; c++) out[c] = D[c] + C[c] + A[c] * (B[c] - C[c]);
+            out[3] = G[0];
+        } else {
+            out = reg[12];  // no fog
+        }
+        for (float& c : out) c = std::clamp(c, 0.0f, 1.0f);
+        return true;
+    }
+};
+
+// fixed function stage 0 alone, as PixelKey::ff has it (a missing texture already passes the current colour)
+uint8_t StageOp(uint32_t op, uint32_t a1, uint32_t a2) {
+    auto tex = [](uint32_t a) { return a == kTaTexture; };
+    auto dif = [](uint32_t a) { return a == 0 || a == kTaCurrent; };  // D3DTA_DIFFUSE, and current is diffuse at stage 0
+    if (op == kTopSelectArg1) return tex(a1) ? kSumTexture : dif(a1) ? kSumDiffuse : kSumNone;
+    if (op == kTopSelectArg2) return tex(a2) ? kSumTexture : dif(a2) ? kSumDiffuse : kSumNone;
+    if (!((tex(a1) && dif(a2)) || (dif(a1) && tex(a2)))) return kSumNone;
+    switch (op) {
+        case 4: return kSumModulate;  // D3DTOP_MODULATE, 2X and 4X, ADD: the XDK's values are Direct3D 9's up to here
+        case 5: return kSumModulate2x;
+        case 6: return kSumModulate4x;
+        case 7: return kSumAdd;
+        default: return kSumNone;
+    }
+}
+
+}  // namespace
+
+StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular) {
+    StageSum r;
+    if (!k.programmable) {
+        if (k.ff[0][0] <= 1 || k.ff[1][0] > 1 || k.ff[0][8] == 5) return r;  // no stage, several, or into temp
+        r.color = StageOp(k.ff[0][0], k.ff[0][1], k.ff[0][2]);
+        r.alpha = k.ff[0][4] <= 1 ? r.color : StageOp(k.ff[0][4], k.ff[0][5], k.ff[0][6]);
+        return r;
+    }
+    if (specular) return r;  // v1 then adds what stage 0 cannot
+    using V = CombinerRun::V;
+    // sample colours apart enough that no two operations agree on all of them
+    static const V kSample[6] = {{0.2f, 0.5f, 0.9f, 0.3f}, {0.7f, 0.15f, 0.4f, 0.8f}, {1, 1, 1, 1},
+                                 {0.05f, 0.6f, 0.25f, 0.02f}, {0.45f, 0.35f, 0.55f, 0.5f}, {0, 0, 0, 0}};
+    static const V kOther[2] = {{1, 1, 1, 1}, {0.5f, 0.3f, 0.7f, 0.6f}};
+    constexpr float kClose = 2e-3f;
+    // [0]: the half depends on something else; then each operation still agreeing
+    bool color_ok[7] = {false, true, true, true, true, true, true}, alpha_ok[7] = {false, true, true, true, true, true, true};
+    auto op = [](int o, float t, float v) {
+        switch (o) {
+            case kSumTexture: return t;
+            case kSumDiffuse: return v;
+            case kSumModulate: return t * v;
+            case kSumModulate2x: return std::min(2 * t * v, 1.0f);
+            case kSumModulate4x: return std::min(4 * t * v, 1.0f);
+            default: return std::min(t + v, 1.0f);
+        }
+    };
+    for (const V& t : kSample)
+        for (const V& v : kSample) {
+            V out[2];
+            for (int o = 0; o < 2; o++) {
+                CombinerRun run{k, pc};
+                if (!run.Run(t, v, kOther[o], out[o])) return r;
+            }
+            // another texture, the coordinates or fog count: no one stage says that half
+            for (size_t c = 0; c < 4; c++)
+                if (std::fabs(out[0][c] - out[1][c]) > kClose) (c < 3 ? color_ok : alpha_ok)[0] = true;
+            for (int o = kSumTexture; o <= kSumAdd; o++) {
+                for (size_t c = 0; c < 3; c++)
+                    if (std::fabs(op(o, t[c], v[c]) - out[0][c]) > kClose) color_ok[o] = false;
+                if (std::fabs(op(o, t[3], v[3]) - out[0][3]) > kClose) alpha_ok[o] = false;
+            }
+        }
+    for (int o = kSumTexture; o <= kSumAdd && !r.color && !color_ok[0]; o++)
+        if (color_ok[o]) r.color = uint8_t(o);
+    for (int o = kSumTexture; o <= kSumAdd && !r.alpha && !alpha_ok[0]; o++)
+        if (alpha_ok[o]) r.alpha = uint8_t(o);
+    return r;
+}
+
 constexpr uint32_t kMuxConstant = 3;
 constexpr uint32_t kViewportOffsetConstant = 59;  // c-37: constants start at c-96
 
@@ -900,6 +1131,151 @@ int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, si
 }
 
 }  // namespace
+
+namespace {
+
+constexpr uint32_t kMacMov = 1, kMacMul = 2, kMacMad = 4, kMacDp4 = 7, kIluRcc = 3, kMuxConst = 3;
+constexpr uint32_t kTempPos = 12;  // R12 is oPos
+constexpr int kOutT3 = 12;
+
+struct Operand {
+    uint32_t neg, sw[4], reg, mux;
+    bool relative;
+};
+
+// operand A 0, B 1, C 2, as Src reads them
+Operand ReadOperand(const Tok& k, int which) {
+    Operand o{};
+    if (which == 0) {
+        o.neg = k.f(1, 8, 1);
+        o.sw[0] = k.f(1, 6, 2), o.sw[1] = k.f(1, 4, 2), o.sw[2] = k.f(1, 2, 2), o.sw[3] = k.f(1, 0, 2);
+        o.reg = k.f(2, 28, 4), o.mux = k.f(2, 26, 2);
+    } else if (which == 1) {
+        o.neg = k.f(2, 25, 1);
+        o.sw[0] = k.f(2, 23, 2), o.sw[1] = k.f(2, 21, 2), o.sw[2] = k.f(2, 19, 2), o.sw[3] = k.f(2, 17, 2);
+        o.reg = k.f(2, 13, 4), o.mux = k.f(2, 11, 2);
+    } else {
+        o.neg = k.f(2, 10, 1);
+        o.sw[0] = k.f(2, 8, 2), o.sw[1] = k.f(2, 6, 2), o.sw[2] = k.f(2, 4, 2), o.sw[3] = k.f(2, 2, 2);
+        o.reg = k.f(2, 0, 2) << 2 | k.f(3, 30, 2), o.mux = k.f(3, 28, 2);
+    }
+    if (o.mux == kMuxInput) o.reg = k.f(1, 9, 4);
+    if (o.mux == kMuxConst) o.reg = k.f(1, 13, 8), o.relative = k.f(3, 1, 1) != 0;
+    return o;
+}
+
+bool Swizzled(const Operand& o, uint32_t x, uint32_t y, uint32_t z, uint32_t w) {
+    return o.sw[0] == x && o.sw[1] == y && o.sw[2] == z && o.sw[3] == w;
+}
+bool Is(const Operand& o, uint32_t mux) { return o.mux == mux && !o.neg && !o.relative; }
+bool Whole(const Operand& o, uint32_t mux) { return Is(o, mux) && Swizzled(o, 0, 1, 2, 3); }
+
+// one row of a matrix: a dp4 into lane k of its target with c[first + k]; rows in any order, from one run of four
+bool MatrixRow(const Operand& b, uint32_t mask, int& first, uint32_t& rows) {
+    if (!Whole(b, kMuxConst)) return false;
+    int k = 0;
+    while (k < 4 && mask != (8u >> k)) k++;
+    if (k == 4 || (rows & (1u << k))) return false;
+    if (!rows) first = int(b.reg) - k;
+    if (first < 0 || int(b.reg) != first + k) return false;
+    rows |= 1u << k;
+    return true;
+}
+
+}  // namespace
+
+bool PlainTransform(const std::vector<uint32_t>& prog, PlainProgram& out) {
+    PlainProgram t;
+    uint32_t mv_rows = 0, proj_rows = 0;
+    int mv_temp = -1;
+    bool recip = false;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3), r = k.f(3, 20, 4), m = k.f(3, 24, 4);
+        uint32_t omask = k.f(3, 12, 4), last = k.f(3, 0, 1);
+        bool to_out = omask != 0 && k.f(3, 11, 1) != 0;
+        if (omask && !to_out) return false;  // a write to a constant
+        if (to_out && k.f(3, 2, 1) != 0) return false;  // an output from the ILU
+        Operand a = ReadOperand(k, 0), b = ReadOperand(k, 1), c = ReadOperand(k, 2);
+        // what the MAC writes: an output, or oPos under its other name, R12
+        int target = -1;
+        uint32_t mask = 0;
+        if (mac && to_out && !m) target = int(k.f(3, 3, 8) & 0xF), mask = omask;
+        else if (mac && r == kTempPos && m && !to_out) target = kOutPos, mask = m;
+        // the one ILU operation there may be: the first screen line's reciprocal, rcc r1.x, r12.w
+        if (ilu) {
+            if (ilu != kIluRcc || recip || mac != kMacMul || k.f(3, 16, 4) != 8 || !Is(c, kMuxTemp) || c.reg != kTempPos ||
+                c.sw[0] != 3)
+                return false;
+            recip = true;
+        }
+        switch (mac) {
+            case 0: break;
+            case kMacDp4:
+                if (target == kOutPos) {  // the projection, of the model-view's result or of the position
+                    if (Whole(a, kMuxTemp)) {
+                        if (int(a.reg) != mv_temp || mv_rows != 0xF) return false;
+                    } else if (Whole(a, kMuxInput)) {
+                        if (mv_temp >= 0 || (t.position >= 0 && t.position != int(a.reg))) return false;
+                        t.position = int(a.reg);
+                    } else {
+                        return false;
+                    }
+                    if (!MatrixRow(b, mask, t.projection, proj_rows)) return false;
+                } else if (target < 0 && !to_out && r < kTempPos) {  // the model-view, into a temporary
+                    if (!Whole(a, kMuxInput) || proj_rows || (mv_temp >= 0 && mv_temp != int(r)) ||
+                        (t.position >= 0 && t.position != int(a.reg)))
+                        return false;
+                    mv_temp = int(r);
+                    t.position = int(a.reg);
+                    if (!MatrixRow(b, m, t.modelview, mv_rows)) return false;
+                } else {
+                    return false;
+                }
+                break;
+            case kMacMov:
+                if (mask != 0xF || !Is(a, kMuxInput)) return false;
+                if (target == kOutD0) {
+                    if (t.colour >= 0) return false;
+                    if (Swizzled(a, 2, 1, 0, 3)) t.colour_swapped = true;
+                    else if (!Swizzled(a, 0, 1, 2, 3)) return false;
+                    t.colour = int(a.reg);
+                } else if (target >= kOutT0 && target <= kOutT3 && Swizzled(a, 0, 1, 2, 3)) {
+                    if (t.tex[target - kOutT0] >= 0) return false;
+                    t.tex[target - kOutT0] = int(a.reg);
+                } else {
+                    return false;
+                }
+                break;
+            case kMacMul:
+                if (target >= kOutT0 && target <= kOutT3) {
+                    int s = target - kOutT0;
+                    if (mask != 0xF || t.tex[s] >= 0 || !Whole(a, kMuxInput) || !Whole(b, kMuxConst)) return false;
+                    t.tex[s] = int(a.reg);
+                    t.tex_scale[s] = int(b.reg);
+                } else if (target == kOutPos) {  // the first screen line, once the projection is done
+                    if (mask != 0xE || proj_rows != 0xF || t.screen_scale >= 0 || !recip || !Whole(a, kMuxTemp) ||
+                        a.reg != kTempPos || !Whole(b, kMuxConst))
+                        return false;
+                    t.screen_scale = int(b.reg);
+                } else {
+                    return false;
+                }
+                break;
+            case kMacMad:  // the second screen line
+                if (target != kOutPos || mask != 0xE || t.screen_scale < 0 || t.screen_offset >= 0 || !Whole(a, kMuxTemp) ||
+                    a.reg != kTempPos || !Is(b, kMuxTemp) || b.reg != 1 || !Swizzled(b, 0, 0, 0, 0) || !Whole(c, kMuxConst))
+                    return false;
+                t.screen_offset = int(c.reg);
+                break;
+            default: return false;
+        }
+        if (last) break;
+    }
+    if (proj_rows != 0xF || t.position < 0 || (t.screen_scale >= 0) != (t.screen_offset >= 0)) return false;
+    out = t;
+    return true;
+}
 
 void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputUsages& out) {
     uint16_t temp[13] = {}, feeds[16] = {}, dp3 = 0, named = 0;
@@ -1006,7 +1382,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         size_t at = s.rfind("    return o;\n");
         s.insert(at, "#ifdef RHI_MOD_NORMAL\n    o.normal = xnormal;\n    RHI_MOD_NORMAL(o.normal);\n#endif\n");
     }
-    return g_shader_model3 ? Sm3Position(std::move(s)) : s;
+    return FinishPosition(std::move(s));
 }
 
 FixedKey MakeFixedKey(const State& s) {
@@ -1119,7 +1495,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    }\n";
     }
     s += "    oFog = " + v(5, "float4(0,0,0,0)") + ";\n";
-    if (pretransformed) return g_shader_model3 ? Sm3Position(s + kVsEpilogue) : s + kVsEpilogue;
+    if (pretransformed) return FinishPosition(s + kVsEpilogue);
     s += R"(
     VOut o;
     // like the pretransformed ones, target sized passes end half a console pixel short of the far edges
@@ -1139,7 +1515,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     return o;
 }
 )";
-    return g_shader_model3 ? Sm3Position(std::move(s)) : s;
+    return FinishPosition(std::move(s));
 }
 
 std::string PixelHlsl(const PixelKey& k) {
@@ -1288,14 +1664,22 @@ std::string ReversedDepthHlsl(std::string s) {
     return s;
 }
 
-// a point covers its console pixel, several host pixels on an upscaled target: drawn as a quad of that size
-std::string PointHlsl() {
-    return Common(For::Pixel) + R"(
+// a point covers its console pixel, several host pixels on an upscaled target: drawn as a quad of that size. A counted
+// point (a visibility test) is the one host pixel under its centre, so it counts 0 or 1 as on the console at any scale
+std::string PointHlsl(bool counted) {
+    return Common(For::Pixel) + (counted ? "#define COUNTED_POINT\n" : "") + R"(
 [maxvertexcount(4)]
 void main(point VOut v[1], inout TriangleStream<VOut> strip) {
     float2 half_pixel = v[0].pos.w / surf.xy;  // in clip units, the target spans 2 across surf.xy pixels
-    // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
-    float2 back = (0.5 - 1e-3) * 2 * half_pixel / surf.w;
+    // host pixels per console pixel, across (zparams.w) and down (surf.w): a target at the picture's shape has more
+    // across; a target is read half a host pixel back, so left and top reach that far
+    float2 scale = float2(zparams.w, surf.w);
+#ifdef COUNTED_POINT
+    half_pixel /= scale;
+    float2 back = 0;
+#else
+    float2 back = (0.5 - 1e-3) * 2 * half_pixel / scale;
+#endif
     for (int i = 0; i < 4; i++) {
         VOut o = v[0];
         o.pos.x += (i & 1) ? half_pixel.x : -half_pixel.x - back.x;

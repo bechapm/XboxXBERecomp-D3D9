@@ -1,6 +1,7 @@
 #include "mods/mods.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #endif
 
 #include "app/app.h"
+#include "core/input.h"
 #include "core/log.h"
 #include "gpu/shaders.h"
 #include "kernel/kernel.h"
@@ -152,8 +154,35 @@ uint32_t DrawVertexBuffer(uint32_t* data, uint32_t* stride, uint32_t* first) {
     return vb;
 }
 
-// plain transforms are drawn as programs here: no draw comes with fixed_transform set
-void D3d9FixedTransform(int, RecompModFixedFn, void*) {}
+void D3d9FixedTransform(int on, RecompModFixedFn keep, void* user) {
+    g_d3d9.fixed_transform = on != 0;
+    g_d3d9.fixed_keep = keep;
+    g_d3d9.fixed_keep_user = user;
+}
+
+// counted across mods: the pointer is wanted while any of them has an overlay up, as input's own wants are
+void PointerElsewhere(int on) {
+    static std::atomic<int> n{0};
+    if (on) {
+        input::PointerWant(true);
+        if (++n == 1) {
+            input::CursorElsewhere(true);
+            input::KeysElsewhere(true);
+            LOGR("[MOD] an overlay has the mouse and keys");
+        }
+        return;
+    }
+    int had = n.load();
+    while (had > 0 && !n.compare_exchange_weak(had, had - 1)) {
+    }
+    if (had <= 0) return;  // an off with no on before it
+    if (had == 1) {
+        input::KeysElsewhere(false);
+        input::CursorElsewhere(false);
+        LOGR("[MOD] the game has the mouse and keys again");
+    }
+    input::PointerWant(false);
+}
 
 RecompModApi MakeApi() {
     RecompModApi a{};
@@ -181,6 +210,7 @@ RecompModApi MakeApi() {
     a.d3d9_on_copy = D3d9OnCopy;
     a.draw_vertex_buffer = DrawVertexBuffer;
     a.d3d9_fixed_transform = D3d9FixedTransform;
+    a.pointer_elsewhere = PointerElsewhere;
     return a;
 }
 const RecompModApi g_api = MakeApi();

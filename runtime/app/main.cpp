@@ -117,6 +117,18 @@ HMONITOR Chosen() {
     return chosen;
 }
 
+// the game window shown, behind the splash or without one: under XBE_BACKGROUND a test run opens off screen, or on
+// XBE_MONITOR, and takes the focus from nothing
+void Show(HWND hwnd) {
+    if (Quiet()) {
+        if (!Chosen()) SetWindowPos(hwnd, nullptr, -6000, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        return;
+    }
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+}
+
 // before the window is shown: onto the chosen monitor, so every later apply and mode list is that monitor's
 void PlaceOnChosen() {
     MONITORINFO mi{};
@@ -168,6 +180,12 @@ void ApplyNow() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // the cursor's rules first: ImGui's handler takes every WM_SETCURSOR over the client area and shows its arrow, so
+    // in play (mouse_look holding the mouse) the cursor showed whenever the mouse moved
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && input::CursorHidden()) {
+        SetCursor(nullptr);
+        return TRUE;
+    }
     {
         std::lock_guard lock(UiLock());
         if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
@@ -207,13 +225,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kOpenWindow:
             CloseSplash();
             if (wp) ApplyNow();
-            if (Quiet()) {  // XBE_BACKGROUND: a test run opens off screen, or on XBE_MONITOR, and takes the focus from nothing
-                if (!Chosen()) SetWindowPos(hwnd, nullptr, -6000, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                return 0;
-            }
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
+            Show(hwnd);
             return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd);
@@ -330,7 +342,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         app::ApplyNow();
     } else if (!splash) {
         app::ApplyNow();
-        ShowWindow(app::g_hwnd, SW_SHOW);
+        app::Show(app::g_hwnd);  // XBE_BACKGROUND held only behind a splash: with none, test windows opened on the desktop
     }
 
     IMGUI_CHECKVERSION();

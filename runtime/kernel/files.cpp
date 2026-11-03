@@ -94,6 +94,8 @@ struct Link : Object {
     Link() : Object(ObjType::SymLink) {}
 };
 
+// to FATX's two seconds, so the low byte is 0 as on the console: TS2 writes a save folder's time right after its
+// 16-character name in a 16-byte field, and that byte ends the string
 uint64_t ToFileTime(fs::file_time_type t) {
     using namespace std::chrono;
     // one pair of readings for the run: two read per call put the same file a few ticks apart from one query to the
@@ -101,7 +103,8 @@ uint64_t ToFileTime(fs::file_time_type t) {
     static const auto file_now = fs::file_time_type::clock::now();
     static const auto sys_now = system_clock::now();
     auto sys = time_point_cast<nanoseconds>(t - file_now + sys_now);
-    return uint64_t(sys.time_since_epoch().count() / 100 + 116444736000000000ll);
+    uint64_t ft = uint64_t(sys.time_since_epoch().count() / 100 + 116444736000000000ll);
+    return ft - ft % 20000000;
 }
 
 void FillNetworkInfo(uint32_t out, uint64_t t, uint64_t size, bool dir) {
@@ -321,6 +324,15 @@ bool ReadGameFile(const std::string& xbox_path, std::vector<uint8_t>& out) {
     if (!f) return false;
     out.assign(std::istreambuf_iterator<char>(f), {});
     return true;
+}
+
+uint32_t ReadGameFileAt(const std::string& xbox_path, uint64_t pos, void* out, uint32_t len) {
+    Target t = Resolve(xbox_path, 0);
+    if (t.disc) return t.entry && !t.entry->dir ? MountedDisc()->Read(*t.entry, pos, out, len) : 0;
+    std::ifstream f(t.host, std::ios::binary);
+    if (!f || !f.seekg(std::streamoff(pos))) return 0;
+    f.read(static_cast<char*>(out), len);
+    return uint32_t(f.gcount());
 }
 
 // exports

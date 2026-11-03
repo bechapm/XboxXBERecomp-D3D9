@@ -24,6 +24,7 @@
 #include <cstring>
 #include <deque>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -35,6 +36,7 @@
 #include "core/log.h"
 #include "core/testdrive.h"
 #include "gpu/backend.h"
+#include "gpu/picture.h"
 #include "gpu/shaders.h"
 #include "gpu/texture.h"
 #include "gpu/texturedumper.h"
@@ -244,6 +246,8 @@ struct DrawShaders {
     bool ffp = false;              // drawn by Direct3D 9's own fixed function pipeline
     bool fixed_transform = false;  // fixed function on untransformed vertices
     bool sprite = false;           // a program's points as point sprites
+    const PlainProgram* plain = nullptr;  // a program fixed function may draw, prog and ffp both set; the hooks settle it (PlainTakeOver)
+    StageSum sum;                  // the pixel stage as stage 0 would say it, when a plain draw or a mod needs it (PixelSum)
     FixedKey fk;
     InputUsages usages{};          // each input's Direct3D 9 name
     uint64_t vkey = 0;
@@ -268,6 +272,21 @@ const uint8_t kTop[27] = {0,  D3DTOP_DISABLE, D3DTOP_SELECTARG1, D3DTOP_SELECTAR
                           D3DTOP_BUMPENVMAP, D3DTOP_BUMPENVMAPLUMINANCE};
 constexpr uint32_t kTopDisable = 1;
 constexpr uint32_t kTopPremodulate = 17;
+
+// a StageSum operation as a stage of Direct3D 9's: an unknown one is texture times vertex colour
+template <class T>
+void StageSumD3d9(uint8_t o, T& op, T& arg1, T& arg2) {
+    arg1 = D3DTA_TEXTURE;
+    arg2 = D3DTA_DIFFUSE;
+    switch (o) {
+        case kSumTexture: op = D3DTOP_SELECTARG1; break;
+        case kSumDiffuse: op = D3DTOP_SELECTARG2; break;
+        case kSumModulate2x: op = D3DTOP_MODULATE2X; break;
+        case kSumModulate4x: op = D3DTOP_MODULATE4X; break;
+        case kSumAdd: op = D3DTOP_ADD; break;
+        default: op = D3DTOP_MODULATE; break;
+    }
+}
 constexpr uint32_t kTaCurrent = 1;  // D3DTA_CURRENT
 
 constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -615,6 +634,7 @@ struct DeclElement {
     uint16_t offset;
     int8_t reg = -1;  // converted: the input register it is made from
     uint8_t decode = kDecodeNone;
+    bool swap = false;  // converted: red and blue change places
 };
 
 // the shader that turns the frame into the gamma corrected picture, drawn over a screen quad
@@ -713,6 +733,19 @@ private:
     void ReleaseOldTextures();
     // draws
     bool FixedFunctionDraws(const State& s, const Assembled& a, const DrawTextures& stages) const;
+    enum class StageLack { none, alpha_kill, shadow, wide, rect, two_sided };
+    struct StageLackAt {
+        StageLack what;
+        int stage;  // -1 for no one stage
+    };
+    StageLackAt Lacking(const State& s, const Assembled& a, const DrawTextures& stages) const;
+    const PlainProgram* PlainDraw(const State& s, const Assembled& a, const DrawTextures& stages, const InputUsages& usages);
+    StageSum PixelSum(const State& s, const DrawTextures& stages);
+    void PlainTransforms(const State& s, const PlainProgram& p, GuestExtent size);
+    void CountStageRefusal(const State& s, StageLackAt lack);
+    bool PlainTakeOver(const State& s, const Assembled& a, DrawShaders& sh, const DrawTextures& stages, GuestExtent size,
+                       Geometry& g);
+    bool DrawPixelShader(const State& s, const DrawTextures& stages, DrawShaders& sh);
     void BuildDeclaration(const State& s, const Assembled& a, const DrawShaders& sh, std::vector<DeclElement>& el,
                           uint64_t& decode, uint32_t& conv_stride);
     IDirect3DVertexDeclaration9* EnsureDeclaration(const std::vector<DeclElement>& el);
@@ -723,9 +756,10 @@ private:
     ID3DBlob* Compile(const std::string& src, const char* profile);
     void SetOutputState(const State& s, const Assembled& a, bool ffp);
     void SetSamplers(const State& s, const Assembled& a, const DrawTextures& stages);
-    void SetFixedFunction(const State& s, const Assembled& a, const DrawTextures& stages, GuestExtent size);
+    void SetFixedFunction(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
+                          GuestExtent size);
     void SetShaderConstants(const State& s, const DrawShaders& sh, const DrawTextures& stages, GuestExtent size);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const Placed& pl);
     bool DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride, Geometry& g);
     // WORLD, VIEW and PROJECTION: the title's, or a mod's
     void HalfPixel(float* m) const;
@@ -734,11 +768,27 @@ private:
     void SetTitleTransforms(const State& s, const Assembled& a, GuestExtent size);
     // the mods' draw hooks
     bool Offscreen() const;
-    bool ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
-                    const Geometry& g);
+    enum class ModsSay { draw, skip, defer };
+    ModsSay ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
+                       const Geometry& g);
     void ModsAfter();
+    // draws a mod deferred (RECOMP_DRAW_DEFER), made at the frame's end: the device's state as the mods left it, the
+    // target, and the title's vertices and indices copied, since the title's memory and the ring move on
+    struct Deferred {
+        ComPtr<IDirect3DStateBlock9> state;
+        ComPtr<IDirect3DSurface9> rt, ds;
+        Assembled a;
+        std::array<std::vector<uint8_t>, 16> bytes;
+        std::vector<uint8_t> indices;
+        std::vector<DeclElement> el;
+        uint32_t conv_stride = 0;
+    };
+    std::vector<Deferred> deferred_;
+    bool Defer(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride);
+    void DrawDeferred();
     uint32_t RingVertices(const void* src, uint32_t bytes, void** write = nullptr);
     float TargetScale() const;
+    bool ScreenSized(uint32_t gw, uint32_t gh) const { return gw == guest_w_ && gh == guest_h_; }
     float RenderTargetShift(const State& s, const DrawShaders& sh) const;
     // visibility tests
     IDirect3DQuery9* BeginCountedDraw(const State& s);
@@ -841,11 +891,23 @@ private:
     uint32_t bb_w_ = 0;
     uint32_t bb_h_ = 0;
     float scale_ = 1.0f;
+    // the screen's targets' host width over their render scale width: the picture's shape over the console's, 1 but for
+    // a game that widens its own view (gpu/picture.h)
+    float wide_ = 1.0f;
+    Placed place_;  // the draw in hand's
     uint64_t presents_ = 0;
     // where the draws went, reported twice early on: a black picture says which step refused them
     struct DrawCounts {
-        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods;
+        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods, deferred;
     } counts_{};
+    // plain transforms (PlainDraw), by program hash; position -1 is a program that is not one
+    std::unordered_map<uint64_t, PlainProgram> plain_;
+    std::unordered_map<uint64_t, StageSum> sums_;  // by pixel key and combiner constants
+    struct PlainCounts {
+        uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, offscreen, stage, keep, pixel;
+        uint32_t alpha_kill, shadow, wide, rect, two_sided;  // the stage states fixed function cannot draw (Lacking)
+    } plain_counts_{};
+    std::unordered_set<uint64_t> plain_refusals_;  // what CountStageRefusal has logged
     // what Remix is given to find the camera in, reported every ten seconds while a mod hooks the draws: the program
     // draws, and the first that draws the screen in 3D with the transforms it left on the device
     struct CameraCounts {
@@ -1008,6 +1070,7 @@ void D3D9Backend::ReleaseDeviceObjects() {
     dev_->SetIndices(nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
+    deferred_.clear();
     vb_.Reset();
     ib16_.Reset();
     ib32_.Reset();
@@ -1030,14 +1093,16 @@ bool D3D9Backend::Init(uint32_t width, uint32_t height) {
     guest_w_ = width;
     guest_h_ = height;
     scale_ = app::RenderScale(guest_h_);
-    bb_w_ = std::max(1u, uint32_t(std::lround(width * scale_)));
+    wide_ = PictureWide(width, height);
+    bb_w_ = std::max(1u, uint32_t(std::lround(width * scale_ * wide_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(height * scale_)));
     if (!CreateDevice(static_cast<HWND>(app::Window()))) return false;
     if (!CreateDeviceObjects()) return false;
     ImGui_ImplDX9_Init(dev_.Get());
     texturedumper::Update();
     Scene(true);
-    LOGI("d3d9: %ux%u guest, %ux%u back buffer, render scale %.3f", width, height, bb_w_, bb_h_, scale_);
+    LOGI("d3d9: %ux%u guest, %ux%u back buffer, render scale %.3f, picture %.3f wide", width, height, bb_w_, bb_h_,
+         scale_, app::PictureAspect());
     mods::SetRenderer(this);
     for (const mods::DeviceHook& h : mods::D3d9().device) h.fn(dev_.Get(), h.user);
     return true;
@@ -1143,7 +1208,8 @@ void D3D9Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator i
 
 // the host surface of a new target at render scale, cleared
 bool D3D9Backend::CreateTargetResource(Target& t) {
-    t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_)));
+    // the screen's size: at the picture's shape, which is the back buffer's
+    t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_ * (ScreenSized(t.gw, t.gh) ? wide_ : 1.0f))));
     t.h = std::max(1u, uint32_t(std::lround(t.gh * scale_)));
     if (!t.depth) {
         if (FAILED(dev_->CreateTexture(t.w, t.h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &t.tex,
@@ -1391,9 +1457,9 @@ void D3D9Backend::ClearChannels(Target& t, D3DCOLOR color, uint8_t mask, const s
 
 // a guest rect scaled to the target and clamped to it
 D3DRECT ScaledRect(const Target& t, int x0, int y0, int x1, int y1) {
-    float sc = float(t.w) / t.gw;
-    return {std::clamp<LONG>(LONG(x0 * sc), 0, t.w), std::clamp<LONG>(LONG(y0 * sc), 0, t.h),
-            std::clamp<LONG>(LONG(x1 * sc), 0, t.w), std::clamp<LONG>(LONG(y1 * sc), 0, t.h)};
+    float sx = float(t.w) / t.gw, sy = float(t.h) / t.gh;
+    return {std::clamp<LONG>(LONG(x0 * sx), 0, t.w), std::clamp<LONG>(LONG(y0 * sy), 0, t.h),
+            std::clamp<LONG>(LONG(x1 * sx), 0, t.w), std::clamp<LONG>(LONG(y1 * sy), 0, t.h)};
 }
 
 void D3D9Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
@@ -1491,7 +1557,7 @@ IDirect3DBaseTexture9* D3D9Backend::BindTargetTexture(const State& s, int stage,
     }
     // a pass shrinking it averages each tap over a console texel, else upscaled taps skip texels and ghost
     Target* rt = FindTarget(s.rt, false);
-    float k = float(t.w) / t.gw;
+    float k = float(t.h) / t.gh;
     if (k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) {
         stages.wide[stage] = k;
         info.flags |= kTexWide;
@@ -1786,17 +1852,32 @@ void D3D9Backend::ReleaseOldTextures() {
 // kill, shadow compares, a texture read at coordinates in texels after a projection, two sided lighting or the wide
 // taps of a shrinking pass; a vertex program it has no part in. Those go to the generator's shaders.
 bool D3D9Backend::FixedFunctionDraws(const State& s, const Assembled& a, const DrawTextures& stages) const {
-    if (s.ps) return false;
-    if (s.rs[kRsLighting] && s.rs[kRsTwoSidedLighting] && !a.pretransformed) return false;
+    return !s.ps && Lacking(s, a, stages).what == StageLack::none;
+}
+
+// What of a draw's state fixed function cannot draw, and on which stage. Under a pixel shader the stages are the textures
+// bound, ColorOp being unread. A rect texture's coordinates are in texels: with no shader SetFixedFunction scales them,
+// the branch for a program under one does not, and the program's own pixel shader did, so there it is not drawn fixed
+D3D9Backend::StageLackAt D3D9Backend::Lacking(const State& s, const Assembled& a, const DrawTextures& stages) const {
+    if (s.rs[kRsLighting] && s.rs[kRsTwoSidedLighting] && !a.pretransformed) return {StageLack::two_sided, -1};
     for (int i = 0; i < 4; i++) {
         const auto& t = s.tss[size_t(i)];
-        if (t[kTssColorOp] <= kTopDisable) break;
-        if (t[kTssAlphaKill] == kAlphaKillEnable) return false;
+        if (!s.ps && t[kTssColorOp] <= kTopDisable) break;
+        if (s.ps && !stages.res[i]) continue;
         const TexInfo& info = stages.info[i];
-        if (info.shadow || (info.flags & kTexWide)) return false;
-        if (info.rect && (t[kTssTextureTransformFlags] & kTtffProjected)) return false;
+        if (t[kTssAlphaKill] == kAlphaKillEnable) return {StageLack::alpha_kill, i};
+        if (info.shadow) return {StageLack::shadow, i};
+        if (info.flags & kTexWide) return {StageLack::wide, i};
+        if (info.rect && (s.ps || (t[kTssTextureTransformFlags] & kTtffProjected))) return {StageLack::rect, i};
     }
-    return true;
+    return {StageLack::none, -1};
+}
+
+// the inputs of a program drawn by fixed function: what it reads, as ProgramInputUsages names them; 0xFF unread
+InputUsage PlainUsage(const PlainProgram& p, const InputUsages& usages, int reg) {
+    bool read = reg == p.position || reg == p.colour;
+    for (int t : p.tex) read = read || reg == t;
+    return read ? usages[size_t(reg)] : InputUsage{0xFF, 0};
 }
 
 // the D3DDECLUSAGE fixed function reads each input register as: the XDK's habit, which its FVFs follow; 0xFF unread
@@ -1820,7 +1901,10 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
         if (!((a.regs >> r) & 1)) continue;
         const VertexElement& e = a.elements[size_t(r)];
         uint32_t dec = uint32_t(a.decode >> (r * 4)) & 15;
-        InputUsage u = sh.ffp ? FixedUsage(r) : sh.prog ? sh.usages[size_t(r)] : HabitUsage(r);
+        InputUsage u = sh.plain ? PlainUsage(*sh.plain, sh.usages, r)
+                       : sh.ffp ? FixedUsage(r)
+                       : sh.prog ? sh.usages[size_t(r)]
+                                 : HabitUsage(r);
         if (u.usage == 0xFF) continue;
         DeclElement d{BYTE(e.buffer), 0, u.usage, u.index, e.offset};
         bool float_in = e.format == DXGI_FORMAT_R32G32B32_FLOAT || e.format == DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -1836,7 +1920,9 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
             d.type = float_in && dec == kDecodeNone ? D3DDECLTYPE_FLOAT3 : kConvert;
             if (d.type == kConvert) d.type = D3DDECLTYPE_FLOAT3 | 0x80;
         } else if (u.usage == D3DDECLUSAGE_COLOR) {
-            d.type = e.format == DXGI_FORMAT_B8G8R8A8_UNORM ? D3DDECLTYPE_D3DCOLOR : D3DDECLTYPE_D3DCOLOR | 0x80;
+            // fixed function reads the D3DCOLOR in the vertex, where the program it stands for swizzled it
+            d.swap = sh.plain && sh.plain->colour_swapped;
+            d.type = e.format == DXGI_FORMAT_B8G8R8A8_UNORM && !d.swap ? D3DDECLTYPE_D3DCOLOR : D3DDECLTYPE_D3DCOLOR | 0x80;
         } else if (u.usage == D3DDECLUSAGE_PSIZE) {
             d.type = e.format == DXGI_FORMAT_R32_FLOAT ? D3DDECLTYPE_FLOAT1 : D3DDECLTYPE_FLOAT1 | 0x80;
         } else {
@@ -1950,8 +2036,8 @@ IDirect3DPixelShader9* D3D9Backend::EnsurePixelShader(const PixelKey& pk, uint64
 
 float D3D9Backend::TargetScale() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
-    if (!t || !t->gw) return 1;
-    return float(t->w) / float(t->gw);
+    if (!t || !t->gh) return 1;
+    return float(t->h) / float(t->gh);  // down: across, a target at the picture's shape has more
 }
 
 // the XDK's screen space offset puts the console's positions half a pixel right and down of the host's, unless a
@@ -2074,12 +2160,14 @@ void D3D9Backend::SetSamplers(const State& s, const Assembled& a, const DrawText
 // Direct3D 9's fixed function pipeline set up as the title set the console's: its transforms (with the guest viewport
 // and Direct3D 9's pixel centres folded into the projection, the host viewport being the whole target), lights,
 // material, texture stages and fog
-void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const DrawTextures& stages, GuestExtent size) {
-    SetTitleTransforms(s, a, size);
+void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
+                                   GuestExtent size) {
+    if (sh.plain) PlainTransforms(s, *sh.plain, size);
+    else SetTitleTransforms(s, a, size);
 
-    bool lit = !a.pretransformed && s.rs[kRsLighting];
+    bool lit = !a.pretransformed && !sh.plain && s.rs[kRsLighting];
     Rs(D3DRS_LIGHTING, lit);
-    Rs(D3DRS_SPECULARENABLE, s.rs[kRsSpecularEnable] != 0);
+    Rs(D3DRS_SPECULARENABLE, !sh.plain && s.rs[kRsSpecularEnable] != 0);
     if (lit) {
         dev_->SetMaterial(reinterpret_cast<const D3DMATERIAL9*>(s.material.data()));
         for (DWORD i = 0; i < 8; i++) {
@@ -2109,6 +2197,34 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
     }
     Rs(D3DRS_TEXTUREFACTOR, s.rs[kRsTextureFactor]);
 
+    if (sh.plain && s.ps) {
+        // under a title's pixel shader the stages' operations mean nothing: stage 0 says what the shader makes of its
+        // texture and the vertex colour where one stage can (PixelSum), else their product, and every texture is bound
+        // with the coordinates the program sends it, for what a mod sets and a tool reads
+        DWORD op[2], a1[2], a2[2];
+        StageSumD3d9(sh.sum.color, op[0], a1[0], a2[0]);
+        StageSumD3d9(sh.sum.alpha, op[1], a1[1], a2[1]);
+        Tss(0, D3DTSS_COLOROP, op[0]);
+        Tss(0, D3DTSS_COLORARG1, a1[0]);
+        Tss(0, D3DTSS_COLORARG2, a2[0]);
+        Tss(0, D3DTSS_ALPHAOP, op[1]);
+        Tss(0, D3DTSS_ALPHAARG1, a1[1]);
+        Tss(0, D3DTSS_ALPHAARG2, a2[1]);
+        Tss(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        Tss(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        for (DWORD n = 0; n < 4; n++) {
+            int in = sh.plain->tex[n], scale = sh.plain->tex_scale[n];
+            Tss(n, D3DTSS_TEXCOORDINDEX, in >= 0 ? sh.usages[size_t(in)].index : 0);
+            Tss(n, D3DTSS_TEXTURETRANSFORMFLAGS, scale >= 0 ? D3DTTFF_COUNT2 : 0);
+            if (scale >= 0) {
+                const auto& c = s.vsc[size_t(scale)];
+                const float m[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                dev_->SetTransform(D3DTRANSFORMSTATETYPE(D3DTS_TEXTURE0 + n), reinterpret_cast<const D3DMATRIX*>(m));
+            }
+            SetTexture(n, stages.res[n]);
+        }
+        return;
+    }
     DWORD i = 0;
     for (; i < 4; i++) {
         const auto& t = s.tss[i];
@@ -2143,6 +2259,18 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
         uint32_t ttff = a.pretransformed ? 0 : t[kTssTextureTransformFlags];
         float tm[16];
         std::memcpy(tm, a.pretransformed ? kIdentity : s.transforms[kTsTexture0 + i].data(), sizeof(tm));
+        if (sh.plain) {
+            // what the program sends this stage: one input may reach several, and its scale is a transform even at 1
+            // (split2-recomp lost a scanner's map under RTX Remix without it, cause not known)
+            int in = sh.plain->tex[i], scale = sh.plain->tex_scale[i];
+            tci = in >= 0 ? sh.usages[size_t(in)].index : 0;
+            ttff = scale >= 0 ? D3DTTFF_COUNT2 : 0;
+            if (scale >= 0) {
+                const auto& c = s.vsc[size_t(scale)];
+                const float m[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                std::memcpy(tm, m, sizeof(tm));
+            }
+        }
         TextureDesc d;
         if (stages.info[i].rect && s.textures[i] && Describe(s.textures[i], d)) {
             const float texels[16] = {1.0f / d.width, 0, 0, 0, 0, 1.0f / d.height, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -2211,26 +2339,31 @@ void D3D9Backend::SetShaderConstants(const State& s, const DrawShaders& sh, cons
     float hh = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
     const float tail[8] = {0, 0, 0, 0, -1.0f / hw, 1.0f / hh, 0, 0};
     dev_->SetVertexShaderConstantF(kSm3DepthClamp, tail, 2);
+    float place[4];
+    PlaceConstant(place_, place);
+    dev_->SetVertexShaderConstantF(kSm3Place, place, 1);
     dev_->SetPixelShaderConstantF(0, c.surf, kDrawRegs);
 }
 
-// the host viewport covers the target, the guest one is in the transform; the scissor clips to it
-void D3D9Backend::SetViewportScissor(const State& s, uint32_t gw) {
+// the host viewport covers the target, the guest one is in the transform; the scissor clips to it, placed with the draw
+void D3D9Backend::SetViewportScissor(const State& s, uint32_t gw, const Placed& pl) {
     uint32_t W = bound_rt_ ? bound_rt_->w : bound_ds_->w;
     uint32_t H = bound_rt_ ? bound_rt_->h : bound_ds_->h;
+    uint32_t gh = bound_rt_ ? bound_rt_->gh : bound_ds_->gh;
     D3DVIEWPORT9 vp{0, 0, W, H, 0, 1};
     dev_->SetViewport(&vp);
-    float sc = float(W) / gw;
-    LONG x0 = LONG(s.viewport.x * sc);
-    LONG y0 = LONG(s.viewport.y * sc);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sc);
-    LONG y1 = LONG((s.viewport.y + s.viewport.h) * sc);
+    float sy = float(H) / std::max(gh, 1u);
+    float gx0 = float(s.viewport.x), gx1 = float(s.viewport.x + s.viewport.w);
+    LONG y0 = LONG(s.viewport.y * sy);
+    LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sc));
-        y0 = std::max(y0, LONG(s.scissors[1] * sc));
-        x1 = std::min(x1, LONG(s.scissors[2] * sc));
-        y1 = std::min(y1, LONG(s.scissors[3] * sc));
+        gx0 = std::max(gx0, float(s.scissors[0]));
+        y0 = std::max(y0, LONG(s.scissors[1] * sy));
+        gx1 = std::min(gx1, float(s.scissors[2]));
+        y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
+    long x0, x1;
+    pl.Scissor(gx0, gx1, gw, W, x0, x1);
     RECT r{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)), std::clamp<LONG>(x1, 0, LONG(W)),
            std::clamp<LONG>(y1, 0, LONG(H))};
     dev_->SetScissorRect(&r);
@@ -2293,6 +2426,7 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
                 else ReadElement(ve.format, e.decode, src, f);
                 uint8_t* dst = out + size_t(v) * conv_stride + e.offset;
                 if (e.type == D3DDECLTYPE_D3DCOLOR) {
+                    if (e.swap) std::swap(f[0], f[2]);
                     uint32_t c = PackColor4(f);
                     std::memcpy(dst, &c, 4);
                 } else {
@@ -2369,6 +2503,159 @@ void D3D9Backend::FoldProjection(const State& s, GuestExtent size, const float* 
     MatMul(pv, half, out);
 }
 
+bool Orthographic(const float* p);
+
+// a run of four constants a program dot products with, as a D3D row-vector matrix
+static void ProgramMatrix(const State& s, int reg, float* m) {
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) m[r * 4 + c] = s.vsc[size_t(reg + c)][size_t(r)];
+}
+
+// WORLD the program's model-view, VIEW identity: draws the same, and a mod that knows the camera moves it from one to the
+// other. PROJECTION the program's with what comes after it folded in: the screen lines take clip space to s * p / w + o,
+// the undo at the end of a program's shader (kVsEpilogue, surf) takes that back, and Sm3Position's host pixel offset
+void D3D9Backend::PlainTransforms(const State& s, const PlainProgram& p, GuestExtent size) {
+    float mv[16], proj[16];
+    if (p.modelview >= 0) ProgramMatrix(s, p.modelview, mv);
+    else std::memcpy(mv, kIdentity, sizeof(mv));
+    ProgramMatrix(s, p.projection, proj);
+    const auto& sc = s.vsc[size_t(p.screen_scale)];
+    const auto& of = s.vsc[size_t(p.screen_offset)];
+    float hw = float(bound_rt_ ? bound_rt_->w : bound_ds_->w), hh = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
+    float zs = 1.0f / s.zscale;
+    const float mul[3] = {2 * sc[0] / size.w, -2 * sc[1] / size.h, sc[2] * zs};
+    const float add[3] = {2 * of[0] / size.w - 1 - 1.0f / hw, 1 - 2 * of[1] / size.h + 1.0f / hh, of[2] * zs};
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 3; c++) proj[r * 4 + c] = proj[r * 4 + c] * mul[c] + proj[r * 4 + 3] * add[c];
+    SetDeviceTransform(0, mv);
+    SetDeviceTransform(1, kIdentity);
+    SetDeviceTransform(2, proj);
+}
+
+// a plain transform kept a program by its stages: counted, and logged once for each program, state, stage and size
+void D3D9Backend::CountStageRefusal(const State& s, StageLackAt lack) {
+    static constexpr const char* kName[] = {"", "alpha kill", "shadow", "wide", "rect", "two sided"};
+    PlainCounts& n = plain_counts_;
+    uint32_t* count[] = {nullptr, &n.alpha_kill, &n.shadow, &n.wide, &n.rect, &n.two_sided};
+    ++*count[size_t(lack.what)];
+    TextureDesc d{};
+    if (lack.stage >= 0 && s.textures[size_t(lack.stage)]) Describe(s.textures[size_t(lack.stage)], d);
+    uint64_t key = s.vs->hash ^ (uint64_t(lack.what) << 60) ^ (uint64_t(lack.stage + 1) << 56) ^ (uint64_t(d.width) << 32) ^ d.height;
+    if (plain_refusals_.size() < 64 && plain_refusals_.insert(key).second)
+        LOGR("d3d9: plain transform stays a program: %s on stage %d, %ux%u, program %016llX", kName[size_t(lack.what)],
+             lack.stage, d.width, d.height, static_cast<unsigned long long>(s.vs->hash));
+}
+
+// A program that is only a plain transform may be drawn by fixed function, for a tool that takes transforms from the
+// device and must otherwise read every vertex back out of a shader: a mod asks (d3d9_fixed_transform),
+// XBE_D3D9_FIXED_TRANSFORM has the last word. This only says it may: a draw is prepared for fixed function with its pixel
+// shader still bound, and takes that road after the hooks only if none is left (PlainTakeOver). So with no mod a draw is
+// the program it was. Null to stay a program, as every draw does unless asked
+const PlainProgram* D3D9Backend::PlainDraw(const State& s, const Assembled& a, const DrawTextures& stages,
+                                           const InputUsages& usages) {
+    const mods::D3d9Hooks& hooks = mods::D3d9();
+    int asked = diag::D3d9FixedTransform();
+    if (asked == 0 || (asked < 0 && !hooks.fixed_transform)) return nullptr;
+    auto [it, added] = plain_.try_emplace(s.vs->hash);
+    if (added && !PlainTransform(s.vs->program, it->second)) it->second = PlainProgram{};
+    const PlainProgram& p = it->second;
+    PlainCounts& n = plain_counts_;
+    if (p.position < 0 || p.screen_scale < 0 || a.topology == Topology::Points) return n.not_plain++, nullptr;
+    float proj[16];
+    ProgramMatrix(s, p.projection, proj);
+    if (p.projection != g_projection_register || Orthographic(proj)) return n.two_d++, nullptr;
+    if (s.rs[kRsFogEnable]) return n.fog++, nullptr;  // a program's fog is in its pixel shader
+    if (s.rs[kRsZEnable] == 2) return n.w_buffer++, nullptr;  // D3DZB_USEW: fixed function cannot write w
+    if (usages[size_t(p.position)].usage != 0) return n.layout++, nullptr;
+    if (p.colour >= 0 && (usages[size_t(p.colour)].usage != 10 || usages[size_t(p.colour)].index != 0))
+        return n.layout++, nullptr;  // fixed function reads COLOR0
+    for (int t : p.tex)
+        if (t >= 0 && usages[size_t(t)].usage != 5) return n.layout++, nullptr;
+    // a target the title does not present is no camera's picture, and a mod told the draw is fixed would place it as if so
+    if (Offscreen()) return n.offscreen++, nullptr;
+    // the title's state: a hook cannot change it, so this is asked here, where fixed_transform can still be told the truth.
+    // Whether or not a pixel shader is bound: the mod that removes it leaves these with nothing to draw them
+    if (StageLackAt lack = Lacking(s, a, stages); lack.what != StageLack::none) return CountStageRefusal(s, lack), nullptr;
+    for (int i = 0; i < 4; i++)
+        if (stages.res[i] && p.tex[i] < 0) return n.stage++, nullptr;  // a stage reading coordinates the program does not write
+    bool zen = bound_ds_ && s.rs[kRsZEnable];
+    if (hooks.fixed_keep && !hooks.fixed_keep(zen, zen && SimpleState(s, kMZWriteEnable) != 0, Cmp(SimpleState(s, kMZFunc)),
+                                              hooks.fixed_keep_user))
+        return n.keep++, nullptr;
+    return &p;
+}
+
+// After the hooks. A pixel shader has no fixed function form here, ps_3_0 cannot follow fixed function and its constants
+// do not fit ps_2_x, so a draw is fixed function's only if none is left bound. If one is, the draw stays a program: its own
+// declaration, stream and vertex shader, the title's textures on every stage and the state a shader expects. Its
+// transforms stay as the hooks left them, a shader does not read them. False if that cannot be made
+bool D3D9Backend::PlainTakeOver(const State& s, const Assembled& a, DrawShaders& sh, const DrawTextures& stages,
+                                GuestExtent size, Geometry& g) {
+    ComPtr<IDirect3DPixelShader9> ps;
+    dev_->GetPixelShader(&ps);
+    if (!ps) {
+        // a texture past the four the title has is a mod's: RTX Remix counts stages 0 to 6 on every fixed function draw
+        // and reads a UI mark there as a UI draw, which loses its picture (dbbd858)
+        for (DWORD i = 4; i < 7; i++) {
+            ComPtr<IDirect3DBaseTexture9> t;
+            dev_->GetTexture(i, &t);
+            if (t) {
+                plain_counts_.marked++;
+                break;
+            }
+        }
+        plain_counts_.fixed++;
+        return true;
+    }
+    plain_counts_.pixel++;
+    mod_draw_.fixed_transform = 0;
+    sh.plain = nullptr;
+    sh.ffp = false;
+    std::vector<DeclElement> el;
+    uint64_t decode;
+    uint32_t conv_stride;
+    BuildDeclaration(s, a, sh, el, decode, conv_stride);
+    IDirect3DVertexDeclaration9* decl = EnsureDeclaration(el);
+    sh.vs = EnsureVertexShader(s, a, sh, decode);
+    if (!decl || !sh.vs || !DrawGeometry(a, el, conv_stride, g)) {
+        counts_.shader++;
+        return false;
+    }
+    dev_->SetVertexShader(sh.vs);
+    SetShaderConstants(s, sh, stages, size);
+    for (DWORD i = 0; i < 4; i++) SetTexture(i, stages.res[i]);
+    dev_->SetVertexDeclaration(decl);
+    SetOutputState(s, a, false);
+    return true;
+}
+
+// the pixel shader for a draw's stages, false if it cannot be made
+// What the draw's pixel stage makes of texture 0 and the vertex colour (PixelStageSum), kept by pixel key and constants
+StageSum D3D9Backend::PixelSum(const State& s, const DrawTextures& stages) {
+    PixelKey pk = MakePixelKey(s, stages.info);
+    float pc[18][4];
+    for (int i = 0; i < 8; i++) {
+        Color(SimpleState(s, kMPsConstant0 + i * 4), pc[i * 2]);
+        Color(SimpleState(s, kMPsConstant1 + i * 4), pc[i * 2 + 1]);
+    }
+    Color(SimpleState(s, kMPsFinalConstant0), pc[16]);
+    Color(SimpleState(s, kMPsFinalConstant1), pc[17]);
+    bool specular = s.rs[kRsSpecularEnable] != 0;
+    uint64_t key = Hash(pc, sizeof(pc), Hash(&pk, sizeof(pk))) ^ uint64_t(specular);
+    auto [it, added] = sums_.try_emplace(key);
+    if (added) it->second = PixelStageSum(pk, pc, specular);
+    return it->second;
+}
+
+bool D3D9Backend::DrawPixelShader(const State& s, const DrawTextures& stages, DrawShaders& sh) {
+    PixelKey pk = MakePixelKey(s, stages.info);
+    // Direct3D 9 has no front face setting: culling clockwise leaves counter clockwise as the front (PixelHlsl)
+    if (pk.two_sided && s.rs[kRsCullMode] == kCullCw) pk.two_sided = 2;
+    sh.pkey = Hash(&pk, sizeof(pk));
+    sh.ps = EnsurePixelShader(pk, sh.pkey);
+    return sh.ps != nullptr;
+}
+
 void D3D9Backend::SetDeviceTransform(int i, const float* m) {
     static const D3DTRANSFORMSTATETYPE kType[3] = {D3DTS_WORLD, D3DTS_VIEW, D3DTS_PROJECTION};
     if (dev_xf_ok_[i] && !std::memcmp(dev_xf_[i], m, sizeof(dev_xf_[i]))) return;
@@ -2403,6 +2690,12 @@ void D3D9Backend::SetTitleTransforms(const State& s, const Assembled& a, GuestEx
         SetDeviceTransform(0, want[0]);
         SetDeviceTransform(1, want[1]);
     }
+    // the draw's place on a picture wider than the console's, as the shaders put it (gpu/picture.h)
+    if (place_.On()) {
+        float placed[16];
+        PlaceMatrix(place_, proj, placed);
+        std::memcpy(proj, placed, sizeof(proj));
+    }
     SetDeviceTransform(2, proj);
 }
 
@@ -2419,12 +2712,13 @@ std::string PixelStats(IDirect3DDevice9* dev, IDirect3DSurface9* rt);
 
 bool Orthographic(const float* p) { return p[3] == 0 && p[7] == 0 && p[11] == 0 && p[15] == 1; }
 
-// the mods' befores, in the order they asked; false leaves the draw out, and no later before or any after is called
-bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
-                             const Geometry& g) {
+// the mods' befores, in the order they asked. A skip leaves the draw out, and no later before or any after is called; a
+// defer keeps it for the frame's end, and no later before is called
+D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh,
+                                             const DrawTextures& stages, const Geometry& g) {
     mods_called_ = 0;
     const auto& hooks = mods::D3d9().draw;
-    if (hooks.empty()) return true;
+    if (hooks.empty()) return ModsSay::draw;
     RecompModDraw& d = mod_draw_;
     d = {};
     d.size = sizeof(d);
@@ -2432,6 +2726,10 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     d.title = 1;
     d.program = sh.prog;
     d.program_id = sh.prog ? s.vs->hash : 0;
+    d.fixed_transform = sh.plain != nullptr;
+    StageSumD3d9(sh.sum.color, d.stage_color_op, d.stage_color_arg1, d.stage_color_arg2);
+    StageSumD3d9(sh.sum.alpha, d.stage_alpha_op, d.stage_alpha_arg1, d.stage_alpha_arg2);
+    d.stage_known = (sh.sum.color ? 1u : 0u) | (sh.sum.alpha ? 2u : 0u);
     // a program projects through the camera when it reads the registers the game names for it
     int preg = g_projection_register;
     if (sh.prog && preg >= 0 && preg + 4 <= int(s.vsc.size()) && ReadsConstant(s.vs->program, uint32_t(preg))) {
@@ -2460,6 +2758,10 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     std::memcpy(d.projection, proj, sizeof(d.projection));
     std::memcpy(d.world, dev_xf_[0], sizeof(d.world));
     std::memcpy(d.view, dev_xf_[1], sizeof(d.view));
+    if (d.two_d) {
+        const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+        d.screen_box_set = t && ScreenBox(s, a, sh.prog, t->gw, t->gh, d.screen_box);
+    }
     d.indexed = g.indexed;
     d.first_vertex = 0;
     d.vertices = g.vertices;
@@ -2468,10 +2770,76 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     d.index_count = g.index_count;
     d.base_vertex = 0;
     for (const mods::DrawHook& h : hooks) {
-        if (h.before && h.before(&d, h.user) == RECOMP_DRAW_SKIP) return false;
+        int say = h.before ? h.before(&d, h.user) : RECOMP_DRAW_AS_IS;
+        if (say == RECOMP_DRAW_SKIP) return ModsSay::skip;
         mods_called_++;
+        if (say == RECOMP_DRAW_DEFER) return ModsSay::defer;
     }
+    return ModsSay::draw;
+}
+
+// a draw kept for the frame's end; false when it cannot be (no colour target, or the frame holds enough already)
+bool D3D9Backend::Defer(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride) {
+    constexpr size_t kMaxDeferred = 256;
+    if (deferred_.size() >= kMaxDeferred) return false;
+    Deferred d;
+    if (FAILED(dev_->GetRenderTarget(0, &d.rt)) || !d.rt) return false;
+    if (FAILED(dev_->CreateStateBlock(D3DSBT_ALL, &d.state))) return false;
+    dev_->GetDepthStencilSurface(&d.ds);
+    d.a.regs = a.regs;
+    d.a.vertex_count = a.vertex_count;
+    d.a.topology = a.topology;
+    d.a.strip = a.strip;
+    d.a.pretransformed = a.pretransformed;
+    d.a.decode = a.decode;
+    d.a.elements = a.elements;
+    d.a.buffer_count = a.buffer_count;
+    for (uint32_t i = 0; i < a.buffer_count; i++) {
+        const VertexBuffer& b = a.buffers[i];
+        d.bytes[i].assign(b.src, b.src + b.bytes);
+        d.a.buffers[i] = {d.bytes[i].data(), b.bytes, b.stride};
+    }
+    if (a.index_count && a.index_src) {
+        const uint8_t* p = static_cast<const uint8_t*>(a.index_src);
+        d.indices.assign(p, p + size_t(a.index_count) * (a.index16 ? 2 : 4));
+        d.a.index_src = d.indices.data();
+    }
+    d.a.index16 = a.index16;
+    d.a.index_count = a.index_count;
+    d.a.draw_count = a.draw_count;
+    d.a.base_vertex = a.base_vertex;
+    d.el = el;
+    d.conv_stride = conv_stride;
+    deferred_.push_back(std::move(d));
     return true;
+}
+
+// the deferred draws, in the order they came, each into its own target with the state it was kept with; then the device
+// as it was
+void D3D9Backend::DrawDeferred() {
+    if (deferred_.empty()) return;
+    ComPtr<IDirect3DStateBlock9> saved;
+    ComPtr<IDirect3DSurface9> rt, ds;
+    dev_->GetRenderTarget(0, &rt);
+    dev_->GetDepthStencilSurface(&ds);
+    bool restore = SUCCEEDED(dev_->CreateStateBlock(D3DSBT_ALL, &saved));
+    Scene(true);
+    for (Deferred& d : deferred_) {
+        // a target set resets the viewport, which the state block then puts back
+        dev_->SetRenderTarget(0, d.rt.Get());
+        dev_->SetDepthStencilSurface(d.ds.Get());
+        d.state->Apply();
+        Geometry g;
+        if (!DrawGeometry(d.a, d.el, d.conv_stride, g) || !g.prims) continue;
+        if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
+        else dev_->DrawPrimitive(g.type, 0, g.prims);
+        counts_.made++;
+    }
+    deferred_.clear();
+    if (rt) dev_->SetRenderTarget(0, rt.Get());
+    dev_->SetDepthStencilSurface(ds.Get());
+    if (restore) saved->Apply();
+    Invalidate();
 }
 
 // the camera RTX Remix takes from a draw's WORLD, VIEW and PROJECTION (CameraManager::processCameraData): none for an
@@ -2935,6 +3303,7 @@ void D3D9Backend::DeliverReports(bool wait) {
             pixels += double(n) / q.samples_per_pixel;
         }
         if (!done) return;
+        testdrive::ReportLog(r.va, pixels, r.queries.size(), r.queries.empty() ? 0.0f : r.queries[0].samples_per_pixel);
         kernel::W32(r.va + kTime, uint32_t(presents_));
         kernel::W32(r.va + kTimeHigh, 0);
         kernel::W32(r.va + kCount, uint32_t(std::lround(pixels)));
@@ -2945,6 +3314,7 @@ void D3D9Backend::DeliverReports(bool wait) {
 }
 
 void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    testdrive::CountDraw();
     if (SpriteOnStage3(s, prim)) {
         Draw(SpriteStageZero(s), prim, start, count, indices);
         return;
@@ -2977,12 +3347,21 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     sh.prog = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     sh.fixed_transform = !sh.prog && !a.pretransformed;
     sh.sprite = a.topology == Topology::Points && sh.prog && s.rs[kRsPointSpriteEnable];
-    sh.ffp = !sh.prog && FixedFunctionDraws(s, a, stages);
+    // its place on a picture wider than the console's: the screen's targets are that shape, wide_ across
+    {
+        const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+        place_ = t && ScreenSized(t->gw, t->gh) ? Place(s, a, sh.prog, t->gw, t->gh, wide_) : Placed{};
+    }
+    // FILL's edges move vertices apart, which only the shaders do
+    sh.ffp = !sh.prog && !place_.bleed && FixedFunctionDraws(s, a, stages);
     if (!sh.prog) sh.fk = MakeFixedKey(s);
     if (sh.prog) {
         if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
         sh.usages = ProgramUsages(s, a.regs);
+        sh.plain = sh.sprite ? nullptr : PlainDraw(s, a, stages, sh.usages);
+        sh.ffp = sh.plain != nullptr;
     }
+    if (sh.plain || !mods::D3d9().draw.empty()) sh.sum = PixelSum(s, stages);
 
     std::vector<DeclElement> el;
     uint64_t decode;
@@ -2999,15 +3378,17 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     if (sh.ffp) {
         dev_->SetVertexShader(nullptr);
         dev_->SetPixelShader(nullptr);
-        SetFixedFunction(s, a, stages, size);
+        SetFixedFunction(s, a, sh, stages, size);
+        if (sh.plain) {
+            if (!DrawPixelShader(s, stages, sh)) {
+                counts_.shader++;
+                return;
+            }
+            dev_->SetPixelShader(sh.ps);  // for the hooks to take away, or the draw stays a program (PlainTakeOver)
+        }
     } else {
         sh.vs = EnsureVertexShader(s, a, sh, decode);
-        PixelKey pk = MakePixelKey(s, stages.info);
-        // Direct3D 9 has no front face setting: culling clockwise leaves counter clockwise as the front (PixelHlsl)
-        if (pk.two_sided && s.rs[kRsCullMode] == kCullCw) pk.two_sided = 2;
-        sh.pkey = Hash(&pk, sizeof(pk));
-        sh.ps = EnsurePixelShader(pk, sh.pkey);
-        if (!sh.vs || !sh.ps) {
+        if (!DrawPixelShader(s, stages, sh) || !sh.vs) {
             counts_.shader++;
             return;
         }
@@ -3020,7 +3401,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     dev_->SetVertexDeclaration(decl);
     SetSamplers(s, a, stages);
     SetOutputState(s, a, sh.ffp);
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, place_);
 
     Geometry g;
     if (!DrawGeometry(a, el, conv_stride, g)) {
@@ -3035,7 +3416,21 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     mod_state_ = &s;
     mod_asm_ = &a;
     mod_size_ = size;
-    bool drawn = !(sh.prog && diag::D3d9SkipProgram(s.vs->hash)) && ModsBefore(s, a, sh, stages, g);
+    ModsSay say = sh.prog && diag::D3d9SkipProgram(s.vs->hash) ? ModsSay::skip : ModsBefore(s, a, sh, stages, g);
+    bool drawn = say != ModsSay::skip;
+    if (drawn && sh.plain && !PlainTakeOver(s, a, sh, stages, size, g)) {
+        ModsAfter();
+        drawn = false;
+    }
+    // deferred: kept as the mods left the device, which their afters then put back; made at the frame's end
+    if (drawn && say == ModsSay::defer && Defer(a, el, conv_stride)) {
+        ModsAfter();
+        CountCamera(sh, false);
+        counts_.deferred++;
+        mod_state_ = nullptr;
+        mod_asm_ = nullptr;
+        return;
+    }
     CountCamera(sh, drawn);
     if (drawn) {
         CopyFeedback(stages);
@@ -3082,8 +3477,8 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
     if (!dst_t || src_t == dst_t) return;
     NoteAfterMark("copy", src_t->data, dst_t->data);
     Scene(false);
-    float ss = float(src_t->w) / src_t->gw;
-    float ds = float(dst_t->w) / dst_t->gw;
+    float ssx = float(src_t->w) / src_t->gw, ssy = float(src_t->h) / src_t->gh;
+    float dsx = float(dst_t->w) / dst_t->gw, dsy = float(dst_t->h) / dst_t->gh;
     bool listed = count && src_rects;
     uint32_t n = listed ? count : 1;
     for (uint32_t i = 0; i < n; i++) {
@@ -3106,8 +3501,8 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
         x1 = std::min(x1, int32_t(std::min<int64_t>(src_t->gw, x0 + int64_t(dst_t->gw) - dx)));
         y1 = std::min(y1, int32_t(std::min<int64_t>(src_t->gh, y0 + int64_t(dst_t->gh) - dy)));
         if (x0 < 0 || y0 < 0 || dx < 0 || dy < 0 || x1 <= x0 || y1 <= y0) continue;
-        RECT sr{LONG(x0 * ss), LONG(y0 * ss), LONG(x1 * ss), LONG(y1 * ss)};
-        RECT dr{LONG(dx * ds), LONG(dy * ds), LONG((dx + x1 - x0) * ds), LONG((dy + y1 - y0) * ds)};
+        RECT sr{LONG(x0 * ssx), LONG(y0 * ssy), LONG(x1 * ssx), LONG(y1 * ssy)};
+        RECT dr{LONG(dx * dsx), LONG(dy * dsy), LONG((dx + x1 - x0) * dsx), LONG((dy + y1 - y0) * dsy)};
         sr.right = std::min<LONG>(sr.right, src_t->w);
         sr.bottom = std::min<LONG>(sr.bottom, src_t->h);
         dr.right = std::min<LONG>(dr.right, dst_t->w);
@@ -3129,13 +3524,13 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
     dst_t->drawn = true;
 }
 
-// the frame letterboxed in the window, 16:9 when the console reports a widescreen display, else 4:3
+// the frame letterboxed in the window at the picture's shape (app::PictureAspect)
 RECT D3D9Backend::FrameRect() const {
     RECT rc;
     GetClientRect(hwnd_, &rc);
     float w = float(std::max<LONG>(rc.right - rc.left, 1));
     float h = float(std::max<LONG>(rc.bottom - rc.top, 1));
-    float aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = app::PictureAspect();
     float vw = std::min(w, h * aspect);
     float vh = vw / aspect;
     LONG x = LONG((w - vw) / 2);
@@ -3201,20 +3596,22 @@ void D3D9Backend::CountFps() {
     }
 }
 
-// a new render scale or vsync makes every target and the back buffer again
+// a new render scale, picture shape or vsync makes every target and the back buffer again
 void D3D9Backend::ApplySettings() {
     if (texturedumper::Update()) pack_textures_.clear(), Invalidate();
     float want = app::RenderScale(guest_h_);
-    bool rescale = std::fabs(want - scale_) > 1e-4f;
+    float wide = PictureWide(guest_w_, guest_h_);
+    bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
     if (!rescale && app::Get().vsync == vsync_) return;
     vsync_ = app::Get().vsync;
     scale_ = want;
+    wide_ = wide;
     Scene(false);
     Bind(nullptr, nullptr);
     targets_.clear();  // a plain device's reset frees them either way
     dummies_.clear();
     prime_.Reset();
-    bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_)));
+    bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_ * wide_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(guest_h_ * scale_)));
     D3DPRESENT_PARAMETERS pp;
     FillPresentParams(pp);
@@ -3231,7 +3628,8 @@ void D3D9Backend::ApplySettings() {
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    LOGI("d3d9: render scale %.3f, %ux%u back buffer, vsync %s", scale_, bb_w_, bb_h_, vsync_ ? "on" : "off");
+    LOGI("d3d9: render scale %.3f, %ux%u back buffer, picture %.3f wide, vsync %s", scale_, bb_w_, bb_h_,
+         app::PictureAspect(), vsync_ ? "on" : "off");
 }
 
 void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
@@ -3285,6 +3683,7 @@ void D3D9Backend::Present(const Surface& front) {
         std::copy_backward(std::begin(screens_), std::end(screens_) - 1, std::end(screens_));
         screens_[0] = screen;
     }
+    DrawDeferred();
     for (const mods::DeviceHook& h : mods::D3d9().present) h.fn(dev_.Get(), h.user);
     prime_due_ = true;
     Target* t = EnsureTarget(front, false);
@@ -3314,6 +3713,14 @@ void D3D9Backend::Present(const Surface& front) {
     Scene(false);
     if (testdrive::SnapDue()) SnapBackBuffer(bb.Get());
     bool report = presents_ + 1 == 60 || presents_ + 1 == 1800;
+    if ((presents_ + 1) % 1800 == 0 && (plain_counts_.fixed || plain_counts_.not_plain)) {
+        const PlainCounts& n = plain_counts_;
+        LOGR("d3d9: plain transforms: %u drawn fixed, %u of them with a texture on stages 4 to 6; stayed programs: %u not "
+             "plain, %u 2D, %u fog, %u W buffer, %u layout, %u off screen, %u stage texture, %u a mod's choice, %u pixel shader "
+             "left; stage state: %u alpha kill, %u shadow, %u wide, %u rect, %u two sided", n.fixed, n.marked, n.not_plain,
+             n.two_d, n.fog, n.w_buffer, n.layout, n.offscreen, n.stage, n.keep, n.pixel, n.alpha_kill, n.shadow, n.wide,
+             n.rect, n.two_sided);
+    }
     if (report)
         LOGR("d3d9: presented target %s; back buffer %s%s", t ? PixelStats(dev_.Get(), t->surf.Get()).c_str() : "none",
              PixelStats(dev_.Get(), bb.Get()).c_str(), gamma_ ? "; through the gamma ramp" : "");
@@ -3333,6 +3740,7 @@ void D3D9Backend::Present(const Surface& front) {
     bound_rt_surf_ = nullptr;
     presents_++;
     testdrive::Presented();
+    PlacementFrame();
     if (report) {
         const DrawCounts& c = counts_;
         LOGR("d3d9: %llu frames, %u draws made (%u fixed function); refused: %u assembly, %u targets, %u declarations, "
@@ -3343,8 +3751,14 @@ void D3D9Backend::Present(const Surface& front) {
     }
     if (!mods::D3d9().draw.empty()) {
         EndCameraFrame();
-        if (presents_ % 600 == 0) ReportCamera();
-        camera_.probe = presents_ % 600 == 599;
+        // the camera report, and its frame in 600 read back after every draw, for diagnosing a D3D9 tool: only with
+        // XBE_D3D9_CAMERA_PROBE=1. Each read-back waits for the GPU: under RTX Remix the probed frame took about 200 ms
+        static const bool probe_on = [] {
+            const char* e = std::getenv("XBE_D3D9_CAMERA_PROBE");
+            return e && e[0] == '1';
+        }();
+        if (probe_on && presents_ % 600 == 0) ReportCamera();
+        camera_.probe = probe_on && presents_ % 600 == 599;
         camera_.probed = false;
     }
     frame_++;

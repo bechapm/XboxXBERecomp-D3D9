@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 5
+#define RECOMP_MOD_API_VERSION 9
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -89,14 +89,41 @@ typedef struct RecompModDraw {
     uint32_t index_count;
     int32_t  base_vertex;
     int      fixed_transform;       /* the program (`program` is set) is a plain
-                                       transform and D3D9's fixed function draws
-                                       it (d3d9_fixed_transform): no vertex shader
+                                       transform D3D9's fixed function may draw
+                                       (d3d9_fixed_transform): no vertex shader
                                        is bound, WORLD is its model-view and VIEW
-                                       identity, and PROJECTION its projection */
+                                       identity, and PROJECTION its projection.
+                                       Its pixel shader is still bound: remove it
+                                       in before and fixed function draws this,
+                                       leave it and it stays a program */
+    /* version 8 (this SDK's): a 2D draw's (two_d) place on its target, in
+       the target's console pixels, as the title's program or fixed function
+       puts its vertices: left, top, right, bottom. 0 when it could not be
+       found or the draw is not 2D. A box that stays put while the camera
+       moves is the screen's (a HUD); one that moves with it is the world's
+       (a sprite the title projects itself) */
+    int      screen_box_set;
+    float    screen_box[4];
+    /* version 9: what the title's pixel stage does with texture 0 and the
+     * vertex colour, as Direct3D 9's stage 0 would say it (D3DTOP, D3DTA): for a tool that
+     * reads texture stage states instead of running shaders. The toolkit runs
+     * a pixel shader's combiners on sample colours with the draw's constants,
+     * or reads a fixed function stage 0 used alone. A half not known (several
+     * textures or stages, a texture shader, specular, or a sum no one stage
+     * makes) says texture times vertex colour. On a draw with fixed_transform
+     * set, stage 0 is already this. */
+    uint32_t stage_known;           /* 1: the colour half is known, 2: the alpha */
+    uint32_t stage_color_op, stage_color_arg1, stage_color_arg2;
+    uint32_t stage_alpha_op, stage_alpha_arg1, stage_alpha_arg2;
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */
 #define RECOMP_DRAW_SKIP  1         /* left out: before changed nothing */
+#define RECOMP_DRAW_DEFER 2         /* version 7: made at the frame's end instead, after the title's
+                                       last draw and before it is shown, into the same target with
+                                       the device as before left it; the afters are called now. No
+                                       later mod's before sees it. A toolkit older than 7 takes it
+                                       for AS_IS: check api->version */
 
 /* Whether a plain transform may be drawn by fixed function (d3d9_fixed_transform),
  * by the depth state the title has set for it: depth_func is a D3DCMPFUNC. */
@@ -243,8 +270,18 @@ typedef struct RecompModApi {
      * the fixed-function transforms and otherwise has to read each vertex
      * back out of the shader. Such a draw comes with fixed_transform set
      * (RecompModDraw). `keep`, if given, is asked first, and a 0 leaves that
-     * draw a program. RECOMP_D3D9_FIXED_TRANSFORM has the last word. */
+     * draw a program. XBE_D3D9_FIXED_TRANSFORM has the last word. */
     void (*d3d9_fixed_transform)(int on, RecompModFixedFn keep, void *user);
+
+    /* ---- version 6 (this SDK's; not in the DirectXbox-Recomp toolkit yet). Version 7 adds no
+     * field: a before may answer RECOMP_DRAW_DEFER ---- */
+
+    /* An overlay the mod knows of has the mouse, one with a cursor of its own
+     * (a D3D9 tool's menu, say): on, the game lets go of it -- mouse look stops
+     * holding it, its buttons and wheel stop pressing the game's controls --
+     * and leaves the cursor to the overlay; off gives it back. Counted: pair
+     * each on with an off. Any thread. */
+    void (*pointer_elsewhere)(int on);
 } RecompModApi;
 
 typedef int (*RecompModInitFn)(const RecompModApi *api);

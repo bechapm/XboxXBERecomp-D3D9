@@ -65,7 +65,9 @@ pushes it. While the game window is in front the pointer is hidden and held insi
 turns it on by default with `GameInfo::mouse_look`.
 
 A stick says how fast to turn, not how far, so a game whose aim should follow the mouse exactly is better served by
-a hook of its own in `src/game` that turns the camera by the mouse's movement.
+a hook of its own in `src/game` that turns the camera by the mouse's movement. `input::MouseDirect(true)` stops
+mouse_look from moving the stick, and `input::MouseTake(&dx, &dy)` hands the game the counts since it last asked
+(right and down; the pointer is still held in the window as before).
 
 ## Pointer
 
@@ -97,6 +99,15 @@ While the pointer is wanted:
   either;
 - the cursor shows when the mouse moves or clicks and hides when a key or controller 1's pad is used, so a player who
   never touches the mouse never sees it.
+
+Not wanted, with mouse_look holding the mouse, the cursor stays hidden over the game. The window asks
+`input::CursorHidden()` on each `WM_SETCURSOR` before ImGui's handler, which would otherwise show its arrow, and
+while hidden the window thread's cursor display count (`ShowCursor`) is one step down, so a cursor someone else sets
+in between (ImGui's frame, an overlay hooking the window) stays hidden too.
+
+An overlay that is not the game's (RTX Remix's menu) can take more: `input::CursorElsewhere(true)` leaves the
+system cursor to it (it draws its own), and `input::KeysElsewhere(true)` stops keys pressing controls, a key held
+when it ends staying the overlay's until let go. Pair each with its `false`, alongside a `PointerWant`.
 
 | `input::Pointer` | |
 | --- | --- |

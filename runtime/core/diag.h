@@ -32,6 +32,16 @@ inline bool D3d9Solid() {
     return on;
 }
 
+// XBE_D3D9_FIXED_TRANSFORM: 1 draws programs that are only a plain transform by fixed function, 0 never, whatever a mod
+// asked; unset (-1), as a mod asked
+inline int D3d9FixedTransform() {
+    static const int on = [] {
+        const char* e = std::getenv("XBE_D3D9_FIXED_TRANSFORM");
+        return e && *e ? (e[0] != '0' ? 1 : 0) : -1;
+    }();
+    return on;
+}
+
 // XBE_D3D9_SKIP_PROGRAMS: vertex programs, by the hashes the D3D9 camera report prints, comma separated, whose draws
 // are left out: which of a frame's draws does something can be found by leaving it out
 inline bool D3d9SkipProgram(uint64_t hash) {

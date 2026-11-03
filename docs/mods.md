@@ -5,14 +5,16 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 [`runtime/mods/recomp_mod.h`](../runtime/mods/recomp_mod.h), so a change to a game can live outside the game's build:
 the port stays the port, and a mod is something a player chooses to add.
 
-The contract is the DirectXbox-Recomp toolkit's, field for field (version 5), so one build of a mod loads under a game
-built with either. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
+The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
+game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`) and 8 (`screen_box`) are this SDK's so far, and a mod
+checks for them. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
 **Contents:** [At a glance](#at-a-glance) · [Where a mod sits](#where-a-mod-sits) · [Your first mod](#your-first-mod) ·
 [Loading](#loading) · [A frame, hook by hook](#a-frame-hook-by-hook) · [Hook reference](#hook-reference) ·
 [Changing a draw](#changing-a-draw) · [The camera](#the-camera) · [Telling models apart](#telling-models-apart) ·
-[Vertex shaders](#vertex-shaders) · [Threads](#threads) · [Versions](#versions) ·
+[Vertex shaders](#vertex-shaders) · [Threads](#threads) · [An overlay's mouse](#an-overlays-mouse) ·
+[Versions](#versions) ·
 [Where a change belongs](#where-a-change-belongs) · [Troubleshooting](#troubleshooting) ·
 [Keeping this guide current](#keeping-this-guide-current)
 
@@ -28,6 +30,7 @@ when it is called. The header is the field by field reference; this page is the 
 | Tell which of the game's models a draw is | `draw_vertex_buffer` from `before` | D3D9 |
 | Replace what a mirror, monitor or blur reads | `d3d9_on_copy` | D3D9 |
 | Do something at the start or end of a frame | `d3d9_on_clear`, `d3d9_on_present` | D3D9 |
+| Give the mouse and keyboard to an overlay with its own cursor | `pointer_elsewhere` | any |
 
 The D3D9 renderer is picked with `renderer = "d3d9"` in the settings file ([d3d9.md](d3d9.md)). Nothing in the
 contract names a game or a tool: a mod for one game checks the game it is loaded into and unloads itself from any
@@ -151,7 +154,7 @@ sequenceDiagram
         G->>M: d3d9_on_clear(what, z, whole)
         loop every draw
             G->>M: before(draw)
-            M-->>G: RECOMP_DRAW_AS_IS or RECOMP_DRAW_SKIP
+            M-->>G: RECOMP_DRAW_AS_IS, SKIP or DEFER
             Note over G: draws (unless skipped)
             G->>M: after(draw)
         end
@@ -187,7 +190,8 @@ returns 0 / NULL).
 | `d3d9_remake_written_textures` | from init or `d3d9_on_device` | – | ✓ | |
 | `d3d9_on_copy` | before each copy of a target | – | ✓ | 8 |
 | `draw_vertex_buffer` (v4) | inside a draw hook | – (0) | ✓ | |
-| `d3d9_fixed_transform` (v5) | accepted, does nothing here | – | – | |
+| `d3d9_fixed_transform` (v5) | once the device is made; see Changing a draw | – | ✓ | |
+| `pointer_elsewhere` (v6) | any time, any thread; each on paired with one off | ✓ | ✓ | |
 | `replaying` | any time | ✓ (0) | ✓ (0) | |
 | `capture_on_draw`, `capture_note`, `replay_on_note` | accepted, never called: this SDK makes no frame captures for replay | – | – | |
 
@@ -208,21 +212,35 @@ flowchart TD
     B --> Q{"Returns?"}
     Q -- "RECOMP_DRAW_SKIP<br/>(change nothing first)" --> SK["Not drawn,<br/>no after"]
     Q -- "RECOMP_DRAW_AS_IS" --> CH["Drawn, with any state<br/>before changed"]
+    Q -- "RECOMP_DRAW_DEFER (v7)" --> DF["Kept, with the device as<br/>before left it; made at<br/>the frame's end"]
     CH --> A["after(draw, user):<br/>put the state back"]
+    DF --> A
     SK --> NX(["Next draw"])
     A --> NX
 ```
+
+**Deferring a draw (version 7).** `RECOMP_DRAW_DEFER` keeps the draw and makes it at the frame's end: after the title's
+last draw and before the frame is shown (and before `d3d9_on_present`), into the target it was meant for, with the
+device's whole state as `before` left it. Deferred draws come in the order they were deferred. `after` is called at
+once, as for a drawn one, and no later mod's `before` sees the draw. It is for a draw the title makes in the middle of
+its 3D that a tool needs at the end, such as the HUD a D3D9 tool composites over its own picture: such a tool takes
+everything from its first UI draw on as UI, so a HUD drawn before the title's last 3D either takes the 3D after it
+with it or is lost. A draw with no colour target, or past 256 in a frame, is drawn at once instead. A toolkit older than
+version 7 takes the answer for `RECOMP_DRAW_AS_IS`, so a mod checks `api->version` first. With no mod answering it,
+nothing is deferred and the renderer draws as ever.
 
 **Figure 7.** What `RecompModDraw` tells you here.
 
 | Group | Fields | Under this SDK |
 | --- | --- | --- |
 | Whose | `title`, `two_d`, `title_2d`, `clip_w`, `offscreen` | `two_d`: a program draw that does not read the game's projection registers, or reads an orthographic one; a fixed function draw in screen pixels or under an orthographic projection. `offscreen`: the target is not one the game presents. `title_2d` and `clip_w` are 0 |
-| How | `program`, `program_id`, `fixed_transform`, `primitive`, `primitives` | `program_id` is the program's microcode hash; `fixed_transform` is always 0 |
+| How | `program`, `program_id`, `fixed_transform`, `primitive`, `primitives` | `program_id` is the program's microcode hash; `fixed_transform`: a program fixed function may draw (asked for with `d3d9_fixed_transform`): `world` is its model-view and `view` identity. Fixed function takes it after the hooks only if no pixel shader is left bound, so a mod that wants it removes the pixel shader, sets the stages and moves the camera from `world` to `view`, and one that leaves the shader bound gets the program, with the transforms it set. `vertex_constants` holds the program's constants on such a draw; the device's are stale, as none are sent for fixed function. Draws to a target the title does not present are never offered, nor are draws fixed function has no form of: a linear texture under a pixel shader, alpha kill, a shadow compare, the wide taps of a shrinking pass, two sided lighting. With no mod no draw qualifies, and the renderer draws as ever |
 | Textures | `textures[8]`, `texture_ids[8]`, `screen_copies` | stages 0 to 3. A texture's id changes when its contents do. `screen_copies` marks stages that read a render target |
 | Depth | `depth_state`, `depth_enable`, `depth_write`, `depth_func` | as the device has them for the draw |
 | Transforms | `projection_set`, `projection`, `world`, `view`, `program_projection_set`, `program_projection` | `projection` is the game's own; `world` and `view` the device's. `program_projection` needs the game's port to name its registers ([The camera](#the-camera)) |
 | Geometry | `indexed`, `first_vertex`, `vertices`, `indices`, `index_bytes`, `index_count`, `base_vertex` | vertices start at 0 in the bound streams, indices are rebased to them: `first_vertex` and `base_vertex` are 0 |
+| Screen (v8) | `screen_box_set`, `screen_box[4]` | a `two_d` draw's left, top, right and bottom on its target in console pixels, as its program or fixed function puts the vertices (run on the CPU for 2D draws only). Across frames it tells the screen's 2D (stays put while the camera moves) from sprites the title projects into the world (moves with it) |
+| Pixel stage (v9) | `stage_known`, `stage_color_op`, `stage_color_arg1`, `stage_color_arg2`, `stage_alpha_op`, `stage_alpha_arg1`, `stage_alpha_arg2` | what the game's pixel stage does with texture 0 and the vertex colour, as Direct3D 9's stage 0 would say it (`D3DTOP`, `D3DTA`), for a tool that reads texture stage states and runs no shader. The renderer runs a pixel shader's combiners on sample colours with the draw's constants, or reads a fixed function stage 0 used alone; `stage_known` 1 is set when the colour is known, 2 the alpha. A half not known (another texture or stage changes it, a texture shader, specular, or a sum no one stage makes) reads texture times vertex colour. A `fixed_transform` draw already has stage 0 set so. Present when `size` covers them |
 
 **Example: hide the game's 2D**, for clean screenshots.
 
@@ -314,11 +332,22 @@ The renderer normally runs on a thread of its own, a frame behind the game. A mo
 the log says `a mod hooks draws, the renderer runs on the game's thread`. Every hook is called on the thread that
 draws; `recomp_mod_init` on the game's.
 
+## An overlay's mouse
+
+A mod that knows of an overlay with its own cursor (a D3D9 tool's menu, drawn over the game) calls
+`pointer_elsewhere(1)` when it opens and `pointer_elsewhere(0)` when it shuts. While any such overlay is up the game lets
+the mouse and keyboard go, as for one of its own menus: mouse look stops holding the mouse, the mouse's buttons and wheel
+and the keyboard stop pressing the game's controls, and the SDK leaves the cursor alone, for the overlay to show or
+hide. The calls are counted across mods, so each on is paired with exactly one off; an off with no on before it is
+ignored.
+
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (5 here). The contract is shared with
-DirectXbox-Recomp: a change to it is made in both, so one mod build keeps loading under either.
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (8 here). The contract is shared with
+DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
+Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no new field) and version 8's
+`RecompModDraw.screen_box` are not in DirectXbox-Recomp yet.
 
 ## Where a change belongs
 

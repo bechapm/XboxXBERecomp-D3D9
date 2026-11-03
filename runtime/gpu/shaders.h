@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -42,6 +43,16 @@ uint64_t Hash(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 PixelKey MakePixelKey(const State& s, const TexInfo tex[4]);
 
+// What a draw's pixel stage makes of texture 0 and the vertex colour, as one fixed function stage would say it, for a
+// tool that reads texture stage states instead of running shaders (RTX Remix). Combiners are run on sample colours
+// with the draw's constants (pc, as DrawConstants has them), so a sum holds for those constants only. kSumNone: no one
+// stage says it (another texture or a texture shader changes it, or no operation below gives it)
+enum StageSumOp : uint8_t { kSumNone, kSumTexture, kSumDiffuse, kSumModulate, kSumModulate2x, kSumModulate4x, kSumAdd };
+struct StageSum {
+    uint8_t color = kSumNone, alpha = kSumNone;
+};
+StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular);
+
 // Shader Model 3, for the Direct3D 9 renderer: constants in registers, Direct3D 9's names for what passes between
 // the stages, inputs named by what they hold. The layouts are the kSm3 registers below.
 inline bool g_shader_model3 = false;
@@ -49,6 +60,7 @@ inline bool g_shader_model3 = false;
 // from kSm3ProgramDraw (surf to spread); a fixed function shader's DrawConstants from c0. kSm3ModFirst on are a mod's
 // (d3d9_vertex_hlsl), then rhi_depth_clamp and the host pixel offset. Pixel shaders take DrawConstants from c0.
 constexpr uint32_t kSm3ProgramDraw = 192;
+constexpr uint32_t kSm3Place = 247;     // DrawConstants::place, for every vertex shader
 constexpr uint32_t kSm3ModFirst = 248;
 constexpr uint32_t kSm3DepthClamp = 254;  // rhi_depth_clamp, as a mod knows it; its w is always 0
 constexpr uint32_t kSm3HostPixel = 255;   // host pixels per clip unit: -1 / width, 1 / height of the bound target
@@ -73,6 +85,17 @@ void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, Inp
 // usages: Shader Model 3's input names, the habit's without them
 std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0,
                               const InputUsages* usages = nullptr);
+// A vertex program that is only a plain transform: position through a model-view then a projection or one matrix, the
+// XDK's two screen lines, a colour and coordinates moved or scaled, nothing else. Registers in hardware order, -1 none.
+struct PlainProgram {
+    int position = -1, modelview = -1, projection = -1;
+    int screen_scale = -1, screen_offset = -1;
+    int colour = -1;              // what reaches oD0
+    bool colour_swapped = false;  // as .zyxw: red and blue change places
+    int tex[4] = {-1, -1, -1, -1};        // what reaches oTn
+    int tex_scale[4] = {-1, -1, -1, -1};  // the constant oTn is multiplied by
+};
+bool PlainTransform(const std::vector<uint32_t>& program, PlainProgram& out);
 // the program reads constant register reg (hardware order: c-96 is 0) by its number, not through a0
 bool ReadsConstant(const std::vector<uint32_t>& program, uint32_t reg);
 // the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
@@ -80,6 +103,9 @@ bool ReadsViewportOffset(const std::vector<uint32_t>& program);
 // the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
 // names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
 inline int g_projection_register = -1;
+// every draw as lines, whatever the game's fill mode: a game's debugging tools set it while it runs. Read as each draw
+// is made, on the game's thread, so a host overlay clears it around its own draws to stay readable
+inline std::atomic<bool> g_wireframe{false};
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:
@@ -96,7 +122,7 @@ std::string QuadHlsl(std::string s);
 // depth stored reversed (1 at the near clip, 0 at the far one) from DrawConstants::zparams, for a vertex shader
 std::string ReversedDepthHlsl(std::string s);
 // the geometry shader that draws a point as its console pixel
-std::string PointHlsl();
+std::string PointHlsl(bool counted = false);
 
 // HLSL a backend extension adds; the defaults write the console path
 struct ShaderHooks {
@@ -140,6 +166,7 @@ struct DrawConstants {
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
     float rtshift[4];    // per kTexTarget stage: host pixels its reads move along x and y, negative up and left
     float zparams[4];    // ReversedDepthHlsl: a w buffer's scale (0 for a z buffer), its far w, the polygon offset
+    float place[4];      // gpu/picture.h, a 2D draw on a picture wider than the console's: 1 - k, offset, FILL's edges, 0
 };
 
 }  // namespace gpu

@@ -61,6 +61,7 @@ void Load() {
     s.keyboard_mouse = t["keyboard_mouse"].value_or(s.keyboard_mouse);
     s.mouse_look = t["mouse_look"].value_or(s.mouse_look);
     s.mouse_sensitivity = std::clamp(t["mouse_sensitivity"].value_or(s.mouse_sensitivity), 1u, 100u);
+    s.aspect_ratio = t["aspect_ratio"].value_or(s.aspect_ratio);
     input::LoadControls(t["controls"].as_table());
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
@@ -87,7 +88,8 @@ toml::table Table() {
                   {"renderer", s.renderer},
                   {"keyboard_mouse", s.keyboard_mouse},
                   {"mouse_look", s.mouse_look},
-                  {"mouse_sensitivity", int64_t(s.mouse_sensitivity)}};
+                  {"mouse_sensitivity", int64_t(s.mouse_sensitivity)},
+                  {"aspect_ratio", s.aspect_ratio}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
@@ -165,6 +167,22 @@ bool Widescreen() {
     }
     return wide;
 }
+
+// Output for every frame, declared here for PictureAspect
+Mode CachedOutput();
+
+float PictureAspect() {
+    if (!kGame.hor_plus) return Widescreen() ? 16.0f / 9 : 4.0f / 3;
+    const std::string& a = Get().aspect_ratio;
+    for (const Aspect& k : kAspects)
+        if (a == k.name) return k.value;
+    // "screen", or a shape this build does not know: the output's
+    Mode m = CachedOutput();
+    float v = m.height ? float(m.width) / float(m.height) : 16.0f / 9;
+    return std::clamp(v, 4.0f / 3, 32.0f / 9);
+}
+
+float HorPlus() { return kGame.hor_plus ? PictureAspect() * 3 / 4 : 1.0f; }
 
 // Output for every frame: the desktop mode lookup reads the registry, so it runs again only when the resolution
 // setting or the window's monitor changes
