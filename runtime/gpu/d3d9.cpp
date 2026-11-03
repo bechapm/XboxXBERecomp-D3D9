@@ -2872,12 +2872,13 @@ void D3D9Backend::PickDraw3D(const State& s, const Assembled& a, const DrawShade
 }
 
 // XBE_D3D9_PICK_BUDGET: the vertices of programs that are not plain transforms the CPU may run a frame for picks
-// (default 30000; 0 tests plain transforms alone). XBE_D3D9_PICK_EVERY: the frames between tests (default 4); the
+// (default 0: plain transforms alone, as running the others cost a tested frame 12.6 ms through Siberia against 2.4;
+// 30000 takes a level's characters and props in). XBE_D3D9_PICK_EVERY: the frames between tests (default 4); the
 // answers hold in between
 uint32_t D3D9Backend::PickBudget() {
     static const uint32_t budget = [] {
         const char* e = std::getenv("XBE_D3D9_PICK_BUDGET");
-        return e ? uint32_t(std::strtoul(e, nullptr, 10)) : kPickBudget;
+        return e ? uint32_t(std::strtoul(e, nullptr, 10)) : 0u;
     }();
     return budget;
 }

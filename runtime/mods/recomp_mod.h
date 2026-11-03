@@ -136,9 +136,10 @@ typedef struct RecompModDraw {
      * 1 when a surface covered the point. Zero until there is an answer, and
      * again once the id is no longer asked for. It works whatever the device's
      * depth buffer holds (a tool that ray traces the world may leave it
-     * empty). Up to 32 points a frame; plain transforms are tested by their
-     * matrices, other programs within a budget of CPU work a frame, and a
-     * frame that runs over leaves the answers as they were. */
+     * empty). Up to 32 points a frame, tested every few frames; plain
+     * transforms are tested by their matrices, other programs only within
+     * the budget XBE_D3D9_PICK_BUDGET gives (none by default), and a frame
+     * that runs over leaves the answers as they were. */
     int    (*pick)(const struct RecompModDraw *draw, uint32_t id, float x, float y, float hit[3]);
 } RecompModDraw;
 
