@@ -2643,7 +2643,34 @@ StageSum D3D9Backend::PixelSum(const State& s, const DrawTextures& stages) {
     bool specular = s.rs[kRsSpecularEnable] != 0;
     uint64_t key = Hash(pc, sizeof(pc), Hash(&pk, sizeof(pk))) ^ uint64_t(specular);
     auto [it, added] = sums_.try_emplace(key);
-    if (added) it->second = PixelStageSum(pk, pc, specular);
+    if (added) {
+        it->second = PixelStageSum(pk, pc, specular);
+        // XBE_D3D9_LOG_STAGE_SUM=1: each new sum, with the title's combiners (D3DPIXELSHADERDEF) when it has a pixel
+        // shader, for a mod or a tool that reads stage 0 and draws a surface otherwise than the title does
+        static const bool log = [] {
+            const char* e = std::getenv("XBE_D3D9_LOG_STAGE_SUM");
+            return e && e[0] == '1';
+        }();
+        if (log && sums_.size() <= 256) {
+            uint64_t prog = (s.vs_handle & 1) && s.vs ? s.vs->hash : 0;
+            LOGR("d3d9: stage sum %016llX, program %016llX, textures %08X %08X %08X %08X: colour %u, alpha %u (%s)",
+                (unsigned long long)key, (unsigned long long)prog, s.textures[0], s.textures[1], s.textures[2],
+                s.textures[3], it->second.color, it->second.alpha, s.ps ? "combiners" : "texture stages");
+            for (int r = 0; s.ps && r < 4; r++) {
+                const uint32_t* d = s.ps->def + r * 15;
+                LOGR("d3d9:   def %2d: %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X", r * 15,
+                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14]);
+            }
+            if (!s.ps)
+                for (int i = 0; i < 4; i++) {
+                    const auto& t = s.tss[size_t(i)];
+                    LOGR("d3d9:   stage %d: colour op %u (%u, %u, %u), alpha op %u (%u, %u, %u), result %u", i,
+                        t[kTssColorOp], t[kTssColorArg1], t[kTssColorArg2], t[kTssColorArg0], t[kTssAlphaOp],
+                        t[kTssAlphaArg1], t[kTssAlphaArg2], t[kTssAlphaArg0], t[kTssResultArg]);
+                    if (t[kTssColorOp] <= kTopDisable) break;
+                }
+        }
+    }
     return it->second;
 }
 
