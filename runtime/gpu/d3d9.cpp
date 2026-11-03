@@ -532,9 +532,11 @@ std::array<uint32_t, 16> InputTypes(const State& s) {
     return types;
 }
 
+constexpr uint32_t kTypeFloat2H = 0x72;  // D3DVSDT_FLOAT2H: x, y, 0 and a w
+
 // components the title gave an input: D3DVSDT's high nibble, NORMPACKED3 and FLOAT2H three
 uint32_t TypeComponents(uint32_t type) {
-    if (type == 0x16 || type == 0x72) return 3;
+    if (type == 0x16 || type == kTypeFloat2H) return 3;
     return std::clamp<uint32_t>(type >> 4, 1, 4);
 }
 
@@ -904,7 +906,7 @@ private:
     std::unordered_map<uint64_t, PlainProgram> plain_;
     std::unordered_map<uint64_t, StageSum> sums_;  // by pixel key and combiner constants
     struct PlainCounts {
-        uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, offscreen, stage, keep, pixel;
+        uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, position_w, offscreen, stage, keep, pixel;
         uint32_t alpha_kill, shadow, wide, rect, two_sided;  // the stage states fixed function cannot draw (Lacking)
     } plain_counts_{};
     std::unordered_set<uint64_t> plain_refusals_;  // what CountStageRefusal has logged
@@ -2567,6 +2569,10 @@ const PlainProgram* D3D9Backend::PlainDraw(const State& s, const Assembled& a, c
     if (s.rs[kRsFogEnable]) return n.fog++, nullptr;  // a program's fog is in its pixel shader
     if (s.rs[kRsZEnable] == 2) return n.w_buffer++, nullptr;  // D3DZB_USEW: fixed function cannot write w
     if (usages[size_t(p.position)].usage != 0) return n.layout++, nullptr;
+    // fixed function reads a position's x, y and z and takes w as 1, where the program reads the w the title gave
+    // (FLOAT4, FLOAT2H): such a draw lands elsewhere, or nowhere
+    if (uint32_t pt = InputTypes(s)[size_t(p.position)]; TypeComponents(pt) == 4 || pt == kTypeFloat2H)
+        return n.position_w++, nullptr;
     if (p.colour >= 0 && (usages[size_t(p.colour)].usage != 10 || usages[size_t(p.colour)].index != 0))
         return n.layout++, nullptr;  // fixed function reads COLOR0
     for (int t : p.tex)
@@ -3742,9 +3748,9 @@ void D3D9Backend::Present(const Surface& front) {
     if ((presents_ + 1) % 1800 == 0 && (plain_counts_.fixed || plain_counts_.not_plain)) {
         const PlainCounts& n = plain_counts_;
         LOGR("d3d9: plain transforms: %u drawn fixed, %u of them with a texture on stages 4 to 6; stayed programs: %u not "
-             "plain, %u 2D, %u fog, %u W buffer, %u layout, %u off screen, %u stage texture, %u a mod's choice, %u pixel shader "
+             "plain, %u 2D, %u fog, %u W buffer, %u layout, %u position with a w, %u off screen, %u stage texture, %u a mod's choice, %u pixel shader "
              "left; stage state: %u alpha kill, %u shadow, %u wide, %u rect, %u two sided", n.fixed, n.marked, n.not_plain,
-             n.two_d, n.fog, n.w_buffer, n.layout, n.offscreen, n.stage, n.keep, n.pixel, n.alpha_kill, n.shadow, n.wide,
+             n.two_d, n.fog, n.w_buffer, n.layout, n.position_w, n.offscreen, n.stage, n.keep, n.pixel, n.alpha_kill, n.shadow, n.wide,
              n.rect, n.two_sided);
     }
     if (report)
