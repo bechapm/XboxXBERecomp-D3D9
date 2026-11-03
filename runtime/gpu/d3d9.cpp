@@ -2716,6 +2716,10 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
     std::memcpy(d.projection, proj, sizeof(d.projection));
     std::memcpy(d.world, dev_xf_[0], sizeof(d.world));
     std::memcpy(d.view, dev_xf_[1], sizeof(d.view));
+    if (d.two_d) {
+        const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+        d.screen_box_set = t && ScreenBox(s, a, sh.prog, t->gw, t->gh, d.screen_box);
+    }
     d.indexed = g.indexed;
     d.first_vertex = 0;
     d.vertices = g.vertices;

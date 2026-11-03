@@ -274,6 +274,54 @@ bool Extent(const State& s, const Assembled& a, bool program, uint32_t gw, float
     return n > 0;
 }
 
+// where a 2D draw lies on its target, in console pixels: the leftmost, topmost, rightmost and lowest its vertices reach;
+// false when it cannot be found (ScreenBox)
+bool BoxOf(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4]) {
+    box[0] = box[1] = 3.4e38f;
+    box[2] = box[3] = -3.4e38f;
+    auto take = [&](float x, float y) {
+        box[0] = std::min(box[0], x);
+        box[1] = std::min(box[1], y);
+        box[2] = std::max(box[2], x);
+        box[3] = std::max(box[3], y);
+    };
+    if (program) {
+        Program p{s};
+        uint32_t n = 0;
+        for (int r = 0; r < 16; r++)
+            if ((a.regs >> r) & 1) n = std::max(n, VertexCount(a, r));
+        n = std::min(n, kMeasureMax);
+        for (uint32_t v = 0; v < n; v++) {
+            for (int r = 0; r < 16; r++)
+                if ((a.regs >> r) & 1) ReadInput(a, r, v, p.in[r]);
+            p.Run(s.vs->program);
+            take(p.out[0][0], p.out[0][1]);  // oPos is in screen pixels
+        }
+        return n > 0;
+    }
+    if (!(a.regs & 1)) return false;
+    uint32_t n = std::min(VertexCount(a, 0), kMeasureMax);
+    float wvp[16], wv[16];
+    if (!a.pretransformed) {
+        Mul(s.transforms[kTsWorld].data(), s.transforms[kTsView].data(), wv);
+        Mul(wv, s.transforms[kTsProjection].data(), wvp);
+    }
+    for (uint32_t v = 0; v < n; v++) {
+        Vec p;
+        if (!ReadInput(a, 0, v, p)) return false;
+        float x = p[0], y = p[1];
+        if (!a.pretransformed) {
+            float cx = p[0] * wvp[0] + p[1] * wvp[4] + p[2] * wvp[8] + wvp[12];
+            float cy = p[0] * wvp[1] + p[1] * wvp[5] + p[2] * wvp[9] + wvp[13];
+            float cw = p[0] * wvp[3] + p[1] * wvp[7] + p[2] * wvp[11] + wvp[15];
+            x = cw != 0 ? (cx / cw + 1) * 0.5f * float(gw) : 0;
+            y = cw != 0 ? (1 - cy / cw) * 0.5f * float(gh) : 0;
+        }
+        take(x, y);
+    }
+    return n > 0;
+}
+
 // the viewport and scissor's horizontal span in console pixels
 void Visible(const State& s, float& x0, float& x1) {
     x0 = float(s.viewport.x);
@@ -447,6 +495,10 @@ void PlacementFrame() {
         LOGR("2d tags: %08X placement %X: %u draws, %u spanned, x %.1f to %.1f", tag, t.placement, t.draws, t.spanned,
              t.lo, t.hi);
     g_tags.clear();
+}
+
+bool ScreenBox(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4]) {
+    return BoxOf(s, a, program, gw, gh, box);
 }
 
 void PlaceMatrix(const Placed& p, const float* m, float* out) {

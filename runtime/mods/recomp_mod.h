@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 7
+#define RECOMP_MOD_API_VERSION 8
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -96,6 +96,14 @@ typedef struct RecompModDraw {
                                        Its pixel shader is still bound: remove it
                                        in before and fixed function draws this,
                                        leave it and it stays a program */
+    /* version 8 (this SDK's): a 2D draw's (two_d) place on its target, in
+       the target's console pixels, as the title's program or fixed function
+       puts its vertices: left, top, right, bottom. 0 when it could not be
+       found or the draw is not 2D. A box that stays put while the camera
+       moves is the screen's (a HUD); one that moves with it is the world's
+       (a sprite the title projects itself) */
+    int      screen_box_set;
+    float    screen_box[4];
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */

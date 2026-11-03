@@ -6,7 +6,7 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 the port stays the port, and a mod is something a player chooses to add.
 
 The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
-game built with either; versions 6 (`pointer_elsewhere`) and 7 (`RECOMP_DRAW_DEFER`) are this SDK's so far, and a mod
+game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`) and 8 (`screen_box`) are this SDK's so far, and a mod
 checks for them. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
@@ -239,6 +239,7 @@ nothing is deferred and the renderer draws as ever.
 | Depth | `depth_state`, `depth_enable`, `depth_write`, `depth_func` | as the device has them for the draw |
 | Transforms | `projection_set`, `projection`, `world`, `view`, `program_projection_set`, `program_projection` | `projection` is the game's own; `world` and `view` the device's. `program_projection` needs the game's port to name its registers ([The camera](#the-camera)) |
 | Geometry | `indexed`, `first_vertex`, `vertices`, `indices`, `index_bytes`, `index_count`, `base_vertex` | vertices start at 0 in the bound streams, indices are rebased to them: `first_vertex` and `base_vertex` are 0 |
+| Screen (v8) | `screen_box_set`, `screen_box[4]` | a `two_d` draw's left, top, right and bottom on its target in console pixels, as its program or fixed function puts the vertices (run on the CPU for 2D draws only). Across frames it tells the screen's 2D (stays put while the camera moves) from sprites the title projects into the world (moves with it) |
 
 **Example: hide the game's 2D**, for clean screenshots.
 
@@ -342,10 +343,10 @@ ignored.
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (7 here). The contract is shared with
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (8 here). The contract is shared with
 DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
-Version 6's `pointer_elsewhere` and version 7's `RECOMP_DRAW_DEFER` (an answer, no new field) are not in
-DirectXbox-Recomp yet.
+Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no new field) and version 8's
+`RecompModDraw.screen_box` are not in DirectXbox-Recomp yet.
 
 ## Where a change belongs
 

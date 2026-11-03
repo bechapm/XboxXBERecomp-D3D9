@@ -64,6 +64,9 @@ void SetTwoDOverflow(bool on);
 // screen's (gw x gh) for a game that widens its own view, else 1
 float PictureWide(uint32_t gw, uint32_t gh);
 
+// where a 2D draw lies on a target gw x gh console pixels: left, top, right, bottom; false when it cannot be found
+bool ScreenBox(const State& s, const Assembled& a, bool program, uint32_t gw, uint32_t gh, float box[4]);
+
 // one draw's placement on a target the picture's shape (the backend's, on the render thread)
 struct Placed {
     // clip x' = x * k + offset * w: squeezed by k about the anchor (offset = anchor * (1 - k), anchor in clip units)
