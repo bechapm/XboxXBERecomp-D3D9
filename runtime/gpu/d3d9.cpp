@@ -247,6 +247,7 @@ struct DrawShaders {
     bool fixed_transform = false;  // fixed function on untransformed vertices
     bool sprite = false;           // a program's points as point sprites
     const PlainProgram* plain = nullptr;  // a program fixed function may draw, prog and ffp both set; the hooks settle it (PlainTakeOver)
+    StageSum sum;                  // the pixel stage as stage 0 would say it, when a plain draw or a mod needs it (PixelSum)
     FixedKey fk;
     InputUsages usages{};          // each input's Direct3D 9 name
     uint64_t vkey = 0;
@@ -271,6 +272,21 @@ const uint8_t kTop[27] = {0,  D3DTOP_DISABLE, D3DTOP_SELECTARG1, D3DTOP_SELECTAR
                           D3DTOP_BUMPENVMAP, D3DTOP_BUMPENVMAPLUMINANCE};
 constexpr uint32_t kTopDisable = 1;
 constexpr uint32_t kTopPremodulate = 17;
+
+// a StageSum operation as a stage of Direct3D 9's: an unknown one is texture times vertex colour
+template <class T>
+void StageSumD3d9(uint8_t o, T& op, T& arg1, T& arg2) {
+    arg1 = D3DTA_TEXTURE;
+    arg2 = D3DTA_DIFFUSE;
+    switch (o) {
+        case kSumTexture: op = D3DTOP_SELECTARG1; break;
+        case kSumDiffuse: op = D3DTOP_SELECTARG2; break;
+        case kSumModulate2x: op = D3DTOP_MODULATE2X; break;
+        case kSumModulate4x: op = D3DTOP_MODULATE4X; break;
+        case kSumAdd: op = D3DTOP_ADD; break;
+        default: op = D3DTOP_MODULATE; break;
+    }
+}
 constexpr uint32_t kTaCurrent = 1;  // D3DTA_CURRENT
 
 constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -724,6 +740,7 @@ private:
     };
     StageLackAt Lacking(const State& s, const Assembled& a, const DrawTextures& stages) const;
     const PlainProgram* PlainDraw(const State& s, const Assembled& a, const DrawTextures& stages, const InputUsages& usages);
+    StageSum PixelSum(const State& s, const DrawTextures& stages);
     void PlainTransforms(const State& s, const PlainProgram& p, GuestExtent size);
     void CountStageRefusal(const State& s, StageLackAt lack);
     bool PlainTakeOver(const State& s, const Assembled& a, DrawShaders& sh, const DrawTextures& stages, GuestExtent size,
@@ -885,6 +902,7 @@ private:
     } counts_{};
     // plain transforms (PlainDraw), by program hash; position -1 is a program that is not one
     std::unordered_map<uint64_t, PlainProgram> plain_;
+    std::unordered_map<uint64_t, StageSum> sums_;  // by pixel key and combiner constants
     struct PlainCounts {
         uint32_t fixed, marked, not_plain, two_d, fog, w_buffer, layout, offscreen, stage, keep, pixel;
         uint32_t alpha_kill, shadow, wide, rect, two_sided;  // the stage states fixed function cannot draw (Lacking)
@@ -2180,14 +2198,18 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
     Rs(D3DRS_TEXTUREFACTOR, s.rs[kRsTextureFactor]);
 
     if (sh.plain && s.ps) {
-        // under a title's pixel shader the stages' operations mean nothing: stage 0's texture and the vertex colour, and
-        // every texture bound with the coordinates the program sends it, for what a mod sets and a tool reads
-        Tss(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-        Tss(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
-        Tss(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-        Tss(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-        Tss(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-        Tss(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+        // under a title's pixel shader the stages' operations mean nothing: stage 0 says what the shader makes of its
+        // texture and the vertex colour where one stage can (PixelSum), else their product, and every texture is bound
+        // with the coordinates the program sends it, for what a mod sets and a tool reads
+        DWORD op[2], a1[2], a2[2];
+        StageSumD3d9(sh.sum.color, op[0], a1[0], a2[0]);
+        StageSumD3d9(sh.sum.alpha, op[1], a1[1], a2[1]);
+        Tss(0, D3DTSS_COLOROP, op[0]);
+        Tss(0, D3DTSS_COLORARG1, a1[0]);
+        Tss(0, D3DTSS_COLORARG2, a2[0]);
+        Tss(0, D3DTSS_ALPHAOP, op[1]);
+        Tss(0, D3DTSS_ALPHAARG1, a1[1]);
+        Tss(0, D3DTSS_ALPHAARG2, a2[1]);
         Tss(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
         Tss(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
         for (DWORD n = 0; n < 4; n++) {
@@ -2608,6 +2630,23 @@ bool D3D9Backend::PlainTakeOver(const State& s, const Assembled& a, DrawShaders&
 }
 
 // the pixel shader for a draw's stages, false if it cannot be made
+// What the draw's pixel stage makes of texture 0 and the vertex colour (PixelStageSum), kept by pixel key and constants
+StageSum D3D9Backend::PixelSum(const State& s, const DrawTextures& stages) {
+    PixelKey pk = MakePixelKey(s, stages.info);
+    float pc[18][4];
+    for (int i = 0; i < 8; i++) {
+        Color(SimpleState(s, kMPsConstant0 + i * 4), pc[i * 2]);
+        Color(SimpleState(s, kMPsConstant1 + i * 4), pc[i * 2 + 1]);
+    }
+    Color(SimpleState(s, kMPsFinalConstant0), pc[16]);
+    Color(SimpleState(s, kMPsFinalConstant1), pc[17]);
+    bool specular = s.rs[kRsSpecularEnable] != 0;
+    uint64_t key = Hash(pc, sizeof(pc), Hash(&pk, sizeof(pk))) ^ uint64_t(specular);
+    auto [it, added] = sums_.try_emplace(key);
+    if (added) it->second = PixelStageSum(pk, pc, specular);
+    return it->second;
+}
+
 bool D3D9Backend::DrawPixelShader(const State& s, const DrawTextures& stages, DrawShaders& sh) {
     PixelKey pk = MakePixelKey(s, stages.info);
     // Direct3D 9 has no front face setting: culling clockwise leaves counter clockwise as the front (PixelHlsl)
@@ -2688,6 +2727,9 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
     d.program = sh.prog;
     d.program_id = sh.prog ? s.vs->hash : 0;
     d.fixed_transform = sh.plain != nullptr;
+    StageSumD3d9(sh.sum.color, d.stage_color_op, d.stage_color_arg1, d.stage_color_arg2);
+    StageSumD3d9(sh.sum.alpha, d.stage_alpha_op, d.stage_alpha_arg1, d.stage_alpha_arg2);
+    d.stage_known = (sh.sum.color ? 1u : 0u) | (sh.sum.alpha ? 2u : 0u);
     // a program projects through the camera when it reads the registers the game names for it
     int preg = g_projection_register;
     if (sh.prog && preg >= 0 && preg + 4 <= int(s.vsc.size()) && ReadsConstant(s.vs->program, uint32_t(preg))) {
@@ -3318,6 +3360,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         sh.plain = sh.sprite ? nullptr : PlainDraw(s, a, stages, sh.usages);
         sh.ffp = sh.plain != nullptr;
     }
+    if (sh.plain || !mods::D3d9().draw.empty()) sh.sum = PixelSum(s, stages);
 
     std::vector<DeclElement> el;
     uint64_t decode;
