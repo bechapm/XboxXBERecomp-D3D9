@@ -831,6 +831,7 @@ private:
     // dynamic buffers the draws stream their vertices and indices through
     ComPtr<IDirect3DVertexBuffer9> vb_;
     ComPtr<IDirect3DIndexBuffer9> ib16_;
+    bool plain_geometry_ = false;  // DrawGeometry for a plain draw (XBE_D3D9_FIXED_LISTS, a test)
     ComPtr<IDirect3DIndexBuffer9> ib32_;
     uint32_t vb_at_ = 0, ib16_at_ = 0, ib32_at_ = 0;
     ComPtr<IDirect3DTexture9> white_;  // fixed function stages that read a texture the title left unbound
@@ -2452,6 +2453,46 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
         dev_->SetStreamSource(a.buffer_count, vb_.Get(), at, conv_stride);
     }
     g.type = PrimitiveType(a);
+    // XBE_D3D9_FIXED_LISTS, a test: a plain draw's unindexed triangle strip drawn indexed, 1 as a list, 2 as a strip
+    // (does a tool that reads fixed function draws take an unindexed strip as it takes the title's indexed lists?)
+    static const int lists = [] {
+        const char* e = std::getenv("XBE_D3D9_FIXED_LISTS");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (!a.index_count && lists && plain_geometry_ && a.strip && a.topology == Topology::Triangles && a.draw_count >= 3 &&
+        a.draw_count <= 0x10000) {
+        uint32_t n = a.draw_count, count = lists == 1 ? (n - 2) * 3 : n;
+        uint32_t bytes = count * 2;
+        if (bytes > kIbRingBytes) return false;
+        DWORD flags = D3DLOCK_NOOVERWRITE;
+        if (ib16_at_ + bytes > kIbRingBytes) {
+            ib16_at_ = 0;
+            flags = D3DLOCK_DISCARD;
+        }
+        void* p = nullptr;
+        if (FAILED(ib16_->Lock(ib16_at_, bytes, &p, flags))) return false;
+        index_copy_.resize(count);
+        for (uint32_t i = 0; i < count; i++) index_copy_[i] = uint16_t(i);
+        if (lists == 1)
+            for (uint32_t t = 0; t < n - 2; t++) {  // a strip's odd triangles turn the other way
+                index_copy_[t * 3] = uint16_t(t);
+                index_copy_[t * 3 + 1] = uint16_t(t + 1 + (t & 1));
+                index_copy_[t * 3 + 2] = uint16_t(t + 2 - (t & 1));
+            }
+        std::memcpy(p, index_copy_.data(), bytes);
+        ib16_->Unlock();
+        g.type = lists == 1 ? D3DPT_TRIANGLELIST : D3DPT_TRIANGLESTRIP;
+        g.prims = n - 2;
+        g.vertices = n;
+        g.indexed = true;
+        g.indices = index_copy_.data();
+        g.first_index = ib16_at_ / 2;
+        g.index_bytes = 2;
+        g.index_count = count;
+        ib16_at_ += bytes;
+        dev_->SetIndices(ib16_.Get());
+        return true;
+    }
     if (!a.index_count) {
         g.prims = PrimitiveCount(a, a.draw_count);
         g.vertices = a.draw_count;
@@ -3449,7 +3490,10 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     SetViewportScissor(s, size.w, place_);
 
     Geometry g;
-    if (!DrawGeometry(a, el, conv_stride, g)) {
+    plain_geometry_ = sh.plain != nullptr;
+    bool fitted = DrawGeometry(a, el, conv_stride, g);
+    plain_geometry_ = false;
+    if (!fitted) {
         LOG_FIRST(4, "d3d9: a draw of %u vertices did not fit the buffers", a.vertex_count);
         counts_.geometry++;
         return;
