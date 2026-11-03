@@ -867,6 +867,11 @@ private:
     std::unordered_map<uint32_t, PickPoint> pick_found_;
     uint32_t pick_budget_ = kPickBudget;
     bool pick_short_ = false;  // the budget ran out before the frame's world draws did
+    struct {
+        uint64_t us;
+        uint32_t tested, points, short_frames, draws, run;
+    } pick_stats_{};
+    static uint32_t PickBudget();
     size_t mods_called_ = 0;
     float dev_xf_[3][16] = {};
     bool dev_xf_ok_[3] = {};
@@ -2854,28 +2859,62 @@ int D3D9Backend::ModPick(const RecompModDraw* d, uint32_t id, float x, float y, 
 void D3D9Backend::PickDraw3D(const State& s, const Assembled& a, const DrawShaders& sh) {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
     if (!t || pick_short_) return;
+    // a budget of 0 tests plain transforms alone: a program run on the CPU (a character, a prop) is left out
+    if (sh.prog && !sh.plain && !PickBudget()) return;
+    auto start = std::chrono::steady_clock::now();
+    uint32_t before = pick_budget_;
     if (!PickDraw(s, a, sh.prog, sh.plain, t->gw, t->gh, pick_testing_.data(), pick_testing_.size(), pick_budget_) &&
         !pick_budget_)
         pick_short_ = true;
+    pick_stats_.us += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+    pick_stats_.run += before - pick_budget_;
+    pick_stats_.draws++;
+}
+
+// XBE_D3D9_PICK_BUDGET: the vertices of programs that are not plain transforms the CPU may run a frame for picks
+// (default 30000; 0 tests plain transforms alone). XBE_D3D9_PICK_EVERY: the frames between tests (default 4); the
+// answers hold in between
+uint32_t D3D9Backend::PickBudget() {
+    static const uint32_t budget = [] {
+        const char* e = std::getenv("XBE_D3D9_PICK_BUDGET");
+        return e ? uint32_t(std::strtoul(e, nullptr, 10)) : kPickBudget;
+    }();
+    return budget;
 }
 
 // at the frame's end: what the frame's draws found becomes the answers, unless the budget ran out first; the points
 // asked for this frame are tested in the next
 void D3D9Backend::PickFrame() {
+    static const uint32_t every = [] {
+        const char* e = std::getenv("XBE_D3D9_PICK_EVERY");
+        uint32_t n = e ? uint32_t(std::strtoul(e, nullptr, 10)) : 4;
+        return n ? n : 1;
+    }();
     if (!pick_testing_.empty()) {
+        pick_stats_.tested++;
+        pick_stats_.points += uint32_t(pick_testing_.size());
         if (!pick_short_) {
             pick_found_.clear();
             for (const PickPoint& p : pick_testing_) pick_found_[p.id] = p;
         } else {
-            LOG_FIRST(4, "d3d9: a frame's world draws were more than the pick budget (%u vertices)", kPickBudget);
+            pick_stats_.short_frames++;
+            LOG_FIRST(4, "d3d9: a frame's world draws were more than the pick budget (%u vertices)", PickBudget());
         }
     } else if (pick_asked_.empty()) {
         pick_found_.clear();
     }
-    pick_testing_.swap(pick_asked_);
+    // the points asked for are tested every so many frames; the answers hold in between
+    pick_testing_.clear();
+    if (presents_ % every == 0) pick_testing_.swap(pick_asked_);
     pick_asked_.clear();
-    pick_budget_ = kPickBudget;
+    pick_budget_ = PickBudget();
     pick_short_ = false;
+    if (pick_stats_.tested && presents_ % 600 == 0) {
+        LOGR("d3d9: picks in 600 frames: %u frames tested, %u points, %u frames over budget; %u draws, %u program vertices "
+             "run, %.1f ms in all (%.2f ms a tested frame)", pick_stats_.tested, pick_stats_.points, pick_stats_.short_frames,
+             pick_stats_.draws, pick_stats_.run, pick_stats_.us / 1000.0, pick_stats_.us / 1000.0 / pick_stats_.tested);
+        pick_stats_ = {};
+    }
 }
 
 // a draw kept for the frame's end; false when it cannot be (no colour target, or the frame holds enough already)
