@@ -751,9 +751,24 @@ private:
     void SetTitleTransforms(const State& s, const Assembled& a, GuestExtent size);
     // the mods' draw hooks
     bool Offscreen() const;
-    bool ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
-                    const Geometry& g);
+    enum class ModsSay { draw, skip, defer };
+    ModsSay ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
+                       const Geometry& g);
     void ModsAfter();
+    // draws a mod deferred (RECOMP_DRAW_DEFER), made at the frame's end: the device's state as the mods left it, the
+    // target, and the title's vertices and indices copied, since the title's memory and the ring move on
+    struct Deferred {
+        ComPtr<IDirect3DStateBlock9> state;
+        ComPtr<IDirect3DSurface9> rt, ds;
+        Assembled a;
+        std::array<std::vector<uint8_t>, 16> bytes;
+        std::vector<uint8_t> indices;
+        std::vector<DeclElement> el;
+        uint32_t conv_stride = 0;
+    };
+    std::vector<Deferred> deferred_;
+    bool Defer(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride);
+    void DrawDeferred();
     uint32_t RingVertices(const void* src, uint32_t bytes, void** write = nullptr);
     float TargetScale() const;
     bool ScreenSized(uint32_t gw, uint32_t gh) const { return gw == guest_w_ && gh == guest_h_; }
@@ -866,7 +881,7 @@ private:
     uint64_t presents_ = 0;
     // where the draws went, reported twice early on: a black picture says which step refused them
     struct DrawCounts {
-        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods;
+        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods, deferred;
     } counts_{};
     // plain transforms (PlainDraw), by program hash; position -1 is a program that is not one
     std::unordered_map<uint64_t, PlainProgram> plain_;
@@ -1037,6 +1052,7 @@ void D3D9Backend::ReleaseDeviceObjects() {
     dev_->SetIndices(nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
+    deferred_.clear();
     vb_.Reset();
     ib16_.Reset();
     ib32_.Reset();
@@ -2657,12 +2673,13 @@ std::string PixelStats(IDirect3DDevice9* dev, IDirect3DSurface9* rt);
 
 bool Orthographic(const float* p) { return p[3] == 0 && p[7] == 0 && p[11] == 0 && p[15] == 1; }
 
-// the mods' befores, in the order they asked; false leaves the draw out, and no later before or any after is called
-bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh, const DrawTextures& stages,
-                             const Geometry& g) {
+// the mods' befores, in the order they asked. A skip leaves the draw out, and no later before or any after is called; a
+// defer keeps it for the frame's end, and no later before is called
+D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShaders& sh,
+                                             const DrawTextures& stages, const Geometry& g) {
     mods_called_ = 0;
     const auto& hooks = mods::D3d9().draw;
-    if (hooks.empty()) return true;
+    if (hooks.empty()) return ModsSay::draw;
     RecompModDraw& d = mod_draw_;
     d = {};
     d.size = sizeof(d);
@@ -2707,10 +2724,76 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     d.index_count = g.index_count;
     d.base_vertex = 0;
     for (const mods::DrawHook& h : hooks) {
-        if (h.before && h.before(&d, h.user) == RECOMP_DRAW_SKIP) return false;
+        int say = h.before ? h.before(&d, h.user) : RECOMP_DRAW_AS_IS;
+        if (say == RECOMP_DRAW_SKIP) return ModsSay::skip;
         mods_called_++;
+        if (say == RECOMP_DRAW_DEFER) return ModsSay::defer;
     }
+    return ModsSay::draw;
+}
+
+// a draw kept for the frame's end; false when it cannot be (no colour target, or the frame holds enough already)
+bool D3D9Backend::Defer(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride) {
+    constexpr size_t kMaxDeferred = 256;
+    if (deferred_.size() >= kMaxDeferred) return false;
+    Deferred d;
+    if (FAILED(dev_->GetRenderTarget(0, &d.rt)) || !d.rt) return false;
+    if (FAILED(dev_->CreateStateBlock(D3DSBT_ALL, &d.state))) return false;
+    dev_->GetDepthStencilSurface(&d.ds);
+    d.a.regs = a.regs;
+    d.a.vertex_count = a.vertex_count;
+    d.a.topology = a.topology;
+    d.a.strip = a.strip;
+    d.a.pretransformed = a.pretransformed;
+    d.a.decode = a.decode;
+    d.a.elements = a.elements;
+    d.a.buffer_count = a.buffer_count;
+    for (uint32_t i = 0; i < a.buffer_count; i++) {
+        const VertexBuffer& b = a.buffers[i];
+        d.bytes[i].assign(b.src, b.src + b.bytes);
+        d.a.buffers[i] = {d.bytes[i].data(), b.bytes, b.stride};
+    }
+    if (a.index_count && a.index_src) {
+        const uint8_t* p = static_cast<const uint8_t*>(a.index_src);
+        d.indices.assign(p, p + size_t(a.index_count) * (a.index16 ? 2 : 4));
+        d.a.index_src = d.indices.data();
+    }
+    d.a.index16 = a.index16;
+    d.a.index_count = a.index_count;
+    d.a.draw_count = a.draw_count;
+    d.a.base_vertex = a.base_vertex;
+    d.el = el;
+    d.conv_stride = conv_stride;
+    deferred_.push_back(std::move(d));
     return true;
+}
+
+// the deferred draws, in the order they came, each into its own target with the state it was kept with; then the device
+// as it was
+void D3D9Backend::DrawDeferred() {
+    if (deferred_.empty()) return;
+    ComPtr<IDirect3DStateBlock9> saved;
+    ComPtr<IDirect3DSurface9> rt, ds;
+    dev_->GetRenderTarget(0, &rt);
+    dev_->GetDepthStencilSurface(&ds);
+    bool restore = SUCCEEDED(dev_->CreateStateBlock(D3DSBT_ALL, &saved));
+    Scene(true);
+    for (Deferred& d : deferred_) {
+        // a target set resets the viewport, which the state block then puts back
+        dev_->SetRenderTarget(0, d.rt.Get());
+        dev_->SetDepthStencilSurface(d.ds.Get());
+        d.state->Apply();
+        Geometry g;
+        if (!DrawGeometry(d.a, d.el, d.conv_stride, g) || !g.prims) continue;
+        if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
+        else dev_->DrawPrimitive(g.type, 0, g.prims);
+        counts_.made++;
+    }
+    deferred_.clear();
+    if (rt) dev_->SetRenderTarget(0, rt.Get());
+    dev_->SetDepthStencilSurface(ds.Get());
+    if (restore) saved->Apply();
+    Invalidate();
 }
 
 // the camera RTX Remix takes from a draw's WORLD, VIEW and PROJECTION (CameraManager::processCameraData): none for an
@@ -3285,10 +3368,20 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     mod_state_ = &s;
     mod_asm_ = &a;
     mod_size_ = size;
-    bool drawn = !(sh.prog && diag::D3d9SkipProgram(s.vs->hash)) && ModsBefore(s, a, sh, stages, g);
+    ModsSay say = sh.prog && diag::D3d9SkipProgram(s.vs->hash) ? ModsSay::skip : ModsBefore(s, a, sh, stages, g);
+    bool drawn = say != ModsSay::skip;
     if (drawn && sh.plain && !PlainTakeOver(s, a, sh, stages, size, g)) {
         ModsAfter();
         drawn = false;
+    }
+    // deferred: kept as the mods left the device, which their afters then put back; made at the frame's end
+    if (drawn && say == ModsSay::defer && Defer(a, el, conv_stride)) {
+        ModsAfter();
+        CountCamera(sh, false);
+        counts_.deferred++;
+        mod_state_ = nullptr;
+        mod_asm_ = nullptr;
+        return;
     }
     CountCamera(sh, drawn);
     if (drawn) {
@@ -3542,6 +3635,7 @@ void D3D9Backend::Present(const Surface& front) {
         std::copy_backward(std::begin(screens_), std::end(screens_) - 1, std::end(screens_));
         screens_[0] = screen;
     }
+    DrawDeferred();
     for (const mods::DeviceHook& h : mods::D3d9().present) h.fn(dev_.Get(), h.user);
     prime_due_ = true;
     Target* t = EnsureTarget(front, false);

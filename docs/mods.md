@@ -6,7 +6,8 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 the port stays the port, and a mod is something a player chooses to add.
 
 The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
-game built with either; version 6 (`pointer_elsewhere`) is this SDK's so far, and a mod checks for it. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
+game built with either; versions 6 (`pointer_elsewhere`) and 7 (`RECOMP_DRAW_DEFER`) are this SDK's so far, and a mod
+checks for them. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
 **Contents:** [At a glance](#at-a-glance) · [Where a mod sits](#where-a-mod-sits) · [Your first mod](#your-first-mod) ·
@@ -153,7 +154,7 @@ sequenceDiagram
         G->>M: d3d9_on_clear(what, z, whole)
         loop every draw
             G->>M: before(draw)
-            M-->>G: RECOMP_DRAW_AS_IS or RECOMP_DRAW_SKIP
+            M-->>G: RECOMP_DRAW_AS_IS, SKIP or DEFER
             Note over G: draws (unless skipped)
             G->>M: after(draw)
         end
@@ -211,10 +212,22 @@ flowchart TD
     B --> Q{"Returns?"}
     Q -- "RECOMP_DRAW_SKIP<br/>(change nothing first)" --> SK["Not drawn,<br/>no after"]
     Q -- "RECOMP_DRAW_AS_IS" --> CH["Drawn, with any state<br/>before changed"]
+    Q -- "RECOMP_DRAW_DEFER (v7)" --> DF["Kept, with the device as<br/>before left it; made at<br/>the frame's end"]
     CH --> A["after(draw, user):<br/>put the state back"]
+    DF --> A
     SK --> NX(["Next draw"])
     A --> NX
 ```
+
+**Deferring a draw (version 7).** `RECOMP_DRAW_DEFER` keeps the draw and makes it at the frame's end: after the title's
+last draw and before the frame is shown (and before `d3d9_on_present`), into the target it was meant for, with the
+device's whole state as `before` left it. Deferred draws come in the order they were deferred. `after` is called at
+once, as for a drawn one, and no later mod's `before` sees the draw. It is for a draw the title makes in the middle of
+its 3D that a tool needs at the end, such as the HUD a D3D9 tool composites over its own picture: such a tool takes
+everything from its first UI draw on as UI, so a HUD drawn before the title's last 3D either takes the 3D after it
+with it or is lost. A draw with no colour target, or past 256 in a frame, is drawn at once instead. A toolkit older than
+version 7 takes the answer for `RECOMP_DRAW_AS_IS`, so a mod checks `api->version` first. With no mod answering it,
+nothing is deferred and the renderer draws as ever.
 
 **Figure 7.** What `RecompModDraw` tells you here.
 
@@ -329,9 +342,10 @@ ignored.
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (6 here). The contract is shared with
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (7 here). The contract is shared with
 DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
-Version 6's `pointer_elsewhere` is not in DirectXbox-Recomp yet.
+Version 6's `pointer_elsewhere` and version 7's `RECOMP_DRAW_DEFER` (an answer, no new field) are not in
+DirectXbox-Recomp yet.
 
 ## Where a change belongs
 

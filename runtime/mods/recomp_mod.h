@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 6
+#define RECOMP_MOD_API_VERSION 7
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -100,6 +100,11 @@ typedef struct RecompModDraw {
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */
 #define RECOMP_DRAW_SKIP  1         /* left out: before changed nothing */
+#define RECOMP_DRAW_DEFER 2         /* version 7: made at the frame's end instead, after the title's
+                                       last draw and before it is shown, into the same target with
+                                       the device as before left it; the afters are called now. No
+                                       later mod's before sees it. A toolkit older than 7 takes it
+                                       for AS_IS: check api->version */
 
 /* Whether a plain transform may be drawn by fixed function (d3d9_fixed_transform),
  * by the depth state the title has set for it: depth_func is a D3DCMPFUNC. */
@@ -249,7 +254,8 @@ typedef struct RecompModApi {
      * draw a program. XBE_D3D9_FIXED_TRANSFORM has the last word. */
     void (*d3d9_fixed_transform)(int on, RecompModFixedFn keep, void *user);
 
-    /* ---- version 6 (this SDK's; not in the DirectXbox-Recomp toolkit yet) ---- */
+    /* ---- version 6 (this SDK's; not in the DirectXbox-Recomp toolkit yet). Version 7 adds no
+     * field: a before may answer RECOMP_DRAW_DEFER ---- */
 
     /* An overlay the mod knows of has the mouse, one with a cursor of its own
      * (a D3D9 tool's menu, say): on, the game lets go of it -- mouse look stops
