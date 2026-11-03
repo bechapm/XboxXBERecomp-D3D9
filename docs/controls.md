@@ -101,7 +101,9 @@ While the pointer is wanted:
   never touches the mouse never sees it.
 
 Not wanted, with mouse_look holding the mouse, the cursor stays hidden over the game. The window asks
-`input::CursorHidden()` on each `WM_SETCURSOR` before ImGui's handler, which would otherwise show its arrow.
+`input::CursorHidden()` on each `WM_SETCURSOR` before ImGui's handler, which would otherwise show its arrow, and
+while hidden the window thread's cursor display count (`ShowCursor`) is one step down, so a cursor someone else sets
+in between (ImGui's frame, an overlay hooking the window) stays hidden too.
 
 | `input::Pointer` | |
 | --- | --- |

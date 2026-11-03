@@ -306,6 +306,8 @@ void Merge(Pad& p, const Pad& kbm) {
     if (kbm.ry) p.ry = int16_t(std::clamp(int(p.ry) + int(kbm.ry), -32768, 32767));
 }
 
+void SyncCursor();
+
 // mouse_look keeps the pointer hidden in the client area while the window is in front
 void Capture(bool on) {
     on = on && g_hwnd && app::Get().keyboard_mouse && app::Get().mouse_look && !g_want;
@@ -318,6 +320,7 @@ void Capture(bool on) {
         ClipCursor(nullptr);
     }
     g_captured = on;
+    SyncCursor();
 }
 
 // window thread: the cursor over the client area, hidden while mouse_look holds it or a key or pad was used last
@@ -326,7 +329,22 @@ bool Hidden() {
     return g_captured || (g_want && !g_shown);
 }
 
+// window thread: the window thread's cursor display count follows Hidden(), below 0 while hidden and 0 or more while
+// not. A cursor set by anyone else in between (ImGui's frame, an overlay hooking the window, the class cursor) then
+// stays hidden too: on its own, SetCursor(nullptr) lasted only until the next of those, and the cursor flickered as the
+// mouse moved. Set outright rather than stepped, as an overlay (RTX Remix's menu) moves the count itself
+void SyncCursor() {
+    if (Hidden()) {
+        while (ShowCursor(FALSE) >= 0) {
+        }
+    } else {
+        while (ShowCursor(TRUE) < 0) {
+        }
+    }
+}
+
 bool SetClientCursor() {
+    SyncCursor();
     SetCursor(Hidden() ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
     return true;
 }
