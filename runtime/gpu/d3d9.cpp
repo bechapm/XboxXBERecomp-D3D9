@@ -635,7 +635,29 @@ struct DeclElement {
     int8_t reg = -1;  // converted: the input register it is made from
     uint8_t decode = kDecodeNone;
     bool swap = false;  // converted: red and blue change places
+    bool premul2x = false;  // converted: the colour doubled, saturating (Premul2x)
 };
+
+// XBE_VCOL_PREMUL_2X=1, off by default: fold a MODULATE2X stage's 2x into the written vertex colour. A plain draw whose
+// stage 0 is 2 x texture x vertex colour gets its colour doubled where it is converted (saturating at 1) and its stage
+// made MODULATE, for a renderer that reads the stages and not the title's pixel shader. Off leaves every byte as it was.
+bool Premul2x() {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = std::getenv("XBE_VCOL_PREMUL_2X");
+        on = e && (e[0] == '1' || e[0] == '2') ? e[0] - '0' : 0;  // 2: a clipped colour drawn magenta, to see where
+    }
+    return on != 0;
+}
+
+bool Premul2xMask() {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = std::getenv("XBE_VCOL_PREMUL_2X");
+        on = e && e[0] == '2';
+    }
+    return on == 1;
+}
 
 // the shader that turns the frame into the gamma corrected picture, drawn over a screen quad
 const char* kGammaHlsl = R"(sampler2D frame : register(s0);
@@ -2106,6 +2128,10 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
             // fixed function reads the D3DCOLOR in the vertex, where the program it stands for swizzled it
             d.swap = sh.plain && sh.plain->colour_swapped;
             d.type = e.format == DXGI_FORMAT_B8G8R8A8_UNORM && !d.swap ? D3DDECLTYPE_D3DCOLOR : D3DDECLTYPE_D3DCOLOR | 0x80;
+            if (Premul2x() && sh.plain && u.index == 0 && sh.sum.color == kSumModulate2x) {
+                d.type = D3DDECLTYPE_D3DCOLOR | 0x80;
+                d.premul2x = true;
+            }
         } else if (u.usage == D3DDECLUSAGE_PSIZE) {
             d.type = e.format == DXGI_FORMAT_R32_FLOAT ? D3DDECLTYPE_FLOAT1 : D3DDECLTYPE_FLOAT1 | 0x80;
         } else {
@@ -2387,6 +2413,7 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
         DWORD op[2], a1[2], a2[2];
         StageSumD3d9(sh.sum.color, op[0], a1[0], a2[0]);
         StageSumD3d9(sh.sum.alpha, op[1], a1[1], a2[1]);
+        if (Premul2x() && sh.sum.color == kSumModulate2x) op[0] = D3DTOP_MODULATE;  // the 2x is in the vertex colour
         Tss(0, D3DTSS_COLOROP, op[0]);
         Tss(0, D3DTSS_COLORARG1, a1[0]);
         Tss(0, D3DTSS_COLORARG2, a2[0]);
@@ -2610,6 +2637,16 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
                 uint8_t* dst = out + size_t(v) * conv_stride + e.offset;
                 if (e.type == D3DDECLTYPE_D3DCOLOR) {
                     if (e.swap) std::swap(f[0], f[2]);
+                    if (e.premul2x) {
+                        f[0] *= 2.0f;
+                        f[1] *= 2.0f;
+                        f[2] *= 2.0f;
+                        if (Premul2xMask() && (f[0] > 1.0f || f[1] > 1.0f || f[2] > 1.0f)) {
+                            f[0] = 1.0f;
+                            f[1] = 0.0f;
+                            f[2] = 1.0f;
+                        }
+                    }
                     uint32_t c = PackColor4(f);
                     std::memcpy(dst, &c, 4);
                 } else {
@@ -2940,6 +2977,7 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
     d.program_id = sh.prog ? s.vs->hash : 0;
     d.fixed_transform = sh.plain != nullptr;
     StageSumD3d9(sh.sum.color, d.stage_color_op, d.stage_color_arg1, d.stage_color_arg2);
+    if (Premul2x() && sh.plain && sh.sum.color == kSumModulate2x) d.stage_color_op = D3DTOP_MODULATE;
     StageSumD3d9(sh.sum.alpha, d.stage_alpha_op, d.stage_alpha_arg1, d.stage_alpha_arg2);
     d.stage_known = (sh.sum.color ? 1u : 0u) | (sh.sum.alpha ? 2u : 0u);
     // a program projects through the camera when it reads the registers the game names for it
