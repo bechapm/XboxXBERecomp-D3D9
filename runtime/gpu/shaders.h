@@ -36,6 +36,7 @@ struct PixelKey {
     uint32_t proj = 0;       // fixed function: bit per stage sampled at coordinates divided by w
     uint32_t quad = 0;       // a screen quad: QuadHlsl
     uint32_t alphatest = 0;  // alpha test on: only then may the shader discard, which turns off early depth tests
+    uint32_t half_d0 = 0;    // XBE_VCOL_PREMUL_2X: the program wrote twice the diffuse colour, halved back here
     bool operator==(const PixelKey& o) const;
 };
 
@@ -83,8 +84,10 @@ void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, Inp
 // vertex program microcode to HLSL, regs is the bit mask of v registers the draw supplies
 // decode: VertexDecode per register, 4 bits each, for elements the input assembler hands over raw
 // usages: Shader Model 3's input names, the habit's without them
+// double_d0 (XBE_VCOL_PREMUL_2X): 1 writes saturate(2 x oD0) and oB0 for a stage that doubles the diffuse colour, 2
+// also writes magenta where that clips
 std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0,
-                              const InputUsages* usages = nullptr);
+                              const InputUsages* usages = nullptr, int double_d0 = 0);
 // A vertex program that is only a plain transform: position through a model-view then a projection or one matrix, the
 // XDK's two screen lines, a colour and coordinates moved or scaled, nothing else. Registers in hardware order, -1 none.
 struct PlainProgram {

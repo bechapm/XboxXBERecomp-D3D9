@@ -248,6 +248,7 @@ struct DrawShaders {
     bool sprite = false;           // a program's points as point sprites
     const PlainProgram* plain = nullptr;  // a program fixed function may draw, prog and ffp both set; the hooks settle it (PlainTakeOver)
     StageSum sum;                  // the pixel stage as stage 0 would say it, when a plain draw or a mod needs it (PixelSum)
+    bool premul2x = false;         // XBE_VCOL_PREMUL_2X: a program's draw whose stage doubles the diffuse colour (Premul2x)
     FixedKey fk;
     InputUsages usages{};          // each input's Direct3D 9 name
     uint64_t vkey = 0;
@@ -2200,6 +2201,7 @@ ID3DBlob* D3D9Backend::Compile(const std::string& src, const char* profile) {
 constexpr uint64_t kDeclarationSalt = 0x10000;
 constexpr uint64_t kPretransformedSalt = 0x5A5A;
 constexpr uint64_t kSpriteSalt = 0x3C3C0000;
+constexpr uint64_t kPremul2xSalt = 0x2C2C00000000ull;
 
 // a point sprite's program hands its point size to the stage 3 coordinates, which the sprite makes
 std::string SpriteSizeHlsl(std::string s) {
@@ -2215,10 +2217,12 @@ IDirect3DVertexShader9* D3D9Backend::EnsureVertexShader(const State& s, const As
     uint64_t key = Hash(&decode, 8, seed);
     if (!sh.prog && a.pretransformed) key ^= kPretransformedSalt;
     if (sh.sprite) key ^= kSpriteSalt;
+    if (sh.prog && sh.premul2x) key ^= kPremul2xSalt;
     if (!sh.prog) key = Hash(&sh.fk, sizeof(sh.fk), key);
     auto it = vshaders_.find(key);
     if (it != vshaders_.end()) return it->second.Get();
-    std::string src = sh.prog ? VertexProgramHlsl(s.vs->program, a.regs, decode, &sh.usages)
+    std::string src = sh.prog ? VertexProgramHlsl(s.vs->program, a.regs, decode, &sh.usages,
+                                                  sh.premul2x ? (Premul2xMask() ? 2 : 1) : 0)
                               : FixedVertexHlsl(a.regs, a.pretransformed, decode, sh.fk);
     if (sh.sprite) src = SpriteSizeHlsl(std::move(src));
     ComPtr<IDirect3DVertexShader9> vs;
@@ -2900,6 +2904,8 @@ bool D3D9Backend::DrawPixelShader(const State& s, const DrawTextures& stages, Dr
     PixelKey pk = MakePixelKey(s, stages.info);
     // Direct3D 9 has no front face setting: culling clockwise leaves counter clockwise as the front (PixelHlsl)
     if (pk.two_sided && s.rs[kRsCullMode] == kCullCw) pk.two_sided = 2;
+    // a program's vertex shader doubled the diffuse colour for the stage (premul2x); its pixel shader halves it back
+    if (sh.prog && sh.premul2x) pk.half_d0 = 1;
     sh.pkey = Hash(&pk, sizeof(pk));
     sh.ps = EnsurePixelShader(pk, sh.pkey);
     return sh.ps != nullptr;
@@ -2977,7 +2983,7 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
     d.program_id = sh.prog ? s.vs->hash : 0;
     d.fixed_transform = sh.plain != nullptr;
     StageSumD3d9(sh.sum.color, d.stage_color_op, d.stage_color_arg1, d.stage_color_arg2);
-    if (Premul2x() && sh.plain && sh.sum.color == kSumModulate2x) d.stage_color_op = D3DTOP_MODULATE;
+    if (sh.premul2x) d.stage_color_op = D3DTOP_MODULATE;  // the 2x is in the vertex colour, the stream's or the program's
     StageSumD3d9(sh.sum.alpha, d.stage_alpha_op, d.stage_alpha_arg1, d.stage_alpha_arg2);
     d.stage_known = (sh.sum.color ? 1u : 0u) | (sh.sum.alpha ? 2u : 0u);
     // a program projects through the camera when it reads the registers the game names for it
@@ -3705,7 +3711,12 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         sh.plain = sh.sprite ? nullptr : PlainDraw(s, a, stages, sh.usages);
         sh.ffp = sh.plain != nullptr;
     }
-    if (sh.plain || !mods::D3d9().draw.empty()) sh.sum = PixelSum(s, stages);
+    if (sh.plain || !mods::D3d9().draw.empty() || (Premul2x() && sh.prog)) sh.sum = PixelSum(s, stages);
+    // XBE_VCOL_PREMUL_2X: a program's draw (plain or not) whose stage is 2 x texture x diffuse gets the 2x in its colour:
+    // a plain one drawn fixed function in its converted stream (BuildDeclaration), any other in what its vertex shader
+    // writes (VertexProgramHlsl), with its pixel shader halving it back, so a renderer that takes the vertex colour and
+    // the stage, not the title's pixel shader, sees one doubling
+    sh.premul2x = Premul2x() && sh.prog && sh.sum.color == kSumModulate2x;
 
     std::vector<DeclElement> el;
     uint64_t decode;
