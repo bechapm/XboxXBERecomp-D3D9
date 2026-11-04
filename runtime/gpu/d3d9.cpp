@@ -3967,8 +3967,21 @@ void D3D9Backend::ApplySettings() {
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    if (FAILED(hr)) LOGE("d3d9: reset failed (%08X)", unsigned(hr));
-    else LOGR("d3d9: reset done");
+    if (SUCCEEDED(hr)) {
+        LOGR("d3d9: reset done");
+        return;
+    }
+    // Windows' own D3D9 refuses this reset (D3DERR_INVALIDCALL: windowed or not, at any size, with the device's
+    // objects released, on the render or the window's thread) where RTX Remix takes it. The targets still change
+    // scale and the picture is stretched onto the back buffer as it is, so what draws onto the back buffer (the gamma
+    // pass, the UI) goes by its real size
+    ComPtr<IDirect3DSurface9> bb;
+    D3DSURFACE_DESC d;
+    if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && SUCCEEDED(bb->GetDesc(&d))) {
+        bb_w_ = d.Width;
+        bb_h_ = d.Height;
+    }
+    LOGE("d3d9: reset refused (%08X), the back buffer stays %ux%u", unsigned(hr), bb_w_, bb_h_);
 }
 
 void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
