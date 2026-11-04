@@ -20,6 +20,7 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -2014,6 +2015,30 @@ std::string SpriteSizeHlsl(std::string s) {
     return s;
 }
 
+namespace {
+// XBE_D3D9_LOG_PROGRAM=<hash>[,<hash>...] or all: log the HLSL each such vertex program is translated to, once per
+// input set (research: what a program writes out, a normal or not)
+bool LogProgram(uint64_t hash) {
+    static const std::string want = [] {
+        const char* e = std::getenv("XBE_D3D9_LOG_PROGRAM");
+        return std::string(e ? e : "");
+    }();
+    if (want.empty()) return false;
+    if (want == "all") return true;
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llX", (unsigned long long)hash);
+    for (size_t at = 0; at < want.size();) {
+        size_t end = want.find(',', at);
+        if (end == std::string::npos) end = want.size();
+        std::string one = want.substr(at, end - at);
+        for (char& c : one) c = char(std::toupper((unsigned char)c));
+        if (one.size() <= 16 && one == std::string(hex + 16 - one.size())) return true;
+        at = end + 1;
+    }
+    return false;
+}
+}  // namespace
+
 IDirect3DVertexShader9* D3D9Backend::EnsureVertexShader(const State& s, const Assembled& a, const DrawShaders& sh,
                                                         uint64_t decode) {
     uint64_t seed = sh.prog ? s.vs->hash ^ a.regs : Hash(&s.vs_handle, 4, a.regs | kDeclarationSalt);
@@ -2026,6 +2051,14 @@ IDirect3DVertexShader9* D3D9Backend::EnsureVertexShader(const State& s, const As
     std::string src = sh.prog ? VertexProgramHlsl(s.vs->program, a.regs, decode, &sh.usages)
                               : FixedVertexHlsl(a.regs, a.pretransformed, decode, sh.fk);
     if (sh.sprite) src = SpriteSizeHlsl(std::move(src));
+    if (sh.prog && LogProgram(s.vs->hash)) {  // XBE_D3D9_LOG_PROGRAM: what a program became, line by line
+        LOGI("d3d9: program %016llX (inputs 0x%04X) as HLSL:", (unsigned long long)s.vs->hash, unsigned(a.regs));
+        for (size_t at = 0, nl; at < src.size(); at = nl + 1) {
+            nl = src.find('\n', at);
+            if (nl == std::string::npos) nl = src.size();
+            LOGI("d3d9:   %s", src.substr(at, nl - at).c_str());
+        }
+    }
     ComPtr<IDirect3DVertexShader9> vs;
     if (ID3DBlob* code = Compile(src, "vs_3_0");
         code && FAILED(dev_->CreateVertexShader(static_cast<const DWORD*>(code->GetBufferPointer()), &vs))) {
