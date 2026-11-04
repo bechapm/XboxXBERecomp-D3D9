@@ -2052,11 +2052,11 @@ IDirect3DVertexShader9* D3D9Backend::EnsureVertexShader(const State& s, const As
                               : FixedVertexHlsl(a.regs, a.pretransformed, decode, sh.fk);
     if (sh.sprite) src = SpriteSizeHlsl(std::move(src));
     if (sh.prog && LogProgram(s.vs->hash)) {  // XBE_D3D9_LOG_PROGRAM: what a program became, line by line
-        LOGI("d3d9: program %016llX (inputs 0x%04X) as HLSL:", (unsigned long long)s.vs->hash, unsigned(a.regs));
+        LOGR("d3d9: program %016llX (inputs 0x%04X) as HLSL:", (unsigned long long)s.vs->hash, unsigned(a.regs));
         for (size_t at = 0, nl; at < src.size(); at = nl + 1) {
             nl = src.find('\n', at);
             if (nl == std::string::npos) nl = src.size();
-            LOGI("d3d9:   %s", src.substr(at, nl - at).c_str());
+            LOGR("d3d9:   %s", src.substr(at, nl - at).c_str());
         }
     }
     ComPtr<IDirect3DVertexShader9> vs;
