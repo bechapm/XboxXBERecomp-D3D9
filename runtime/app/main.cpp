@@ -180,6 +180,12 @@ void ApplyNow() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // the cursor's rules first: ImGui's handler takes every WM_SETCURSOR over the client area and shows its arrow, so
+    // in play (mouse_look holding the mouse) the cursor showed whenever the mouse moved
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && input::CursorHidden()) {
+        SetCursor(nullptr);
+        return TRUE;
+    }
     {
         std::lock_guard lock(UiLock());
         if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;

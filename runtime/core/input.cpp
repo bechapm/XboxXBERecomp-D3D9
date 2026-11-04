@@ -118,6 +118,9 @@ bool g_captured = false;  // mouse_look holds the pointer in the window, window 
 constexpr UINT kPointerSync = WM_APP + 0x40;  // to the window thread: the capture and the cursor follow the want
 std::atomic<int> g_wants{0};       // callers wanting the pointer now
 std::atomic<bool> g_want{false};  // any of them
+std::atomic<bool> g_cursor_elsewhere{false};  // CursorElsewhere: an overlay has the cursor
+std::atomic<bool> g_keys_elsewhere{false};    // KeysElsewhere: an overlay has the keyboard
+bool g_keys_blocked[256] = {};                // keys an overlay took, held back until let go; the polling thread's
 bool g_shown = false;           // under g_lock, as the rest of the pointer's state
 Device g_last = Device::keyboard;
 uint32_t g_moved = 0, g_presses[5] = {};
@@ -269,7 +272,12 @@ void ReadKeyboardMouse(Pad& p) {
         for (int src : g_controls[c]) {
             if (src == kWheelUp || src == kWheelDown) held |= wheel[src - kWheelUp];
             else if (src >= kMouseFirst) held |= over && (mouse & ~g_blocked & (1 << (src - kMouseFirst)));
-            else held |= (GetAsyncKeyState(src) & 0x8000) != 0;
+            else if (src > 0 && src < 256) {
+                // a key the overlay took stays its own until let go: typing in it does not walk the player after
+                bool down = (GetAsyncKeyState(src) & 0x8000) != 0;
+                if (g_keys_elsewhere || g_keys_blocked[src]) g_keys_blocked[src] = down || g_keys_elsewhere;
+                else held |= down;
+            }
         }
         if (!held) continue;
         if (c < kAnalogFirst) p.buttons |= uint16_t(1 << c);
@@ -306,6 +314,8 @@ void Merge(Pad& p, const Pad& kbm) {
     if (kbm.ry) p.ry = int16_t(std::clamp(int(p.ry) + int(kbm.ry), -32768, 32767));
 }
 
+void SyncCursor();
+
 // mouse_look keeps the pointer hidden in the client area while the window is in front
 void Capture(bool on) {
     on = on && g_hwnd && app::Get().keyboard_mouse && app::Get().mouse_look && !g_want;
@@ -318,16 +328,34 @@ void Capture(bool on) {
         ClipCursor(nullptr);
     }
     g_captured = on;
+    SyncCursor();
 }
 
 // window thread: the cursor over the client area, hidden while mouse_look holds it or a key or pad was used last
-bool SetClientCursor() {
-    bool hidden;
-    {
-        std::lock_guard lock(g_lock);
-        hidden = g_captured || (g_want && !g_shown);
+bool Hidden() {
+    std::lock_guard lock(g_lock);
+    return g_captured || (g_want && !g_shown);
+}
+
+// window thread: the window thread's cursor display count follows Hidden(), below 0 while hidden and 0 or more while
+// not. A cursor set by anyone else in between (ImGui's frame, an overlay hooking the window, the class cursor) then
+// stays hidden too: on its own, SetCursor(nullptr) lasted only until the next of those, and the cursor flickered as the
+// mouse moved. Stepped only from the wrong side of 0, so the count stays at -1 or 0 however often this runs
+void SyncCursor() {
+    if (g_cursor_elsewhere) return;
+    int level = ShowCursor(TRUE) - 1;  // read, then put back: each call moves the count
+    ShowCursor(FALSE);
+    if (Hidden()) {
+        while (level >= 0) level = ShowCursor(FALSE);
+    } else {
+        while (level < 0) level = ShowCursor(TRUE);
     }
-    SetCursor(hidden ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
+}
+
+bool SetClientCursor() {
+    if (g_cursor_elsewhere) return false;  // left to the overlay
+    SyncCursor();
+    SetCursor(Hidden() ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));  // IDC_ARROW
     return true;
 }
 
@@ -651,6 +679,15 @@ void PointerWant(bool on) {
         if (on) g_shown = false;  // until the mouse moves
     }
     if (g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);
+}
+
+bool CursorHidden() { return !g_cursor_elsewhere && Hidden(); }
+
+void KeysElsewhere(bool on) { g_keys_elsewhere = on; }
+
+void CursorElsewhere(bool on) {
+    if (g_cursor_elsewhere.exchange(on) == on) return;
+    if (g_hwnd) PostMessageW(g_hwnd, kPointerSync, 0, 0);  // the SDK's rule again when it ends
 }
 
 Device LastUsed() {
