@@ -84,7 +84,6 @@ bool OpenSplash();        // window thread, at launch; false without one, and th
 void SplashFirstFrame();  // the game's first Swap: waits out the splash's minimum, then opens the game window
 void CloseSplash();       // window thread
 void OpenGameWindow(bool apply = true);  // any thread but the window thread's; returns once the window is up
-void OnWindowThread(void (*fn)(void*), void* arg);  // runs fn(arg) on the window thread and returns after it
 // relaunched: the previous instance keeps its window up until this one has shown its first frames (handover.cpp)
 bool StartHandover();   // window thread, at launch; true: the game window starts hidden
 bool HandingOver();

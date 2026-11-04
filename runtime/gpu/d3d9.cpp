@@ -978,7 +978,7 @@ bool D3D9Backend::CreateDevice(HWND hwnd) {
     }
     D3DADAPTER_IDENTIFIER9 id{};
     d3d_->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id);
-    LOGR("D3D9 adapter: %s%s, device made on thread %lX", id.Description, d3d_ex_ ? " (Ex)" : "", GetCurrentThreadId());
+    LOGR("D3D9 adapter: %s%s", id.Description, d3d_ex_ ? " (Ex)" : "");
     dev_->GetDeviceCaps(&caps_);
     D3DDISPLAYMODE mode{};
     d3d_->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode);
@@ -3252,22 +3252,6 @@ void D3D9Backend::ApplySettings() {
     if (dev_ex_) {
         ImGui_ImplDX9_InvalidateDeviceObjects();
         hr = dev_ex_->ResetEx(&pp, nullptr);
-        if (FAILED(hr)) {
-            // under test: the same call made on the window's thread instead of the render thread
-            LOGE("d3d9: reset refused (%08X) on thread %lX, trying again on the window's thread", unsigned(hr),
-                 GetCurrentThreadId());
-            struct Call {
-                IDirect3DDevice9Ex* dev;
-                D3DPRESENT_PARAMETERS* pp;
-                HRESULT hr;
-            } call{dev_ex_.Get(), &pp, E_FAIL};
-            app::OnWindowThread([](void* p) {
-                auto* c = static_cast<Call*>(p);
-                c->hr = c->dev->ResetEx(c->pp, nullptr);
-                LOGE("d3d9: reset on the window's thread %lX: %08X", GetCurrentThreadId(), unsigned(c->hr));
-            }, &call);
-            hr = call.hr;
-        }
         ImGui_ImplDX9_CreateDeviceObjects();
         Invalidate();
     } else {
@@ -3282,8 +3266,21 @@ void D3D9Backend::ApplySettings() {
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    if (FAILED(hr)) LOGE("d3d9: reset failed (%08X)", unsigned(hr));
-    else LOGR("d3d9: reset done");
+    if (SUCCEEDED(hr)) {
+        LOGR("d3d9: reset done");
+        return;
+    }
+    // Windows' own D3D9 refuses this reset (D3DERR_INVALIDCALL: windowed or not, at any size, with the device's
+    // objects released, on the render or the window's thread) where RTX Remix takes it. The targets still change
+    // scale and the picture is stretched onto the back buffer as it is, so what draws onto the back buffer (the gamma
+    // pass, the UI) goes by its real size
+    ComPtr<IDirect3DSurface9> bb;
+    D3DSURFACE_DESC d;
+    if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && SUCCEEDED(bb->GetDesc(&d))) {
+        bb_w_ = d.Width;
+        bb_h_ = d.Height;
+    }
+    LOGE("d3d9: reset refused (%08X), the back buffer stays %ux%u", unsigned(hr), bb_w_, bb_h_);
 }
 
 void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
@@ -3404,7 +3401,6 @@ void D3D9Backend::Present(const Surface& front) {
     DeliverReports(false);
     ReleaseOldTextures();
     CountFps();
-    bb.Reset();  // let go of the back buffer before a reset: one still held is a reason to refuse it (INVALIDCALL)
     ApplySettings();
     if (!lost_) Scene(true);
 }

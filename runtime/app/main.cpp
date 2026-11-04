@@ -35,7 +35,7 @@ namespace app {
 namespace {
 
 HWND g_hwnd = nullptr;
-constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2, kRunHere = WM_APP + 3;
+constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2;
 bool g_mode_changed = false;
 bool g_apply_posted = false;  // a display apply is waiting in the queue or running
 
@@ -224,9 +224,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ApplyNow();
             g_apply_posted = false;
             return 0;
-        case kRunHere:
-            reinterpret_cast<void (*)(void*)>(wp)(reinterpret_cast<void*>(lp));
-            return 0;
         case kOpenWindow:
             CloseSplash();
             if (wp) ApplyNow();
@@ -273,7 +270,6 @@ std::recursive_mutex& UiLock() {
 
 void ApplyDisplay() { PostMessageW(g_hwnd, kApplyDisplay, 0, 0); }
 void OpenGameWindow(bool apply) { SendMessageW(g_hwnd, kOpenWindow, apply, 0); }
-void OnWindowThread(void (*fn)(void*), void* arg) { SendMessageW(g_hwnd, kRunHere, WPARAM(fn), LPARAM(arg)); }
 
 namespace {
 
