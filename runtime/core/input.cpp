@@ -652,7 +652,7 @@ Pointer GetPointer() {
     if (g_hwnd) GetClientRect(g_hwnd, &rc);
     float w = float(std::max<LONG>(rc.right - rc.left, 1));
     float h = float(std::max<LONG>(rc.bottom - rc.top, 1));
-    ptr.aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    ptr.aspect = app::PictureAspect();
     float vw = std::min(w, h * ptr.aspect);
     float vh = vw / ptr.aspect;
     ptr.x = (float(pt.x) - (w - vw) / 2) / vw;
