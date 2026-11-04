@@ -18,6 +18,7 @@
 
 #include "app/app.h"
 #include "core/diag.h"
+#include "core/testdrive.h"
 #include "gpu/backend.h"
 #include "gpu/shaders.h"
 #include "gpu/simple_dirty.h"
@@ -213,6 +214,11 @@ void SyncDeferred() {
     for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) g_state.rs[i] = R32(kRenderState + i * 4);
     for (int s = 0; s < 4; s++)
         for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
+    // the title's own fill mode, kept in its memory by SetComplex, or lines for gpu::g_wireframe. Not for a draw a
+    // visibility test counts: the title reads that count back (fades, glows), and lines would change what it decides
+    constexpr uint32_t kFillWireframe = 0x1B01;  // D3DFILL_WIREFRAME
+    bool counted = g_state.simple[gpu::kMCountEnable >> 2] != 0;
+    g_state.rs[gpu::kRsFillMode] = gpu::g_wireframe && !counted ? kFillWireframe : R32(kRenderState + gpu::kRsFillMode * 4);
 }
 
 float ZScale(const gpu::Surface& zs) {
@@ -328,6 +334,13 @@ void VerticalBlank(X86Context& ctx) {
     for (;;) {
         next = std::max(next + std::chrono::microseconds(16667), clock::now());
         std::this_thread::sleep_until(next);
+        if (testdrive::Lockstep()) {
+            // no blank until the title has swapped since the last one; a load swaps nothing, so 2 s at most
+            auto held = clock::now();
+            while (Dev(kDevSwapCount) == shown && clock::now() - held < std::chrono::seconds(2))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            next = clock::now();
+        }
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
         ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
