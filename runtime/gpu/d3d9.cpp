@@ -978,7 +978,7 @@ bool D3D9Backend::CreateDevice(HWND hwnd) {
     }
     D3DADAPTER_IDENTIFIER9 id{};
     d3d_->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id);
-    LOGR("D3D9 adapter: %s%s", id.Description, d3d_ex_ ? " (Ex)" : "");
+    LOGR("D3D9 adapter: %s%s, device made on thread %lX", id.Description, d3d_ex_ ? " (Ex)" : "", GetCurrentThreadId());
     dev_->GetDeviceCaps(&caps_);
     D3DDISPLAYMODE mode{};
     d3d_->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode);
@@ -3253,11 +3253,20 @@ void D3D9Backend::ApplySettings() {
         ImGui_ImplDX9_InvalidateDeviceObjects();
         hr = dev_ex_->ResetEx(&pp, nullptr);
         if (FAILED(hr)) {
-            // refused with the device's own objects alive, which an Ex device should allow: try again without them
-            LOGE("d3d9: reset refused (%08X), trying again with the device's objects released", unsigned(hr));
-            ReleaseDeviceObjects();
-            hr = dev_ex_->ResetEx(&pp, nullptr);
-            if (!CreateDeviceObjects()) LOGE("d3d9: the device's objects could not be made again");
+            // under test: the same call made on the window's thread instead of the render thread
+            LOGE("d3d9: reset refused (%08X) on thread %lX, trying again on the window's thread", unsigned(hr),
+                 GetCurrentThreadId());
+            struct Call {
+                IDirect3DDevice9Ex* dev;
+                D3DPRESENT_PARAMETERS* pp;
+                HRESULT hr;
+            } call{dev_ex_.Get(), &pp, E_FAIL};
+            app::OnWindowThread([](void* p) {
+                auto* c = static_cast<Call*>(p);
+                c->hr = c->dev->ResetEx(c->pp, nullptr);
+                LOGE("d3d9: reset on the window's thread %lX: %08X", GetCurrentThreadId(), unsigned(c->hr));
+            }, &call);
+            hr = call.hr;
         }
         ImGui_ImplDX9_CreateDeviceObjects();
         Invalidate();
