@@ -39,18 +39,37 @@ constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2;
 bool g_mode_changed = false;
 bool g_apply_posted = false;  // a display apply is waiting in the queue or running
 
+// "module+offset" of a host code address, for a crash line that still reads after the module moves
+static std::string ModuleAt(const void* addr) {
+    HMODULE m = nullptr;
+    char path[MAX_PATH] = "?";
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<const char*>(addr), &m) || !GetModuleFileNameA(m, path, MAX_PATH))
+        return "no module";
+    const char* name = std::strrchr(path, '\\');
+    char out[MAX_PATH + 32];
+    std::snprintf(out, sizeof(out), "%s+%llX", name ? name + 1 : path,
+                  (unsigned long long)(reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(m)));
+    return out;
+}
+
 // crash dump in CrashDumps beside the exe
 LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
-    // the dump holds no guest memory: the guest registers and return addresses go to the log
-    if (kernel::Thread* t = kernel::Current(); e && t && t->ctx) {
+    // the dump holds no guest memory: the guest registers and return addresses go to the log. A crash off the guest's
+    // threads (the render thread, a driver's or a Remix thread) gets its line and module too
+    if (e) {
+        kernel::Thread* g = kernel::Current();
+        bool guest = g && g->ctx;
         auto* r = e->ExceptionRecord;
-        LOGE("exception %08lX at %p on guest thread %X", r->ExceptionCode, r->ExceptionAddress, t->id);
+        LOGE("exception %08lX at %p (%s) on %s thread %lX", r->ExceptionCode, r->ExceptionAddress,
+             ModuleAt(r->ExceptionAddress).c_str(), guest ? "guest" : "host",
+             guest ? (unsigned long)g->id : GetCurrentThreadId());
         if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
-            uint64_t va = r->ExceptionInformation[1], g = uint64_t(reinterpret_cast<uintptr_t>(kernel::g_base));
+            uint64_t va = r->ExceptionInformation[1], gb = uint64_t(reinterpret_cast<uintptr_t>(kernel::g_base));
             LOGE("  %s %llX, guest %08llX", r->ExceptionInformation[0] ? "write" : "read", (unsigned long long)va,
-                 (unsigned long long)(va - g));
+                 (unsigned long long)(va - gb));
         }
-        kernel::LogGuestStack(*t->ctx, 256);
+        if (guest) kernel::LogGuestStack(*g->ctx, 256);
     }
     auto dir = ExeDir() / "CrashDumps";
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -67,6 +86,7 @@ LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
                                     MiniDumpWithUnloadedModules | MiniDumpWithIndirectlyReferencedMemory),
                       e ? &info : nullptr, nullptr, nullptr);
     CloseHandle(f);
+    LOGE("crash dump: CrashDumps\\%ls", name);
     logx::Flush();
     return EXCEPTION_CONTINUE_SEARCH;
 }
