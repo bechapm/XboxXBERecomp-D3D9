@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <thread>
@@ -63,6 +64,7 @@ bool Read(const std::filesystem::path& path, std::vector<uint32_t>& pixels, UINT
 
 bool OpenSplash() {
     if (std::wcsstr(GetCommandLineW(), L"--relaunched")) return false;
+    if (std::getenv("XBE_BACKGROUND")) return false;  // a test run puts nothing on the desktop: the splash is topmost
     std::vector<uint32_t> pixels;
     UINT w = 0, h = 0;
     std::filesystem::path path;
