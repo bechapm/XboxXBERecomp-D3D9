@@ -35,6 +35,8 @@ void Init(const std::string& dir, const std::string& prefix, bool append) {
     fs::create_directories(dir, ec);
     if (!kVerbose) {
         g_path = (fs::path(dir) / (prefix + ".log")).string();
+        // the run before keeps its log as prefix.prev.log, so a crash's log outlives the next start
+        if (!append) fs::rename(g_path, fs::path(dir) / (prefix + ".prev.log"), ec);
         g_file = std::fopen(g_path.c_str(), append ? "a" : "w");
         return;
     }

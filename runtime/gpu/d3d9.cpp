@@ -3245,21 +3245,29 @@ void D3D9Backend::ApplySettings() {
     bb_h_ = std::max(1u, uint32_t(std::lround(guest_h_ * scale_)));
     D3DPRESENT_PARAMETERS pp;
     FillPresentParams(pp);
+    // a release log shows each reset before and after, flushed, so a crash inside one says so
+    LOGR("d3d9: reset for render scale %.3f, %ux%u back buffer, picture %.3f wide, vsync %s", scale_, bb_w_, bb_h_,
+         app::PictureAspect(), vsync_ ? "on" : "off");
+    HRESULT hr;
     if (dev_ex_) {
         ImGui_ImplDX9_InvalidateDeviceObjects();
-        dev_ex_->ResetEx(&pp, nullptr);
+        hr = dev_ex_->ResetEx(&pp, nullptr);
         ImGui_ImplDX9_CreateDeviceObjects();
         Invalidate();
     } else {
         lost_ = true;  // a plain device's reset gives back everything it made, as after a loss
         ReleaseDeviceObjects();
-        if (FAILED(dev_->Reset(&pp)) || !CreateDeviceObjects()) return;
+        hr = dev_->Reset(&pp);
+        if (FAILED(hr) || !CreateDeviceObjects()) {
+            LOGE("d3d9: reset failed (%08X), the device is lost until it can be reset", unsigned(hr));
+            return;
+        }
         ImGui_ImplDX9_CreateDeviceObjects();
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    LOGI("d3d9: render scale %.3f, %ux%u back buffer, picture %.3f wide, vsync %s", scale_, bb_w_, bb_h_,
-         app::PictureAspect(), vsync_ ? "on" : "off");
+    if (FAILED(hr)) LOGE("d3d9: reset failed (%08X)", unsigned(hr));
+    else LOGR("d3d9: reset done");
 }
 
 void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
