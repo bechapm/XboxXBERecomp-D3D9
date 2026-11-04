@@ -3388,6 +3388,7 @@ void D3D9Backend::Present(const Surface& front) {
     DeliverReports(false);
     ReleaseOldTextures();
     CountFps();
+    bb.Reset();  // let go of the back buffer before a reset: one still held is a reason to refuse it (INVALIDCALL)
     ApplySettings();
     if (!lost_) Scene(true);
 }
