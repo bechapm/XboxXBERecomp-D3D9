@@ -3226,13 +3226,14 @@ void D3D9Backend::CountFps() {
     }
 }
 
-// a new render scale, picture shape or vsync makes every target and the back buffer again
+// a new render scale makes every target again, and a new picture shape or vsync the back buffer too
 void D3D9Backend::ApplySettings() {
     if (texturedumper::Update()) pack_textures_.clear(), Invalidate();
     float want = app::RenderScale(guest_h_);
     float wide = PictureWide(guest_w_, guest_h_);
     bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
     if (!rescale && app::Get().vsync == vsync_) return;
+    bool reset = std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
     vsync_ = app::Get().vsync;
     scale_ = want;
     wide_ = wide;
@@ -3241,6 +3242,15 @@ void D3D9Backend::ApplySettings() {
     targets_.clear();  // a plain device's reset frees them either way
     dummies_.clear();
     prime_.Reset();
+    // a new render scale alone makes the targets again and keeps the back buffer, onto which the picture is stretched:
+    // under RTX Remix with DLSS frame generation on, a reset that resizes the swap chain crashed in the driver about a
+    // second later (8 of 9 runs from the front end, 0 of 8 with frame generation off, 0 of 6 with no reset)
+    if (!reset) {
+        bound_rt_surf_ = bound_ds_surf_ = nullptr;
+        Invalidate();
+        LOGR("d3d9: render scale %.3f, targets made again, back buffer kept at %ux%u", scale_, bb_w_, bb_h_);
+        return;
+    }
     bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_ * wide_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(guest_h_ * scale_)));
     D3DPRESENT_PARAMETERS pp;
