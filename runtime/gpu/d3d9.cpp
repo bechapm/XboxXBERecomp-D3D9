@@ -3252,6 +3252,13 @@ void D3D9Backend::ApplySettings() {
     if (dev_ex_) {
         ImGui_ImplDX9_InvalidateDeviceObjects();
         hr = dev_ex_->ResetEx(&pp, nullptr);
+        if (FAILED(hr)) {
+            // refused with the device's own objects alive, which an Ex device should allow: try again without them
+            LOGE("d3d9: reset refused (%08X), trying again with the device's objects released", unsigned(hr));
+            ReleaseDeviceObjects();
+            hr = dev_ex_->ResetEx(&pp, nullptr);
+            if (!CreateDeviceObjects()) LOGE("d3d9: the device's objects could not be made again");
+        }
         ImGui_ImplDX9_CreateDeviceObjects();
         Invalidate();
     } else {
