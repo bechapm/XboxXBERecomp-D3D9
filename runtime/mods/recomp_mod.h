@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 12
+#define RECOMP_MOD_API_VERSION 13
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -160,6 +160,14 @@ typedef int  (*RecompModFixedFn)(int depth_enable, int depth_write, uint32_t dep
 typedef int  (*RecompModBeforeDraw)(RecompModDraw *draw, void *user);
 typedef void (*RecompModAfterDraw)(RecompModDraw *draw, void *user);
 typedef void (*RecompModDeviceFn)(void *device, void *user);
+/* The picture's size is about to change (phase RECOMP_RESIZE_SOON) or has just
+ * changed (RECOMP_RESIZE_DONE: the device was reset, ok nonzero if it took it).
+ * At SOON a mod answers how many presents it needs before the reset (0 none),
+ * or below 0 if the reset cannot be made safe: then the new size waits for the
+ * next start. */
+typedef int (*RecompModResizeFn)(void *device, int phase, int ok, void *user);
+#define RECOMP_RESIZE_SOON 0
+#define RECOMP_RESIZE_DONE 1
 /* what: RECOMP_CLEAR_* bits; whole: the whole surface, not rectangles. */
 typedef void (*RecompModClearFn)(uint32_t what, float z, int whole, void *user);
 #define RECOMP_CLEAR_COLOR   1u
@@ -327,6 +335,16 @@ typedef struct RecompModApi {
      * on only under such a tool. Needs the renderer on the game's thread (a
      * mod that hooks draws); these draws are not shown to d3d9_on_draw. */
     void (*d3d9_skinned_meshes)(int on);
+
+    /* ---- version 13 (this SDK's) ---- */
+
+    /* fn when the picture's size changes as the game runs (a new render
+     * scale, resolution or shape), around the device's reset. Under a D3D9
+     * tool loaded as d3d9.dll the renderer otherwise keeps the size the
+     * picture started at until the next start, since a reset can break the
+     * tool: with one of these the mod takes that on, and the size changes
+     * live. Up to 8 across mods; 0 when full. Register from init. */
+    int  (*d3d9_on_resize)(RecompModResizeFn fn, void *user);
 } RecompModApi;
 
 typedef int (*RecompModInitFn)(const RecompModApi *api);
