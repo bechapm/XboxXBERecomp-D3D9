@@ -194,7 +194,7 @@ returns 0 / NULL).
 | `draw_vertex_buffer` (v4) | inside a draw hook | – (0) | ✓ | |
 | `d3d9_fixed_transform` (v5) | once the device is made; see Changing a draw | – | ✓ | |
 | `pointer_elsewhere` (v6) | any time, any thread; each on paired with one off | ✓ | ✓ | |
-| `d3d9_skinned_meshes` (v10) | from init; the renderer must run on the game's thread (a mod with a draw hook) | – | ✓ | |
+| `d3d9_skinned_meshes` (v12) | from init; the renderer must run on the game's thread (a mod with a draw hook) | – | ✓ | |
 | `replaying` | any time | ✓ (0) | ✓ (0) | |
 | `capture_on_draw`, `capture_note`, `replay_on_note` | accepted, never called: this SDK makes no frame captures for replay | – | – | |
 
