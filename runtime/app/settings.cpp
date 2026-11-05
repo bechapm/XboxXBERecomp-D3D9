@@ -206,6 +206,10 @@ Mode CachedOutput() {
     return mode;
 }
 
+static std::atomic<bool> g_size_at_start{false};
+bool SizeAtStart() { return g_size_at_start; }
+void SetSizeAtStart(bool at_start) { g_size_at_start = at_start; }
+
 float RenderScale(uint32_t guest_height) {
     float h = CachedOutput().height * (Get().render_percent / 100.0f);
     return guest_height ? std::max(h / guest_height, 0.1f) : 1.0f;
