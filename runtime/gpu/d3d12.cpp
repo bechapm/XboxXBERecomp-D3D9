@@ -3447,6 +3447,7 @@ void D3D12Backend::ApplySettings() {
         wide_ = wide;
         if (ext_) ext_->Reset(*this);
         bound_rt_ = bound_ds_ = nullptr;
+        LOGR("d3d12: targets made again for render scale %.3f, picture %.3f wide", scale_, app::PictureAspect());
     }
 }
 
