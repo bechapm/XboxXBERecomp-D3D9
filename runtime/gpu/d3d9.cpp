@@ -3226,13 +3226,14 @@ void D3D9Backend::CountFps() {
     }
 }
 
-// a new render scale, picture shape or vsync makes every target and the back buffer again
+// a new render scale makes every target again, and a new picture shape or vsync the back buffer too
 void D3D9Backend::ApplySettings() {
     if (texturedumper::Update()) pack_textures_.clear(), Invalidate();
     float want = app::RenderScale(guest_h_);
     float wide = PictureWide(guest_w_, guest_h_);
     bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
     if (!rescale && app::Get().vsync == vsync_) return;
+    bool reset = std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
     vsync_ = app::Get().vsync;
     scale_ = want;
     wide_ = wide;
@@ -3241,25 +3242,55 @@ void D3D9Backend::ApplySettings() {
     targets_.clear();  // a plain device's reset frees them either way
     dummies_.clear();
     prime_.Reset();
+    // a new render scale alone makes the targets again and keeps the back buffer, onto which the picture is stretched:
+    // under RTX Remix with DLSS frame generation on, a reset that resizes the swap chain crashed in the driver about a
+    // second later (8 of 9 runs from the front end, 0 of 8 with frame generation off, 0 of 6 with no reset)
+    if (!reset) {
+        bound_rt_surf_ = bound_ds_surf_ = nullptr;
+        Invalidate();
+        LOGR("d3d9: render scale %.3f, targets made again, back buffer kept at %ux%u", scale_, bb_w_, bb_h_);
+        return;
+    }
     bb_w_ = std::max(1u, uint32_t(std::lround(guest_w_ * scale_ * wide_)));
     bb_h_ = std::max(1u, uint32_t(std::lround(guest_h_ * scale_)));
     D3DPRESENT_PARAMETERS pp;
     FillPresentParams(pp);
+    // a release log shows each reset before and after, flushed, so a crash inside one says so
+    LOGR("d3d9: reset for render scale %.3f, %ux%u back buffer, picture %.3f wide, vsync %s", scale_, bb_w_, bb_h_,
+         app::PictureAspect(), vsync_ ? "on" : "off");
+    HRESULT hr;
     if (dev_ex_) {
         ImGui_ImplDX9_InvalidateDeviceObjects();
-        dev_ex_->ResetEx(&pp, nullptr);
+        hr = dev_ex_->ResetEx(&pp, nullptr);
         ImGui_ImplDX9_CreateDeviceObjects();
         Invalidate();
     } else {
         lost_ = true;  // a plain device's reset gives back everything it made, as after a loss
         ReleaseDeviceObjects();
-        if (FAILED(dev_->Reset(&pp)) || !CreateDeviceObjects()) return;
+        hr = dev_->Reset(&pp);
+        if (FAILED(hr) || !CreateDeviceObjects()) {
+            LOGE("d3d9: reset failed (%08X), the device is lost until it can be reset", unsigned(hr));
+            return;
+        }
         ImGui_ImplDX9_CreateDeviceObjects();
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
-    LOGI("d3d9: render scale %.3f, %ux%u back buffer, picture %.3f wide, vsync %s", scale_, bb_w_, bb_h_,
-         app::PictureAspect(), vsync_ ? "on" : "off");
+    if (SUCCEEDED(hr)) {
+        LOGR("d3d9: reset done");
+        return;
+    }
+    // Windows' own D3D9 refuses this reset (D3DERR_INVALIDCALL: windowed or not, at any size, with the device's
+    // objects released, on the render or the window's thread) where RTX Remix takes it. The targets still change
+    // scale and the picture is stretched onto the back buffer as it is, so what draws onto the back buffer (the gamma
+    // pass, the UI) goes by its real size
+    ComPtr<IDirect3DSurface9> bb;
+    D3DSURFACE_DESC d;
+    if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && SUCCEEDED(bb->GetDesc(&d))) {
+        bb_w_ = d.Width;
+        bb_h_ = d.Height;
+    }
+    LOGE("d3d9: reset refused (%08X), the back buffer stays %ux%u", unsigned(hr), bb_w_, bb_h_);
 }
 
 void D3D9Backend::SnapBackBuffer(IDirect3DSurface9* bb) {
