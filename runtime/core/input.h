@@ -50,6 +50,16 @@ Pointer GetPointer();  // any thread
 void PointerWant(bool on);
 enum class Device : uint8_t { pad, keyboard, mouse };
 Device LastUsed();  // the last controller 1 used: a key, the mouse or a pad
+// window thread: the cursor is to be hidden over the client area (mouse_look holds the mouse, or the pointer is wanted
+// and a key or pad was used since the mouse moved). The window's WM_SETCURSOR asks this before ImGui, which would
+// otherwise show its arrow there whatever the game is doing
+bool CursorHidden();
+// any thread: an overlay draws a cursor of its own and sets the system one itself (RTX Remix's menu hides it each
+// frame): while on, the SDK leaves the cursor alone. Pair it with PointerWant, which takes the mouse from the game
+void CursorElsewhere(bool on);
+// any thread: an overlay takes the keyboard (a text box in RTX Remix's menu): keys press no control while on, and a key
+// held when it ends stays the overlay's until let go
+void KeysElsewhere(bool on);
 std::string KeyName(int vk);  // a Windows virtual key as the keyboard calls it ("Enter", "Esc"), "" for none
 std::string ControlName(const char* control);  // the first key or mouse button bound to a control, "" for none
 

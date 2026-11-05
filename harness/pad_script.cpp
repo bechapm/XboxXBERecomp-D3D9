@@ -108,5 +108,8 @@ void PointerWant(bool) {}
 Device LastUsed() { return Device::pad; }
 std::string KeyName(int) { return ""; }
 std::string ControlName(const char*) { return ""; }
+bool CursorHidden() { return false; }
+void CursorElsewhere(bool) {}
+void KeysElsewhere(bool) {}
 
 }  // namespace input

@@ -100,6 +100,15 @@ While the pointer is wanted:
 - the cursor shows when the mouse moves or clicks and hides when a key or controller 1's pad is used, so a player who
   never touches the mouse never sees it.
 
+Not wanted, with mouse_look holding the mouse, the cursor stays hidden over the game. The window asks
+`input::CursorHidden()` on each `WM_SETCURSOR` before ImGui's handler, which would otherwise show its arrow, and
+while hidden the window thread's cursor display count (`ShowCursor`) is one step down, so a cursor someone else sets
+in between (ImGui's frame, an overlay hooking the window) stays hidden too.
+
+An overlay that is not the game's (RTX Remix's menu) can take more: `input::CursorElsewhere(true)` leaves the
+system cursor to it (it draws its own), and `input::KeysElsewhere(true)` stops keys pressing controls, a key held
+when it ends staying the overlay's until let go. Pair each with its `false`, alongside a `PointerWant`.
+
 | `input::Pointer` | |
 | --- | --- |
 | `inside` | over the picture, the window in front and the pointer wanted |
