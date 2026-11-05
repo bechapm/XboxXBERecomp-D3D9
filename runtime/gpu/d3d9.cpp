@@ -661,6 +661,7 @@ public:
     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                uint32_t stencil) override;
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
+    void DrawSkinned(const State& s, const SkinnedMesh& m) override;
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override;
     void Present(const Surface& front) override;
     void Sync(uint32_t data, uint32_t size) override;
@@ -3764,6 +3765,131 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     }
     mod_state_ = nullptr;
     mod_asm_ = nullptr;
+}
+
+// A mesh a game's hook built (backend.h), drawn by fixed function with indexed vertex blending: each vertex by its one
+// matrix, D3DTS_WORLDMATRIX(i) the model-view the hook gives, VIEW identity and the title's program projection, so a
+// tool reading fixed function draws (RTX Remix) takes it as one skinned object per run. Its own state, as a cutscene
+// model wants it (no culling, depth test and write, alpha test at 0x60, the texture times white); the mods' draw hooks
+// are not called for it
+void D3D9Backend::DrawSkinned(const State& s, const SkinnedMesh& m) {
+    if (!Usable() || !m.vertex_count || !m.run_count || !m.matrix_count || m.matrix_count > 256) return;
+    int preg = g_projection_register;
+    if (preg < 0 || size_t(preg) + 4 > s.vsc.size()) return;
+    if (!BindTargets(s)) {
+        counts_.targets++;
+        return;
+    }
+    Prime(nullptr);
+    Scene(true);
+    GuestExtent size;
+    SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
+    {
+        const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+        Assembled a;
+        place_ = t && ScreenSized(t->gw, t->gh) ? Place(s, a, true, t->gw, t->gh, wide_) : Placed{};
+    }
+
+    // the vertices and every run's indices through the rings
+    uint32_t vbytes = m.vertex_count * uint32_t(sizeof(SkinnedVertex));
+    uint32_t vat = RingVertices(m.vertices, vbytes);
+    uint32_t icount = 0;
+    for (uint32_t r = 0; r < m.run_count; r++) icount = std::max(icount, m.runs[r].first + m.runs[r].count);
+    uint32_t ibytes = icount * 2;
+    if (vat == ~0u || !icount || ibytes > kIbRingBytes) return;
+    DWORD flags = D3DLOCK_NOOVERWRITE;
+    if (ib16_at_ + ibytes > kIbRingBytes) {
+        ib16_at_ = 0;
+        flags = D3DLOCK_DISCARD;
+    }
+    void* ip = nullptr;
+    if (FAILED(ib16_->Lock(ib16_at_, ibytes, &ip, flags))) return;
+    std::memcpy(ip, m.indices, ibytes);
+    ib16_->Unlock();
+    uint32_t first_index = ib16_at_ / 2;
+    ib16_at_ += ibytes;
+
+    static const std::vector<DeclElement> kElements = [] {
+        std::vector<DeclElement> el(4);
+        el[0].type = D3DDECLTYPE_FLOAT3, el[0].usage = D3DDECLUSAGE_POSITION, el[0].offset = 0;
+        el[1].type = D3DDECLTYPE_FLOAT3, el[1].usage = D3DDECLUSAGE_NORMAL, el[1].offset = 12;
+        el[2].type = D3DDECLTYPE_FLOAT2, el[2].usage = D3DDECLUSAGE_TEXCOORD, el[2].offset = 24;
+        el[3].type = D3DDECLTYPE_UBYTE4, el[3].usage = D3DDECLUSAGE_BLENDINDICES, el[3].offset = 32;
+        for (auto& e : el) e.reg = -1, e.stream = 0, e.index = 0;
+        return el;
+    }();
+    IDirect3DVertexDeclaration9* decl = EnsureDeclaration(kElements);
+    if (!decl) {
+        counts_.decl++;
+        return;
+    }
+
+    dev_->SetVertexShader(nullptr);
+    dev_->SetPixelShader(nullptr);
+    dev_->SetVertexDeclaration(decl);
+    dev_->SetStreamSource(0, vb_.Get(), vat, sizeof(SkinnedVertex));
+    dev_->SetIndices(ib16_.Get());
+    for (uint32_t i = 0; i < m.matrix_count; i++)
+        dev_->SetTransform(D3DTS_WORLDMATRIX(i), reinterpret_cast<const D3DMATRIX*>(m.matrices + 16 * i));
+    dev_xf_ok_[0] = false;  // WORLD is WORLDMATRIX(0)
+    SetDeviceTransform(1, kIdentity);
+    float raw[16], proj[16];
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) raw[r * 4 + c] = s.vsc[size_t(preg + c)][size_t(r)];
+    FoldProjection(s, size, raw, proj);
+    if (place_.On()) {
+        float placed[16];
+        PlaceMatrix(place_, proj, placed);
+        std::memcpy(proj, placed, sizeof(proj));
+    }
+    SetDeviceTransform(2, proj);
+
+    Rs(D3DRS_VERTEXBLEND, D3DVBF_0WEIGHTS);
+    Rs(D3DRS_INDEXEDVERTEXBLENDENABLE, TRUE);
+    Rs(D3DRS_LIGHTING, FALSE);
+    Rs(D3DRS_FOGENABLE, FALSE);
+    Rs(D3DRS_CULLMODE, D3DCULL_NONE);
+    Rs(D3DRS_ZENABLE, bound_ds_ ? D3DZB_TRUE : D3DZB_FALSE);
+    Rs(D3DRS_ZWRITEENABLE, TRUE);
+    Rs(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+    Rs(D3DRS_ALPHABLENDENABLE, FALSE);
+    Rs(D3DRS_ALPHATESTENABLE, TRUE);
+    Rs(D3DRS_ALPHAFUNC, D3DCMP_GREATEREQUAL);
+    Rs(D3DRS_ALPHAREF, 0x60);
+    Rs(D3DRS_COLORWRITEENABLE, 0xF);
+    Rs(D3DRS_STENCILENABLE, FALSE);
+    Tss(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    Tss(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    Tss(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    Tss(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    Tss(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    Tss(0, D3DTSS_TEXCOORDINDEX, 0);
+    Tss(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    Tss(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    Tss(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    Samp(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+    Samp(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+    Samp(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    Samp(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    Samp(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+    for (DWORD i = 1; i < 4; i++) SetTexture(i, nullptr);
+    SetViewportScissor(s, size.w, place_);
+
+    // a run's texture as a draw with it at stage 0 would bind it
+    State one = s;
+    for (auto& t : one.textures) t = 0;
+    for (uint32_t r = 0; r < m.run_count; r++) {
+        const SkinnedRun& run = m.runs[r];
+        if (run.count < 3) continue;
+        DrawTextures stages;
+        one.textures[0] = run.texture;
+        SetTexture(0, BindTexture(one, 0, stages));
+        dev_->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, m.vertex_count, first_index + run.first, run.count / 3);
+        counts_.made++;
+    }
+    Rs(D3DRS_VERTEXBLEND, D3DVBF_DISABLE);
+    Rs(D3DRS_INDEXEDVERTEXBLENDENABLE, FALSE);
+    SetTexture(0, nullptr);
 }
 
 void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects,

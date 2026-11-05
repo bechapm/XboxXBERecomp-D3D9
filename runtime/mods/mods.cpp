@@ -25,6 +25,7 @@
 #include "core/input.h"
 #include "core/log.h"
 #include "gpu/shaders.h"
+#include "xdk/d3d8.h"
 #include "kernel/kernel.h"
 
 namespace mods {
@@ -184,6 +185,11 @@ void PointerElsewhere(int on) {
     input::PointerWant(false);
 }
 
+void D3d9SkinnedMeshes(int on) {
+    d3d::g_skinned_meshes = on != 0;
+    LOGR("mods: skinned meshes %s", on ? "on" : "off");
+}
+
 RecompModApi MakeApi() {
     RecompModApi a{};
     a.version = RECOMP_MOD_API_VERSION;
@@ -211,6 +217,7 @@ RecompModApi MakeApi() {
     a.draw_vertex_buffer = DrawVertexBuffer;
     a.d3d9_fixed_transform = D3d9FixedTransform;
     a.pointer_elsewhere = PointerElsewhere;
+    a.d3d9_skinned_meshes = D3d9SkinnedMeshes;
     return a;
 }
 const RecompModApi g_api = MakeApi();
