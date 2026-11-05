@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 9
+#define RECOMP_MOD_API_VERSION 10
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -285,6 +285,18 @@ typedef struct RecompModApi {
      * and leaves the cursor to the overlay; off gives it back. Counted: pair
      * each on with an off. Any thread. */
     void (*pointer_elsewhere)(int on);
+
+    /* ---- version 10 ---- */
+
+    /* On: a model the game's own hooks can give whole is drawn as one
+     * skinned mesh per texture by D3D9's fixed function -- indexed vertex
+     * blending, D3DTS_WORLDMATRIX(0..255) each a bone's model-view, VIEW
+     * identity, PROJECTION the title's -- rather than in the pieces of a few
+     * matrices its vertex programs draw it in. For a tool that takes a
+     * fixed-function skinned draw as one object. Needs the renderer on the
+     * game's thread (a mod that hooks draws); these draws are not shown to
+     * d3d9_on_draw. */
+    void (*d3d9_skinned_meshes)(int on);
 } RecompModApi;
 
 typedef int (*RecompModInitFn)(const RecompModApi *api);
