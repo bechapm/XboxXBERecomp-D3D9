@@ -23,6 +23,8 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -811,6 +813,10 @@ private:
     void ApplySettings();
 
     HMODULE lib_ = nullptr;
+    // d3d9.dll is a tool's, from beside the exe and not Windows' own: the picture keeps its size from the start
+    bool tool_ = false;
+    float held_scale_ = 0, held_wide_ = 0;  // what a settings change asked for while it is kept, told once
+    int resize_wait_ = -1;  // presents before a reset the mods' resize hooks asked for, -1 none pending
     ComPtr<IDirect3D9> d3d_;
     ComPtr<IDirect3D9Ex> d3d_ex_;
     ComPtr<IDirect3DDevice9> dev_;
@@ -1046,6 +1052,17 @@ bool D3D9Backend::CreateDevice(HWND hwnd) {
         LOGE("d3d9: d3d9.dll not found");
         return false;
     }
+    wchar_t path[MAX_PATH] = L"", sys[MAX_PATH] = L"";
+    GetModuleFileNameW(lib_, path, MAX_PATH);
+    GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring_view loaded(path);
+    std::wstring dir(loaded.substr(0, std::min(loaded.rfind(L'\\'), loaded.size())));
+    tool_ = !path[0] || lstrcmpiW(dir.c_str(), sys) != 0;
+    app::SetSizeAtStart(tool_ && mods::D3d9().resize.empty());
+    if (tool_)
+        LOGR("d3d9: a tool's d3d9.dll draws, %s", mods::D3d9().resize.empty()
+                                                     ? "the picture keeps its size until the next start"
+                                                     : "a mod makes the picture's size changes safe for it");
     using Create9Ex = HRESULT(WINAPI*)(UINT, IDirect3D9Ex**);
     using Create9 = IDirect3D9*(WINAPI*)(UINT);
     // Ex first: its windowed device is never lost, so nothing has to be made again after the PC sleeps
@@ -4072,8 +4089,50 @@ void D3D9Backend::ApplySettings() {
     float want = app::RenderScale(guest_h_);
     float wide = PictureWide(guest_w_, guest_h_);
     bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
+    // a tool's d3d9.dll keeps the size the picture started at: RTX Remix path traces only into a target the back
+    // buffer's size, so new targets on the old back buffer lost its picture until a restart, and a reset that resized
+    // the swap chain with its DLSS frame generation on crashed in the driver about a second later (8 of 9 runs). A mod
+    // with a resize hook makes the reset safe (a few presents to ready the tool, d3d9_on_resize), and it goes ahead
+    const auto& hooks = mods::D3d9().resize;
+    bool tool_reset = false;
+    if (tool_ && !rescale && resize_wait_ >= 0) {  // set back as it waited: nothing to reset
+        resize_wait_ = -1;
+        for (const mods::ResizeHook& h : hooks) h.fn(dev_.Get(), RECOMP_RESIZE_DONE, 1, h.user);
+    }
+    if (tool_ && rescale) {
+        bool asked = std::fabs(want - held_scale_) > 1e-4f || std::fabs(wide - held_wide_) > 1e-4f;
+        held_scale_ = want;
+        held_wide_ = wide;
+        if (asked && resize_wait_ < 0 && !hooks.empty()) {
+            int wait = 0;
+            for (const mods::ResizeHook& h : hooks) {
+                int n = h.fn(dev_.Get(), RECOMP_RESIZE_SOON, 0, h.user);
+                wait = n < 0 || wait < 0 ? -1 : std::max(wait, std::min(n, 120));
+            }
+            if (wait < 0) {
+                for (const mods::ResizeHook& h : hooks) h.fn(dev_.Get(), RECOMP_RESIZE_DONE, 0, h.user);
+            } else {
+                resize_wait_ = wait;
+                LOGR("d3d9: render scale %.3f, picture %.3f wide after %d presents, as a mod asked", want, wide, wait);
+            }
+        }
+        if (resize_wait_ == 0) {
+            resize_wait_ = -1;
+            tool_reset = true;
+        } else {
+            if (resize_wait_ > 0) {
+                resize_wait_--;
+            } else if (asked) {
+                LOGR("d3d9: render scale %.3f, picture %.3f wide from the next start; this run keeps %.3f, %.3f wide",
+                     want, wide, scale_, wide_);
+            }
+            want = scale_;
+            wide = wide_;
+            rescale = false;
+        }
+    }
     if (!rescale && app::Get().vsync == vsync_) return;
-    bool reset = std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
+    bool reset = tool_reset || std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
     vsync_ = app::Get().vsync;
     scale_ = want;
     wide_ = wide;
@@ -4083,9 +4142,7 @@ void D3D9Backend::ApplySettings() {
     part_.side = part_.side_ds = Target{};
     dummies_.clear();
     prime_.Reset();
-    // a new render scale alone makes the targets again and keeps the back buffer, onto which the picture is stretched:
-    // under RTX Remix with DLSS frame generation on, a reset that resizes the swap chain crashed in the driver about a
-    // second later (8 of 9 runs from the front end, 0 of 8 with frame generation off, 0 of 6 with no reset)
+    // a new render scale alone makes the targets again and keeps the back buffer, onto which the picture is stretched
     if (!reset) {
         bound_rt_surf_ = bound_ds_surf_ = nullptr;
         Invalidate();
@@ -4111,12 +4168,16 @@ void D3D9Backend::ApplySettings() {
         hr = dev_->Reset(&pp);
         if (FAILED(hr) || !CreateDeviceObjects()) {
             LOGE("d3d9: reset failed (%08X), the device is lost until it can be reset", unsigned(hr));
+            if (tool_reset)
+                for (const mods::ResizeHook& h : hooks) h.fn(dev_.Get(), RECOMP_RESIZE_DONE, 0, h.user);
             return;
         }
         ImGui_ImplDX9_CreateDeviceObjects();
         lost_ = false;
     }
     bound_rt_surf_ = bound_ds_surf_ = nullptr;
+    if (tool_reset)
+        for (const mods::ResizeHook& h : hooks) h.fn(dev_.Get(), RECOMP_RESIZE_DONE, SUCCEEDED(hr), h.user);
     if (SUCCEEDED(hr)) {
         LOGR("d3d9: reset done");
         return;

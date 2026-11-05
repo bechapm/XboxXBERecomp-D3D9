@@ -6,8 +6,8 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 the port stays the port, and a mod is something a player chooses to add.
 
 The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
-game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`), 8 (`screen_box`), 9 (`stage_known`), 10 (`where`), 11 (`pick`) and 12
-(`d3d9_skinned_meshes`) are this SDK's so far, and a mod
+game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`), 8 (`screen_box`), 9 (`stage_known`), 10 (`where`), 11 (`pick`), 12
+(`d3d9_skinned_meshes`) and 13 (`d3d9_on_resize`) are this SDK's so far, and a mod
 checks for them. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
@@ -33,6 +33,7 @@ when it is called. The header is the field by field reference; this page is the 
 | Do something at the start or end of a frame | `d3d9_on_clear`, `d3d9_on_present` | D3D9 |
 | Give the mouse and keyboard to an overlay with its own cursor | `pointer_elsewhere` | any |
 | Have a model the game's hooks build whole drawn as one fixed-function skinned mesh | `d3d9_skinned_meshes` | D3D9 |
+| Make a D3D9 tool safe while the picture's size changes as the game runs | `d3d9_on_resize` | D3D9 |
 
 The D3D9 renderer is picked with `renderer = "d3d9"` in the settings file ([d3d9.md](d3d9.md)). Nothing in the
 contract names a game or a tool: a mod for one game checks the game it is loaded into and unloads itself from any
@@ -195,6 +196,7 @@ returns 0 / NULL).
 | `d3d9_fixed_transform` (v5) | once the device is made; see Changing a draw | – | ✓ | |
 | `pointer_elsewhere` (v6) | any time, any thread; each on paired with one off | ✓ | ✓ | |
 | `d3d9_skinned_meshes` (v12) | from init; the renderer must run on the game's thread (a mod with a draw hook) | – | ✓ | |
+| `d3d9_on_resize` (v13) | from init; called before and after a reset that changes the picture's size | – | ✓ | 8 |
 | `replaying` | any time | ✓ (0) | ✓ (0) | |
 | `capture_on_draw`, `capture_note`, `replay_on_note` | accepted, never called: this SDK makes no frame captures for replay | – | – | |
 
@@ -349,11 +351,19 @@ ignored.
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (12 here). The contract is shared with
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (13 here). The contract is shared with
 DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
 Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no new field), version 8's
-`RecompModDraw.screen_box`, version 9's `stage_known`, version 10's `where`, version 11's `pick` and version 12's
-`d3d9_skinned_meshes` are not in DirectXbox-Recomp yet.
+`RecompModDraw.screen_box`, version 9's `stage_known`, version 10's `where`, version 11's `pick`, version 12's
+`d3d9_skinned_meshes` and version 13's `d3d9_on_resize` are not in DirectXbox-Recomp yet.
+
+`d3d9_on_resize` is for a mod that knows its D3D9 tool. Under a tool loaded as `d3d9.dll` the renderer keeps the
+picture's size from the start until the next start (a new render scale, resolution or shape is saved and waits), since
+resetting the device can break a tool: RTX Remix with DLSS frame generation on crashed in the driver after one. With a
+hook registered the size changes live instead. The hook is called with `RECOMP_RESIZE_SOON` and answers how many
+presents it needs before the reset (up to 120), or below 0 when it cannot make it safe (the size then waits for the
+next start); after the reset it is called with `RECOMP_RESIZE_DONE` and whether the device took it. A mod that turns
+something of its tool off at `SOON` turns it back on at `DONE`.
 
 `d3d9_skinned_meshes(1)` lets a game's own hooks (`d3d::DrawSkinned`, `gpu::SkinnedMesh`) hand the renderer a model
 whole: vertices each with one matrix index, triangle lists by texture, up to 256 model-view matrices. It is drawn with

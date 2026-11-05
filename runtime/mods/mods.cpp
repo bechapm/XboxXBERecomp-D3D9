@@ -145,6 +145,10 @@ int CaptureOnDraw(void (*fn)(void*), void*) { return fn ? 1 : 0; }
 void CaptureNote(uint32_t, const void*, uint32_t) {}
 int ReplayOnNote(void (*fn)(uint32_t, const void*, uint32_t, void*), void*) { return fn ? 1 : 0; }
 
+int D3d9OnResize(RecompModResizeFn fn, void* user) {
+    return fn ? Add(g_d3d9.resize, kMaxHooks, ResizeHook{fn, user}) : 0;
+}
+
 int D3d9OnCopy(RecompModCopyFn fn, void* user) { return fn ? Add(g_d3d9.copy, kMaxHooks, CopyHook{fn, user}) : 0; }
 
 uint32_t DrawVertexBuffer(uint32_t* data, uint32_t* stride, uint32_t* first) {
@@ -220,6 +224,7 @@ RecompModApi MakeApi() {
     a.d3d9_fixed_transform = D3d9FixedTransform;
     a.pointer_elsewhere = PointerElsewhere;
     a.d3d9_skinned_meshes = D3d9SkinnedMeshes;
+    a.d3d9_on_resize = D3d9OnResize;
     return a;
 }
 const RecompModApi g_api = MakeApi();
