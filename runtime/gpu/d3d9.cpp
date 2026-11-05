@@ -765,6 +765,7 @@ private:
     // WORLD, VIEW and PROJECTION: the title's, or a mod's
     void HalfPixel(float* m) const;
     void FoldProjection(const State& s, GuestExtent size, const float* m, float* out) const;
+    void FoldScreenLines(const State& s, GuestExtent size, uint32_t scale_reg, uint32_t offset_reg, float* proj) const;
     void SetDeviceTransform(int i, const float* m);
     void SetTitleTransforms(const State& s, const Assembled& a, GuestExtent size);
     // the mods' draw hooks
@@ -2695,6 +2696,21 @@ static void ProgramMatrix(const State& s, int reg, float* m) {
         for (int c = 0; c < 4; c++) m[r * 4 + c] = s.vsc[size_t(reg + c)][size_t(r)];
 }
 
+// a program's projection with its two screen lines folded in: they take clip space to s * p / w + o in the guest's
+// pixels, the undo at the end of a program's shader (kVsEpilogue, surf) takes that back to the whole target, and
+// Sm3Position's host pixel offset. The host viewport is the whole target, so this is where a draw lands
+void D3D9Backend::FoldScreenLines(const State& s, GuestExtent size, uint32_t scale_reg, uint32_t offset_reg,
+                                  float* proj) const {
+    const auto& sc = s.vsc[size_t(scale_reg)];
+    const auto& of = s.vsc[size_t(offset_reg)];
+    float hw = float(bound_rt_ ? bound_rt_->w : bound_ds_->w), hh = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
+    float zs = 1.0f / s.zscale;
+    const float mul[3] = {2 * sc[0] / size.w, -2 * sc[1] / size.h, sc[2] * zs};
+    const float add[3] = {2 * of[0] / size.w - 1 - 1.0f / hw, 1 - 2 * of[1] / size.h + 1.0f / hh, of[2] * zs};
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 3; c++) proj[r * 4 + c] = proj[r * 4 + c] * mul[c] + proj[r * 4 + 3] * add[c];
+}
+
 // WORLD the program's model-view, VIEW identity: draws the same, and a mod that knows the camera moves it from one to the
 // other. PROJECTION the program's with what comes after it folded in: the screen lines take clip space to s * p / w + o,
 // the undo at the end of a program's shader (kVsEpilogue, surf) takes that back, and Sm3Position's host pixel offset
@@ -2703,14 +2719,7 @@ void D3D9Backend::PlainTransforms(const State& s, const PlainProgram& p, GuestEx
     if (p.modelview >= 0) ProgramMatrix(s, p.modelview, mv);
     else std::memcpy(mv, kIdentity, sizeof(mv));
     ProgramMatrix(s, p.projection, proj);
-    const auto& sc = s.vsc[size_t(p.screen_scale)];
-    const auto& of = s.vsc[size_t(p.screen_offset)];
-    float hw = float(bound_rt_ ? bound_rt_->w : bound_ds_->w), hh = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
-    float zs = 1.0f / s.zscale;
-    const float mul[3] = {2 * sc[0] / size.w, -2 * sc[1] / size.h, sc[2] * zs};
-    const float add[3] = {2 * of[0] / size.w - 1 - 1.0f / hw, 1 - 2 * of[1] / size.h + 1.0f / hh, of[2] * zs};
-    for (int r = 0; r < 4; r++)
-        for (int c = 0; c < 3; c++) proj[r * 4 + c] = proj[r * 4 + c] * mul[c] + proj[r * 4 + 3] * add[c];
+    FoldScreenLines(s, size, uint32_t(p.screen_scale), uint32_t(p.screen_offset), proj);
     SetDeviceTransform(0, mv);
     SetDeviceTransform(1, kIdentity);
     SetDeviceTransform(2, proj);
@@ -3810,11 +3819,14 @@ void D3D9Backend::DrawSkinned(const State& s, const SkinnedMesh& m) {
     ib16_at_ += ibytes;
 
     static const std::vector<DeclElement> kElements = [] {
-        std::vector<DeclElement> el(4);
+        std::vector<DeclElement> el(5);
         el[0].type = D3DDECLTYPE_FLOAT3, el[0].usage = D3DDECLUSAGE_POSITION, el[0].offset = 0;
         el[1].type = D3DDECLTYPE_FLOAT3, el[1].usage = D3DDECLUSAGE_NORMAL, el[1].offset = 12;
         el[2].type = D3DDECLTYPE_FLOAT2, el[2].usage = D3DDECLUSAGE_TEXCOORD, el[2].offset = 24;
         el[3].type = D3DDECLTYPE_UBYTE4, el[3].usage = D3DDECLUSAGE_BLENDINDICES, el[3].offset = 32;
+        // Remix skins only a draw whose declaration has blend weights (rtx_geometry_utils dispatchSkinning), even for
+        // D3DVBF_0WEIGHTS, where it takes the one matrix wholly and never reads them
+        el[4].type = D3DDECLTYPE_FLOAT1, el[4].usage = D3DDECLUSAGE_BLENDWEIGHT, el[4].offset = 36;
         for (auto& e : el) e.reg = -1, e.stream = 0, e.index = 0;
         return el;
     }();
@@ -3833,10 +3845,12 @@ void D3D9Backend::DrawSkinned(const State& s, const SkinnedMesh& m) {
         dev_->SetTransform(D3DTS_WORLDMATRIX(i), reinterpret_cast<const D3DMATRIX*>(m.matrices + 16 * i));
     dev_xf_ok_[0] = false;  // WORLD is WORLDMATRIX(0)
     SetDeviceTransform(1, kIdentity);
-    float raw[16], proj[16];
-    for (int r = 0; r < 4; r++)
-        for (int c = 0; c < 4; c++) raw[r * 4 + c] = s.vsc[size_t(preg + c)][size_t(r)];
-    FoldProjection(s, size, raw, proj);
+    // the projection and screen lines of the program draw this stands in for: a title may draw into part of the screen
+    // with the screen lines alone, its viewport staying whole (seen: a character select's model in a box a third of the
+    // screen wide), and the viewport would put the mesh several times too big
+    float proj[16];
+    ProgramMatrix(s, preg, proj);
+    FoldScreenLines(s, size, kViewportScaleConstant, kViewportOffsetConstant, proj);
     if (place_.On()) {
         float placed[16];
         PlaceMatrix(place_, proj, placed);

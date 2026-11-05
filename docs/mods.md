@@ -358,9 +358,14 @@ Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no 
 `d3d9_skinned_meshes(1)` lets a game's own hooks (`d3d::DrawSkinned`, `gpu::SkinnedMesh`) hand the renderer a model
 whole: vertices each with one matrix index, triangle lists by texture, up to 256 model-view matrices. It is drawn with
 indexed vertex blending (`D3DRS_INDEXEDVERTEXBLENDENABLE`, `D3DVBF_0WEIGHTS`, `D3DTS_WORLDMATRIX(i)`), VIEW identity and
-the title's program projection, so a tool that takes a fixed-function skinned draw as one object sees one where the
-title's vertex programs draw many pieces of a few matrices. Those draws do not reach `d3d9_on_draw`. Without the call, or
-under another renderer, the hooks draw as the title does.
+the title's program projection with the program's screen lines (c-38, c-37) folded in, so it lands where the title's
+draw would even when the title draws into part of the screen by those lines alone. Every vertex also carries a
+`BLENDWEIGHT` of 1, never read under `D3DVBF_0WEIGHTS`: RTX Remix skins a draw only when its declaration has one. A tool
+that skins a fixed-function draw itself and takes it as one object (Remix, up to 256 bones, in what it ray traces) then
+sees one where the title's vertex programs draw many pieces of a few matrices. A rasterizer's fixed function addresses
+matrices 0 to 8 only (`MaxVertexBlendMatrixIndex` 8 on D3D9 and on Remix's, measured), so a mod turns this on only under
+such a tool; what a tool rasterizes (a menu it does not ray trace) still shows broken. Those draws do not reach
+`d3d9_on_draw`. Without the call, or under another renderer, the hooks draw as the title does.
 
 ## Where a change belongs
 

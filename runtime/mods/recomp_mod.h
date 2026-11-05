@@ -317,11 +317,15 @@ typedef struct RecompModApi {
     /* On: a model the game's own hooks can give whole is drawn as one
      * skinned mesh per texture by D3D9's fixed function -- indexed vertex
      * blending, D3DTS_WORLDMATRIX(0..255) each a bone's model-view, VIEW
-     * identity, PROJECTION the title's -- rather than in the pieces of a few
-     * matrices its vertex programs draw it in. For a tool that takes a
-     * fixed-function skinned draw as one object. Needs the renderer on the
-     * game's thread (a mod that hooks draws); these draws are not shown to
-     * d3d9_on_draw. */
+     * identity, PROJECTION the title's with its program's screen lines
+     * (c-38, c-37) folded in, one BLENDWEIGHT of 1 per vertex beside the
+     * index -- rather than in the pieces of a few matrices its vertex
+     * programs draw it in. For a tool that skins a fixed-function draw
+     * itself and takes it as one object (RTX Remix, up to 256 bones, in what
+     * it ray traces). A rasterizer's fixed function addresses matrices 0 to 8
+     * only (MaxVertexBlendMatrixIndex 8 on D3D9 and on Remix's), so turn it
+     * on only under such a tool. Needs the renderer on the game's thread (a
+     * mod that hooks draws); these draws are not shown to d3d9_on_draw. */
     void (*d3d9_skinned_meshes)(int on);
 } RecompModApi;
 

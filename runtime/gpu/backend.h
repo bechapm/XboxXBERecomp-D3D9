@@ -15,7 +15,10 @@ enum : uint32_t {
 };
 
 // A mesh a game's hook built and has skinned by fixed function: one matrix per vertex, by index (D3D9's indexed vertex
-// blending, up to 256 matrices), each run a triangle list with one texture. For a model the title draws in many pieces
+// blending, up to 256 matrices), each run a triangle list with one texture. Drawn in place of one of the title's vertex
+// program draws, on the screen as that program puts it (its two screen lines, kViewportScaleConstant and
+// kViewportOffsetConstant). Devices offer only matrices 0 to 8 to fixed function (MaxVertexBlendMatrixIndex 8 on
+// D3D9 and on RTX Remix, measured), so this is for a tool that skins whole meshes itself (Remix: up to 256 bones). For a model the title draws in many pieces
 // of a few matrices each (a vertex program's registers hold no more), so that a tool reading fixed function draws
 // (RTX Remix) sees it whole
 struct SkinnedVertex {
@@ -23,6 +26,9 @@ struct SkinnedVertex {
     float normal[3];
     float uv[2];
     uint32_t matrix;  // 0..255
+    // never read by fixed function (D3DVBF_0WEIGHTS: the one matrix, wholly), but RTX Remix skins a draw only when its
+    // declaration has a BLENDWEIGHT, and otherwise places the vertices as they are, in their matrices' spaces
+    float weight = 1.0f;
 };
 struct SkinnedRun {
     uint32_t texture;  // the guest D3D texture header, or 0
