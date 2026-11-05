@@ -6,7 +6,8 @@ a library beside it. The SDK gives such libraries one small, versioned C contrac
 the port stays the port, and a mod is something a player chooses to add.
 
 The contract is the DirectXbox-Recomp toolkit's, field for field up to version 5, so one build of a mod loads under a
-game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`), 8 (`screen_box`), 9 (`stage_known`), 10 (`where`) and 11 (`pick`) are this SDK's so far, and a mod
+game built with either; versions 6 (`pointer_elsewhere`), 7 (`RECOMP_DRAW_DEFER`), 8 (`screen_box`), 9 (`stage_known`), 10 (`where`), 11 (`pick`) and 12
+(`d3d9_skinned_meshes`) are this SDK's so far, and a mod
 checks for them. This page is the modder's guide: what a mod can do here, how to build and load one, every hook and
 when it is called. The header is the field by field reference; this page is the map.
 
@@ -31,6 +32,7 @@ when it is called. The header is the field by field reference; this page is the 
 | Replace what a mirror, monitor or blur reads | `d3d9_on_copy` | D3D9 |
 | Do something at the start or end of a frame | `d3d9_on_clear`, `d3d9_on_present` | D3D9 |
 | Give the mouse and keyboard to an overlay with its own cursor | `pointer_elsewhere` | any |
+| Have a model the game's hooks build whole drawn as one fixed-function skinned mesh | `d3d9_skinned_meshes` | D3D9 |
 
 The D3D9 renderer is picked with `renderer = "d3d9"` in the settings file ([d3d9.md](d3d9.md)). Nothing in the
 contract names a game or a tool: a mod for one game checks the game it is loaded into and unloads itself from any
@@ -192,6 +194,7 @@ returns 0 / NULL).
 | `draw_vertex_buffer` (v4) | inside a draw hook | – (0) | ✓ | |
 | `d3d9_fixed_transform` (v5) | once the device is made; see Changing a draw | – | ✓ | |
 | `pointer_elsewhere` (v6) | any time, any thread; each on paired with one off | ✓ | ✓ | |
+| `d3d9_skinned_meshes` (v12) | from init; the renderer must run on the game's thread (a mod with a draw hook) | – | ✓ | |
 | `replaying` | any time | ✓ (0) | ✓ (0) | |
 | `capture_on_draw`, `capture_note`, `replay_on_note` | accepted, never called: this SDK makes no frame captures for replay | – | – | |
 
@@ -346,10 +349,23 @@ ignored.
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (8 here). The contract is shared with
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (12 here). The contract is shared with
 DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
 Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no new field), version 8's
-`RecompModDraw.screen_box`, version 9's `stage_known`, version 10's `where` and version 11's `pick` are not in DirectXbox-Recomp yet.
+`RecompModDraw.screen_box`, version 9's `stage_known`, version 10's `where`, version 11's `pick` and version 12's
+`d3d9_skinned_meshes` are not in DirectXbox-Recomp yet.
+
+`d3d9_skinned_meshes(1)` lets a game's own hooks (`d3d::DrawSkinned`, `gpu::SkinnedMesh`) hand the renderer a model
+whole: vertices each with one matrix index, triangle lists by texture, up to 256 model-view matrices. It is drawn with
+indexed vertex blending (`D3DRS_INDEXEDVERTEXBLENDENABLE`, `D3DVBF_0WEIGHTS`, `D3DTS_WORLDMATRIX(i)`), VIEW identity and
+the title's program projection with the program's screen lines (c-38, c-37) folded in, so it lands where the title's
+draw would even when the title draws into part of the screen by those lines alone. Every vertex also carries a
+`BLENDWEIGHT` of 1, never read under `D3DVBF_0WEIGHTS`: RTX Remix skins a draw only when its declaration has one. A tool
+that skins a fixed-function draw itself and takes it as one object (Remix, up to 256 bones, in what it ray traces) then
+sees one where the title's vertex programs draw many pieces of a few matrices. A rasterizer's fixed function addresses
+matrices 0 to 8 only (`MaxVertexBlendMatrixIndex` 8 on D3D9 and on Remix's, measured), so a mod turns this on only under
+such a tool; what a tool rasterizes (a menu it does not ray trace) still shows broken. Those draws do not reach
+`d3d9_on_draw`. Without the call, or under another renderer, the hooks draw as the title does.
 
 ## Where a change belongs
 

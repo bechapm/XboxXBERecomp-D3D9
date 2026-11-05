@@ -100,6 +100,9 @@ bool PlainTransform(const std::vector<uint32_t>& program, PlainProgram& out);
 bool ReadsConstant(const std::vector<uint32_t>& program, uint32_t reg);
 // the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
 bool ReadsViewportOffset(const std::vector<uint32_t>& program);
+// the XDK's screen lines, in hardware order (c-96 is 0): a program takes clip space to scale * p / w + offset
+constexpr uint32_t kViewportScaleConstant = 58;   // c-38
+constexpr uint32_t kViewportOffsetConstant = 59;  // c-37
 // the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
 // names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
 inline int g_projection_register = -1;

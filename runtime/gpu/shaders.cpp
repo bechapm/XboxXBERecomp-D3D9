@@ -1057,7 +1057,6 @@ StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular) 
 }
 
 constexpr uint32_t kMuxConstant = 3;
-constexpr uint32_t kViewportOffsetConstant = 59;  // c-37: constants start at c-96
 
 bool ReadsConstant(const std::vector<uint32_t>& prog, uint32_t reg) {
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
