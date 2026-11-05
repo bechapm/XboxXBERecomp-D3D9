@@ -1330,7 +1330,7 @@ void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputU
 }
 
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode,
-                              const InputUsages* usages) {
+                              const InputUsages* usages, int double_d0) {
     // Shader Model 3: the normal as the program rotated it goes out as NORMAL for a mod that defines RHI_MOD_NORMAL,
     // so a tool reading vertex outputs (RTX Remix) gets it after the program's skinning; only from a program that
     // rotates one, a tool would take any other program's zero for its normal
@@ -1378,6 +1378,19 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         if (k.f(3, 0, 1)) break;  // last instruction
     }
     s += kVsEpilogue;
+    if (double_d0) {
+        // the stage's 2x moved into the colour written, where a tool reading vertex outputs takes it; the pixel shader
+        // halves it back (PixelKey::half_d0)
+        const char* kD = "    o.d0 = saturate(oD0);\n", *kB = "    o.b0 = saturate(oB0);\n";
+        std::string d = double_d0 == 2 ? "    o.d0 = any(oD0.rgb > 0.502) ? float4(1, 0, 1, saturate(oD0.a)) : saturate(oD0 * float4(2, 2, 2, 1));\n"
+                                       : "    o.d0 = saturate(oD0 * float4(2, 2, 2, 1));\n";
+        std::string b = double_d0 == 2 ? "    o.b0 = any(oB0.rgb > 0.502) ? float4(1, 0, 1, saturate(oB0.a)) : saturate(oB0 * float4(2, 2, 2, 1));\n"
+                                       : "    o.b0 = saturate(oB0 * float4(2, 2, 2, 1));\n";
+        size_t at = s.rfind(kD);
+        if (at != std::string::npos) s.replace(at, std::strlen(kD), d);
+        at = s.rfind(kB);
+        if (at != std::string::npos) s.replace(at, std::strlen(kB), b);
+    }
     if (normal) {
         size_t at = s.rfind("    return o;\n");
         s.insert(at, "#ifdef RHI_MOD_NORMAL\n    o.normal = xnormal;\n    RHI_MOD_NORMAL(o.normal);\n#endif\n");
@@ -1543,6 +1556,7 @@ std::string PixelHlsl(const PixelKey& k) {
     }
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
+    if (k.half_d0) s += "    v0.rgb *= 0.5;\n";
     s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
     s += "    float4 fogin = float4(fogcolor.rgb, saturate(i.fogamt));\n";
     std::string body;
