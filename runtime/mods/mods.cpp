@@ -185,9 +185,11 @@ void PointerElsewhere(int on) {
     input::PointerWant(false);
 }
 
+// logged the first time only: a mod may switch it within each frame (off once its tool rasterises the rest)
 void D3d9SkinnedMeshes(int on) {
     d3d::g_skinned_meshes = on != 0;
-    LOGR("mods: skinned meshes %s", on ? "on" : "off");
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true)) LOGR("mods: skinned meshes %s", on ? "on" : "off");
 }
 
 RecompModApi MakeApi() {
