@@ -23,6 +23,32 @@ set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(SDL3 GIT_REPOSITORY https://github.com/libsdl-org/SDL.git GIT_TAG release-3.4.16 GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(zydis tomlplusplus imgui SDL3)
 
+# Steam Audio, for sound through the level (runtime/audio/acoustics.cpp): its phonon.dll beside the executable, which
+# loads it when a game's level and the acoustics setting ask for it. Its release is 181 MB and kept in the build folder
+# only until the DLL and its notices are out of it. XBE_STEAM_AUDIO=OFF, or no download, leaves it out: sounds then play
+# as the console played them
+option(XBE_STEAM_AUDIO "Steam Audio's phonon.dll beside the executable" ON)
+set(XBE_STEAM_AUDIO_DIR ${CMAKE_BINARY_DIR}/steamaudio)
+if(XBE_STEAM_AUDIO AND WIN32 AND NOT EXISTS ${XBE_STEAM_AUDIO_DIR}/phonon.dll)
+    set(zip ${XBE_STEAM_AUDIO_DIR}/steamaudio_4.8.1.zip)
+    message(STATUS "Downloading Steam Audio 4.8.1")
+    file(DOWNLOAD https://github.com/ValveSoftware/steam-audio/releases/download/v4.8.1/steamaudio_4.8.1.zip ${zip}
+         STATUS status)
+    list(GET status 0 code)
+    if(code EQUAL 0)
+        file(SHA256 ${zip} hash)
+    endif()
+    if(code EQUAL 0 AND hash STREQUAL "4a0aa5ec1176f38f0b0993a37c2259d9e86f27e22d5e24f83ec4c3cb9a1d5449")
+        file(ARCHIVE_EXTRACT INPUT ${zip} DESTINATION ${XBE_STEAM_AUDIO_DIR}/x
+             PATTERNS steamaudio/lib/windows-x64/phonon.dll steamaudio/THIRDPARTY.md)
+        file(COPY_FILE ${XBE_STEAM_AUDIO_DIR}/x/steamaudio/THIRDPARTY.md ${XBE_STEAM_AUDIO_DIR}/steamaudio-THIRDPARTY.md)
+        file(COPY_FILE ${XBE_STEAM_AUDIO_DIR}/x/steamaudio/lib/windows-x64/phonon.dll ${XBE_STEAM_AUDIO_DIR}/phonon.dll)
+    else()
+        message(WARNING "Steam Audio was not downloaded (${status}): sounds play without the level's walls")
+    endif()
+    file(REMOVE_RECURSE ${zip} ${XBE_STEAM_AUDIO_DIR}/x)
+endif()
+
 # What the game needs to build its code on the player's PC (runtime/app/game_code.cpp), beside the executables: the
 # recompiler, clang and lld from the toolchain building this, the game's configs, the XDK layouts they include and the
 # headers the generated code includes
@@ -124,6 +150,11 @@ function(add_xbe_image target xbe config partitions game_dir)
     # an executable relinked with the same exports leaves its DLL be, which the first start would take as stale
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E touch_nocreate $<TARGET_FILE_DIR:${target}>/${target}.dll)
+    if(EXISTS ${XBE_STEAM_AUDIO_DIR}/phonon.dll)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${XBE_STEAM_AUDIO_DIR}/phonon.dll
+                    ${XBE_STEAM_AUDIO_DIR}/steamaudio-THIRDPARTY.md $<TARGET_FILE_DIR:${target}>)
+    endif()
 
     # without a C runtime: the executable passes on what the code calls
     add_library(${target}_code SHARED ${GEN_SOURCES})

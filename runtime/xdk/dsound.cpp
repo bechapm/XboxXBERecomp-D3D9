@@ -4,11 +4,13 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <optional>
 #include <vector>
 
+#include "audio/acoustics.h"
 #include "audio/audio.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
@@ -158,6 +160,11 @@ struct Voice {
     float itd = 0;
     float ear[kEarLength] = {};
     uint32_t ear_pos = 0;
+    // sound through the level (audio/acoustics.h): the last block's low, middle and high gains, and each channel's two
+    // low passes that split it into those bands
+    bool walls = false;
+    float band[3] = {1, 1, 1};
+    float split[kMaxChannels][2] = {};
     // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
     int64_t block[2] = {-1, -1};
     uint8_t last = 0;  // decoded[last] holds block[last]
@@ -560,9 +567,47 @@ std::optional<Cursor> BufferFrame(Voice& v) {
     return at;
 }
 
+// a 3D voice's place in the listener's world: a head relative one turned and moved by the listener
+void WorldPosition(const Voice& v, float out[3]) {
+    if (v.mode != 1) {
+        std::memcpy(out, v.p, sizeof v.p);
+        return;
+    }
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    for (int i = 0; i < 3; i++) out[i] = g_listener[i] + right[i] * v.p[0] + g_top[i] * v.p[1] + g_front[i] * v.p[2];
+}
+
+// what the level lets through to a 3D voice, low, middle and high band (audio/acoustics.h); false: it plays as it is
+bool Walls(const Voice& v, const Place& at, float out[3]) {
+    if (!at.on) return false;
+    float pos[3];
+    WorldPosition(v, pos);
+    return audio::acoustics::Gains(v.obj, pos, g_listener, out);
+}
+
+// a channel split at 800 Hz and 8 kHz by two one pole low passes at the output rate, 1 - exp(-2 pi f / 48000), the bands
+// Steam Audio's materials are given in; the three bands add up to the sample again
+constexpr float kLowSplit = 0.0994231f;
+constexpr float kHighSplit = 0.6490802f;
+float Through(float x, float* split, const float* gain) {
+    split[0] += kLowSplit * (x - split[0]);
+    split[1] += kHighSplit * (x - split[1]);
+    return gain[0] * split[0] + gain[1] * (split[1] - split[0]) + gain[2] * (x - split[1]);
+}
+
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
     Place at = Locate(v);
+    // a voice the level stops filtering is ramped back to every band whole over one block, then left alone
+    float walls[3] = {1, 1, 1};
+    bool through = Walls(v, at, walls);
+    bool filter = through || v.walls;
+    float band[3], band_step[3];
+    for (int b = 0; b < 3; b++) {
+        band[b] = v.band[b];
+        band_step[b] = (walls[b] - v.band[b]) / float(frames);
+    }
     Gains target = Levels(v, at);
     float itd = Itd(at.azimuth);
     if (!v.has_gain) {
@@ -590,6 +635,11 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
             float x = Sample(v, cursor->data, cursor->f, int(c));
             row[c] = x + (Sample(v, cursor->next_data, cursor->next_f, int(c)) - x) * t;
         }
+        if (filter) {
+            for (int b = 0; b < 3; b++) band[b] += band_step[b];
+            for (uint32_t c = 0; c < channels; c++)
+                if (read >> c & 1) row[c] = Through(row[c], v.split[c], band);
+        }
         if (ears) {
             v.itd += itd_step;
             PushEar(v, row[0]);
@@ -605,6 +655,8 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     }
     v.gain = target;
     v.itd = itd;
+    std::memcpy(v.band, walls, sizeof walls);
+    v.walls = through;
 }
 
 void Render(float* out, uint32_t frames) {
@@ -950,6 +1002,7 @@ BUFFER(Release, 1) {
     if (v.owned) mem::FreeContiguous(v.owned);
     uint32_t obj = v.obj;
     g_voices.erase(obj);
+    audio::acoustics::Forget(obj);
     mem::FreeSystem(obj);
     return 0;
 }
@@ -1165,6 +1218,7 @@ STREAM(Release, 1) {
     FlushStream(v);
     uint32_t obj = v.obj;
     g_voices.erase(obj);
+    audio::acoustics::Forget(obj);
     mem::FreeSystem(obj);
     return 0;
 }

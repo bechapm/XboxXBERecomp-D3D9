@@ -69,6 +69,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### Audio
 - **DirectSound** - Mixes sound in software through XAudio2, with Xbox ADPCM, streams, mix bins and the effects image.
+- **Sound Through Walls** - A game can hand over its level's surfaces and what each is made of (`runtime/audio/acoustics.h`), and every 3D sound is then muffled by what lies between it and the listener, by band, as much as each material lets through. The rays are Steam Audio's, loaded from `phonon.dll` beside the exe when present; `acoustics` and `acoustics_strength` in the settings file, `XBE_ACOUSTICS=0` or `1` to override.
 
 ### Input
 - **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
@@ -90,5 +91,5 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 ## Credits
 
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) for the overridable function layout and instruction hooks this follows.
-- [Zydis](https://github.com/zyantific/zydis) for decoding x86 instructions, [toml++](https://github.com/marzer/tomlplusplus) for the configs, [Dear ImGui](https://github.com/ocornut/imgui) for the settings overlay and [SDL](https://github.com/libsdl-org/SDL) for the window, input and controllers.
+- [Zydis](https://github.com/zyantific/zydis) for decoding x86 instructions, [toml++](https://github.com/marzer/tomlplusplus) for the configs, [Dear ImGui](https://github.com/ocornut/imgui) for the settings overlay and [SDL](https://github.com/libsdl-org/SDL) for the window, input and controllers, and [Steam Audio](https://github.com/ValveSoftware/steam-audio) for sound through walls.
 - [xemu](https://github.com/xemu-project/xemu) and [Cxbx-Reloaded](https://github.com/Cxbx-Reloaded/Cxbx-Reloaded) as references for the Xbox's hardware and API behaviour. This project does not use emulation or any emulator code.
