@@ -109,6 +109,10 @@ inline int g_projection_register = -1;
 // every draw as lines, whatever the game's fill mode: a game's debugging tools set it while it runs. Read as each draw
 // is made, on the game's thread, so a host overlay clears it around its own draws to stay readable
 inline std::atomic<bool> g_wireframe{false};
+// the front of a draw that culls nothing, for a ray tracer reading Direct3D 9 (docs/d3d9.md, front faces for a ray
+// tracer): 0 off, 1 auto (counter clockwise once the title has culled clockwise and never counter clockwise), 2 clockwise
+// (Direct3D 9's own), 3 counter clockwise. The game repo names its own; XBE_D3D9_CULLNONE_FRONT (off, auto, cw, ccw) wins
+inline int g_cullnone_front = 0;
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:
