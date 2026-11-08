@@ -69,7 +69,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### Audio
 - **DirectSound** - Mixes sound in software through XAudio2, with Xbox ADPCM, streams, mix bins and the effects image.
-- **Sound Through Walls** - A game can hand over its level's surfaces and what each is made of (`runtime/audio/acoustics.h`), and every 3D sound is then muffled by what lies between it and the listener, by band, as much as each material lets through. The rays are Steam Audio's, loaded from `phonon.dll` beside the exe when present; `acoustics` and `acoustics_strength` in the settings file, `XBE_ACOUSTICS=0` or `1` to override.
+- **Sound Through Walls** - A game can hand over its level's surfaces and what each is made of (`runtime/audio/acoustics.h`), and every 3D sound is then muffled by what lies between it and the listener, by band, as much as each material lets through. The rays are Steam Audio's, loaded from `phonon.dll` beside the exe when present; `acoustics` and `acoustics_strength` in the settings file, `XBE_ACOUSTICS=0` or `1` to override, `XBE_ACOUSTICS_LOG=1` to log the listener and the sounds behind walls.
 
 ### Input
 - **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
