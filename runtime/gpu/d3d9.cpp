@@ -757,9 +757,8 @@ private:
     void ApplySettings();
 
     HMODULE lib_ = nullptr;
-    // d3d9.dll is a tool's, from beside the exe and not Windows' own: the picture keeps its size from the start
+    // d3d9.dll is a tool's, from beside the exe and not Windows' own: a new render scale resizes the back buffer too
     bool tool_ = false;
-    float held_scale_ = 0, held_wide_ = 0;  // what a settings change asked for while it is kept, told once
     ComPtr<IDirect3D9> d3d_;
     ComPtr<IDirect3D9Ex> d3d_ex_;
     ComPtr<IDirect3DDevice9> dev_;
@@ -957,8 +956,7 @@ bool D3D9Backend::CreateDevice(HWND hwnd) {
     std::wstring_view loaded(path);
     std::wstring dir(loaded.substr(0, std::min(loaded.rfind(L'\\'), loaded.size())));
     tool_ = !path[0] || lstrcmpiW(dir.c_str(), sys) != 0;
-    app::SetSizeAtStart(tool_);
-    if (tool_) LOGR("d3d9: a tool's d3d9.dll draws, the picture keeps its size until the next start");
+    if (tool_) LOGR("d3d9: a tool's d3d9.dll draws, a new render scale resets the back buffer to its size");
     using Create9Ex = HRESULT(WINAPI*)(UINT, IDirect3D9Ex**);
     using Create9 = IDirect3D9*(WINAPI*)(UINT);
     // Ex first: its windowed device is never lost, so nothing has to be made again after the PC sleeps
@@ -3245,21 +3243,13 @@ void D3D9Backend::ApplySettings() {
     float want = app::RenderScale(guest_h_);
     float wide = PictureWide(guest_w_, guest_h_);
     bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
-    // a tool's d3d9.dll keeps the size the picture started at: RTX Remix path traces only into a target the back
-    // buffer's size, so new targets on the old back buffer lost its picture until a restart, and a reset that resized
-    // the swap chain with its DLSS frame generation on crashed in the driver about a second later (8 of 9 runs)
-    if (tool_ && rescale) {
-        if (std::fabs(want - held_scale_) > 1e-4f || std::fabs(wide - held_wide_) > 1e-4f)
-            LOGR("d3d9: render scale %.3f, picture %.3f wide from the next start; this run keeps %.3f, %.3f wide", want,
-                 wide, scale_, wide_);
-        held_scale_ = want;
-        held_wide_ = wide;
-        want = scale_;
-        wide = wide_;
-        rescale = false;
-    }
+    // under a tool's d3d9.dll a new render scale resets with the back buffer resized: RTX Remix path traces only into
+    // a target the back buffer's size, so new targets on the old back buffer lost its picture until a restart. With
+    // its DLSS frame generation on, that reset crashed in the driver about a second later (8 of 9 runs) unless a mod
+    // pauses frame generation around it, so the reset is the mod's to make safe, and the size stays live
+    bool tool_reset = tool_ && rescale;
     if (!rescale && app::Get().vsync == vsync_) return;
-    bool reset = std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
+    bool reset = tool_reset || std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
     vsync_ = app::Get().vsync;
     scale_ = want;
     wide_ = wide;
