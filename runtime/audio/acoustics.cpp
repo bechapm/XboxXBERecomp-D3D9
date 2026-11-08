@@ -84,6 +84,10 @@ bool g_started = false;
 std::atomic<bool> g_on{false};
 std::atomic<float> g_strength{1.0f};
 std::atomic<int> g_state{0};  // 0 not tried, 1 loaded, -1 unavailable
+bool g_log = [] {  // XBE_ACOUSTICS_LOG=1: where the listener is and how many sounds are blocked, every five seconds
+    const char* v = std::getenv("XBE_ACOUSTICS_LOG");
+    return v && *v && std::strcmp(v, "0") != 0;
+}();
 
 bool Env(const char* name, bool& value) {
     const char* v = std::getenv(name);
@@ -234,6 +238,7 @@ void Run() {
     g_state = 1;
     float listener[3] = {};
     std::vector<Job> jobs;
+    int64_t said = NowMs();
     for (;;) {
         std::optional<Scene> level;
         float meters;
@@ -324,6 +329,13 @@ void Run() {
             g_ipl.iplSourceGetOutputs(it->second, IPL_SIMULATIONFLAGS_DIRECT, &out);
             float open = std::clamp(out.direct.occlusion, 0.0f, 1.0f);
             for (int b = 0; b < 3; b++) target[b] = open + (1 - open) * std::clamp(out.direct.transmission[b], 0.0f, 1.0f);
+        }
+        if (g_log && NowMs() - said >= 5000) {
+            said = NowMs();
+            uint32_t blocked = 0;
+            for (const auto& [id, sound] : g_sounds) blocked += sound.target[1] < 0.5f;
+            LOGR("acoustics: listener %.2f %.2f %.2f, %zu sounds, %u behind walls", listener[0], listener[1], listener[2],
+                 g_sounds.size(), blocked);
         }
     }
 }
