@@ -2656,9 +2656,11 @@ uint32_t PrimitiveCount(const Assembled& a, uint32_t n) {
 void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride,
                              const Geometry& g) {
     // The pass draws the same triangles again, black, with the darkening as its coverage. Its colour comes in a
-    // stream of its own (the only element the pass changes), so its vertex layout differs from the draw it follows
-    // and a renderer that keys draws by their layout keeps the two apart. The black is the texture factor on stage 1,
-    // never a vertex colour of 0.
+    // stream of its own (the only element the pass changes), and each triangle's indices start one along (a b c drawn
+    // b c a: the same triangles, the same winding). A renderer that keys draws by their indices, as RTX Remix keys its
+    // instances, then keeps the pass apart from the draw it follows instead of taking it for the same one; the layout
+    // alone does not (70 instances of a decal in a capture, 140 with the indices turned). The black is the texture
+    // factor on stage 1, never a vertex colour of 0.
     std::vector<DeclElement> el2 = el;
     DeclElement* col = nullptr;
     for (DeclElement& e : el2)
@@ -2673,6 +2675,32 @@ void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>&
         LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw uses stage 1");
         return;
     }
+    // how far the draw's own vertex colour darkens: only a colour multiplied by it, whose neutral value is 1, 0.5
+    // or 0.25 by the operation's scale. Its coverage is its own alpha operation, which must take the vertex alpha
+    // the pass changes
+    auto diffuse_scale = [&](D3DTEXTURESTAGESTATETYPE op_t, D3DTEXTURESTAGESTATETYPE a1, D3DTEXTURESTAGESTATETYPE a2) {
+        DWORD op = 0, x = 0, y = 0;
+        dev_->GetTextureStageState(0, op_t, &op);
+        dev_->GetTextureStageState(0, a1, &x);
+        dev_->GetTextureStageState(0, a2, &y);
+        bool diffuse = (x & D3DTA_SELECTMASK) == D3DTA_DIFFUSE || (y & D3DTA_SELECTMASK) == D3DTA_DIFFUSE;
+        if (!diffuse || (x & ~D3DTA_SELECTMASK) || (y & ~D3DTA_SELECTMASK)) return 0.0f;
+        return op == D3DTOP_MODULATE ? 1.0f : op == D3DTOP_MODULATE2X ? 2.0f : op == D3DTOP_MODULATE4X ? 4.0f : 0.0f;
+    };
+    float scale = diffuse_scale(D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_COLORARG2);
+    if (!scale) {
+        LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw's colour is not multiplied by its vertex colour");
+        return;
+    }
+    if (!diffuse_scale(D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2)) {
+        LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw's alpha is not multiplied by its vertex alpha");
+        return;
+    }
+    // XBE_D3D9_DARKEN_FULL=1, to see where the passes land: every vertex at full coverage
+    static const bool full = [] {
+        const char* v = std::getenv("XBE_D3D9_DARKEN_FULL");
+        return v && v[0] == '1';
+    }();
     uint32_t n = a.vertex_count;
     uint8_t* out = nullptr;
     uint32_t at = RingVertices(nullptr, n * 4, reinterpret_cast<void**>(&out));
@@ -2686,7 +2714,7 @@ void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>&
         else ReadElement(ve.format, col->decode, src, f);
         if (col->swap) std::swap(f[0], f[2]);
         float bright = std::max(f[0], std::max(f[1], f[2]));
-        f[3] = std::clamp(f[3] * (1.0f - 2.0f * bright), 0.0f, 1.0f);
+        f[3] = full ? 1.0f : std::clamp(f[3] * (1.0f - scale * bright), 0.0f, 1.0f);
         uint32_t c = PackColor4(f);
         std::memcpy(out + size_t(v) * 4, &c, 4);
     }
@@ -2712,9 +2740,6 @@ void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>&
     dev_->GetRenderState(D3DRS_TEXTUREFACTOR, &factor);
     dev_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
     dev_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
-    dev_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE2X);
-    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
     dev_->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_MODULATE);
     dev_->SetTextureStageState(1, D3DTSS_COLORARG1, D3DTA_CURRENT);
     dev_->SetTextureStageState(1, D3DTSS_COLORARG2, D3DTA_TFACTOR);
@@ -2723,14 +2748,8 @@ void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>&
     dev_->SetTextureStageState(2, D3DTSS_COLOROP, D3DTOP_DISABLE);
     dev_->SetTextureStageState(2, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
     dev_->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFF000000u);
-    // XBE_D3D9_DARKEN_ROTATE=1: each triangle's indices start one along (a b c drawn b c a), the same triangles
-    // with the same winding, for a renderer that keys draws by their indices
-    static const bool rotate = [] {
-        const char* v = std::getenv("XBE_D3D9_DARKEN_ROTATE");
-        return v && v[0] == '1';
-    }();
     uint32_t first = g.first_index;
-    if (rotate) {
+    {
         bool can = g.indexed && g.type == D3DPT_TRIANGLELIST && g.index_bytes == 2 && g.indices &&
                    g.index_count >= 3 && g.index_count * 2 <= kIbRingBytes;
         if (can) {
@@ -2758,7 +2777,7 @@ void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>&
                 ib16_at_ += bytes;
             }
         }
-        if (!can) LOG_FIRST(2, "d3d9: a darkening pass drawn with its indices as they are (not a 16-bit list)");
+        if (!can) LOG_FIRST(2, "d3d9: a darkening pass drawn with its indices as they are (not a 16-bit list): it may merge with its draw");
     }
     if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, first, g.prims);
     else dev_->DrawPrimitive(g.type, 0, g.prims);
