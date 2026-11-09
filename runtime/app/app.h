@@ -34,6 +34,10 @@ struct Settings {
     // the picture's shape for a game that widens its own view (GameInfo::hor_plus): "screen" the output's, or one of
     // kAspects; another game is shown at its console's 4:3 or 16:9 whatever this says
     std::string aspect_ratio = "screen";
+    // sound through the level (audio/acoustics.h), for a game that hands over its level: 3D sounds muffled by what lies
+    // between them and the listener, by material, as much as acoustics_strength says (0 to 100)
+    bool acoustics = false;
+    uint32_t acoustics_strength = 100;
 };
 // the shapes aspect_ratio takes besides "screen", width over height
 struct Aspect {
@@ -45,6 +49,7 @@ inline constexpr Aspect kAspects[] = {{"4:3", 4.0f / 3}, {"16:10", 16.0f / 10}, 
 
 Settings& Get();
 void Load();
+void ApplyAcoustics();  // acoustics and acoustics_strength to the mixer, after a change
 void Save();
 void LogSettings();  // every setting, as the settings file has them
 void LogSystem();    // the machine and the settings, at a run's start

@@ -69,6 +69,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### Audio
 - **DirectSound** - Mixes sound in software through XAudio2, with Xbox ADPCM, streams, mix bins and the effects image.
+- **Sound Through Walls** - A game can hand over its level's surfaces and what each is made of (`runtime/audio/acoustics.h`), and every 3D sound is then muffled by what lies between it and the listener, by band, as much as each material lets through. The rays are Steam Audio's, loaded from `phonon.dll` beside the exe when present; `acoustics` and `acoustics_strength` in the settings file, `XBE_ACOUSTICS=0` or `1` to override (`XBE_ACOUSTICS_ALTERNATE=<seconds>` switches it on and off that often, to hear it in one run), `XBE_ACOUSTICS_LOG=1` (or a number of milliseconds) to log the listener, the sounds' positions and those behind walls. A game whose sound positions follow its camera says where they are in the level each frame (`SetSoundSpace`).
 
 ### Input
 - **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
@@ -83,12 +84,12 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### Miscellaneous
 - **Boot Splash** - Place a `splash.png` (or `.bmp`) beside the exe to display a splash screen at launch.
-- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures a frame with F3 when `XBE_CAPTURE_DIR` is set, enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG` and silences the sound for test runs with `XBE_MUTE`, keeps a test run off screen and out of the focus with `XBE_BACKGROUND` (on a chosen monitor with `XBE_MONITOR`, by device name or number), and drives test runs with `XBE_PAD_SCRIPT` and `XBE_TEST_DIR` (scripted or file-fed presses, frames saved on request; `runtime/core/testdrive.h`).
+- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures a frame with F3 when `XBE_CAPTURE_DIR` is set, enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG` and silences the sound for test runs with `XBE_MUTE` (and writes what would have been heard to a WAV file with `XBE_AUDIO_CAPTURE`), keeps a test run off screen and out of the focus with `XBE_BACKGROUND` (on a chosen monitor with `XBE_MONITOR`, by device name or number), and drives test runs with `XBE_PAD_SCRIPT` and `XBE_TEST_DIR` (scripted or file-fed presses, frames saved on request; `runtime/core/testdrive.h`).
 - **Headless Harness** - Builds and runs a game on Linux without a window, GPU, audio or controller, for testing.
 - **SDK Sync** - Keeps the `sdk/` copies in game repositories in step with this repository.
 
 ## Credits
 
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) for the overridable function layout and instruction hooks this follows.
-- [Zydis](https://github.com/zyantific/zydis) for decoding x86 instructions, [toml++](https://github.com/marzer/tomlplusplus) for the configs, [Dear ImGui](https://github.com/ocornut/imgui) for the settings overlay and [SDL](https://github.com/libsdl-org/SDL) for the window, input and controllers.
+- [Zydis](https://github.com/zyantific/zydis) for decoding x86 instructions, [toml++](https://github.com/marzer/tomlplusplus) for the configs, [Dear ImGui](https://github.com/ocornut/imgui) for the settings overlay and [SDL](https://github.com/libsdl-org/SDL) for the window, input and controllers, and [Steam Audio](https://github.com/ValveSoftware/steam-audio) for sound through walls.
 - [xemu](https://github.com/xemu-project/xemu) and [Cxbx-Reloaded](https://github.com/Cxbx-Reloaded/Cxbx-Reloaded) as references for the Xbox's hardware and API behaviour. This project does not use emulation or any emulator code.

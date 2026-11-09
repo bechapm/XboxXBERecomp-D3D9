@@ -16,6 +16,7 @@
 #include <toml++/toml.hpp>
 
 #include "app/app.h"
+#include "audio/acoustics.h"
 #include "core/input.h"
 #include "core/log.h"
 
@@ -42,6 +43,7 @@ void Load() {
         t = toml::parse_file(File().string());
     } catch (...) {
         input::LoadControls(nullptr);
+        ApplyAcoustics();
         return;
     }
     std::string mode = t["display_mode"].value_or(std::string(kModes[uint32_t(s.display_mode)]));
@@ -62,13 +64,18 @@ void Load() {
     s.mouse_look = t["mouse_look"].value_or(s.mouse_look);
     s.mouse_sensitivity = std::clamp(t["mouse_sensitivity"].value_or(s.mouse_sensitivity), 1u, 100u);
     s.aspect_ratio = t["aspect_ratio"].value_or(s.aspect_ratio);
+    s.acoustics = t["acoustics"].value_or(s.acoustics);
+    s.acoustics_strength = std::min(t["acoustics_strength"].value_or(s.acoustics_strength), 100u);
     input::LoadControls(t["controls"].as_table());
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
         else *o.value = t[o.key].value_or(*o.value);
     }
     if (kGame.load) kGame.load(&t);
+    ApplyAcoustics();
 }
+
+void ApplyAcoustics() { audio::acoustics::Configure(Get().acoustics, Get().acoustics_strength / 100.0f); }
 
 namespace {
 
@@ -89,7 +96,9 @@ toml::table Table() {
                   {"keyboard_mouse", s.keyboard_mouse},
                   {"mouse_look", s.mouse_look},
                   {"mouse_sensitivity", int64_t(s.mouse_sensitivity)},
-                  {"aspect_ratio", s.aspect_ratio}};
+                  {"aspect_ratio", s.aspect_ratio},
+                  {"acoustics", s.acoustics},
+                  {"acoustics_strength", int64_t(s.acoustics_strength)}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
