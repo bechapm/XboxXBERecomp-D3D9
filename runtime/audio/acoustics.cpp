@@ -429,8 +429,10 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
     }
     ToLevel(listener, g_listener);
     sound.seen = NowMs();
-    if (!g_scene || !Heard(sound.seen)) return false;
-    float strength = g_strength;
+    if (!g_scene) return false;
+    // in the off half of an alternation the sound follows back to whole, as it follows the rays: the change is ramped,
+    // and what it was given (Now()'s test sound included) is what it is heard at, not the last muffled value
+    float strength = Heard(sound.seen) ? float(g_strength) : 0.0f;
     for (int b = 0; b < 3; b++) {
         float kept = kFloor[b] + (1 - kFloor[b]) * sound.target[b];
         float want = 1 - strength * (1 - kept);
