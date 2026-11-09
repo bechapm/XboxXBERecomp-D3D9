@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 13
+#define RECOMP_MOD_API_VERSION 14
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -144,6 +144,11 @@ typedef struct RecompModDraw {
      * the budget XBE_D3D9_PICK_BUDGET gives (none by default), and a frame
      * that runs over leaves the answers as they were. */
     int    (*pick)(const struct RecompModDraw *draw, uint32_t id, float x, float y, float hit[3]);
+    /* version 14 (this SDK's): the guest address of the D3DBaseTexture the
+     * title set on each stage (0 for none), as its SetTexture gave it: the
+     * same address the title keeps in its own tables, so a mod tells which of
+     * the title's textures a draw uses without hashing it. Stages 0 to 3. */
+    uint32_t texture_guest[8];
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */

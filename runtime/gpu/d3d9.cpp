@@ -3102,6 +3102,7 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
     for (int i = 0; i < 4; i++) {
         d.textures[i] = stages.res[i];
         d.texture_ids[i] = stages.res[i] ? stages.id[i] : 0;
+        d.texture_guest[i] = s.textures[size_t(i)];
         if (stages.res[i] && stages.rt[i]) d.screen_copies |= 1u << i;
     }
     d.depth_state = 1;

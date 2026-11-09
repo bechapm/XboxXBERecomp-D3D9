@@ -240,7 +240,7 @@ nothing is deferred and the renderer draws as ever.
 | --- | --- | --- |
 | Whose | `title`, `two_d`, `title_2d`, `clip_w`, `offscreen` | `two_d`: a program draw that does not read the game's projection registers, or reads an orthographic one; a fixed function draw in screen pixels or under an orthographic projection. `offscreen`: the target is not one the game presents. `title_2d` and `clip_w` are 0 |
 | How | `program`, `program_id`, `fixed_transform`, `primitive`, `primitives` | `program_id` is the program's microcode hash; `fixed_transform`: a program fixed function may draw (asked for with `d3d9_fixed_transform`): `world` is its model-view and `view` identity. Fixed function takes it after the hooks only if no pixel shader is left bound, so a mod that wants it removes the pixel shader, sets the stages and moves the camera from `world` to `view`, and one that leaves the shader bound gets the program, with the transforms it set. A mod that has seen the draw and wants it a program after all clears `fixed_transform` in its before: the renderer then draws the program whether or not the pixel shader is still bound (a toolkit before this draws it fixed when the shader is gone). `vertex_constants` holds the program's constants on such a draw; the device's are stale, as none are sent for fixed function. Draws to a target the title does not present are never offered, nor are draws fixed function has no form of: a linear texture under a pixel shader, alpha kill, a shadow compare, the wide taps of a shrinking pass, two sided lighting. With no mod no draw qualifies, and the renderer draws as ever |
-| Textures | `textures[8]`, `texture_ids[8]`, `screen_copies` | stages 0 to 3. A texture's id changes when its contents do. `screen_copies` marks stages that read a render target |
+| Textures | `textures[8]`, `texture_ids[8]`, `screen_copies`, `texture_guest[8]` (v14) | stages 0 to 3. A texture's id changes when its contents do. `screen_copies` marks stages that read a render target. `texture_guest` is the guest address of the D3DBaseTexture the title set on each stage (0 for none), the same one the title keeps in its own tables: how a mod tells which of the title's textures a draw uses. Present when `size` covers it |
 | Depth | `depth_state`, `depth_enable`, `depth_write`, `depth_func` | as the device has them for the draw |
 | Transforms | `projection_set`, `projection`, `world`, `view`, `program_projection_set`, `program_projection` | `projection` is the game's own; `world` and `view` the device's. `program_projection` needs the game's port to name its registers ([The camera](#the-camera)) |
 | Geometry | `indexed`, `first_vertex`, `vertices`, `indices`, `index_bytes`, `index_count`, `base_vertex` | vertices start at 0 in the bound streams, indices are rebased to them: `first_vertex` and `base_vertex` are 0 |
@@ -351,11 +351,12 @@ ignored.
 ## Versions
 
 Fields are only ever added at the end. A mod checks `api->size` before using one newer than it knows;
-`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (13 here). The contract is shared with
+`RECOMP_MOD_HAS(api, field)` does that check. `api->version` names the newest set (14 here). The contract is shared with
 DirectXbox-Recomp up to version 5: a change to it is made in both, so one mod build keeps loading under either.
 Version 6's `pointer_elsewhere`, version 7's `RECOMP_DRAW_DEFER` (an answer, no new field), version 8's
 `RecompModDraw.screen_box`, version 9's `stage_known`, version 10's `where`, version 11's `pick`, version 12's
-`d3d9_skinned_meshes` and version 13's `d3d9_on_resize` are not in DirectXbox-Recomp yet.
+`d3d9_skinned_meshes`, version 13's `d3d9_on_resize` and version 14's `RecompModDraw.texture_guest` are not in
+DirectXbox-Recomp yet.
 
 `d3d9_on_resize` is for a mod that knows its D3D9 tool. Under a tool loaded as `d3d9.dll` the renderer keeps the
 picture's size from the start until the next start (a new render scale, resolution or shape is saved and waits), since
