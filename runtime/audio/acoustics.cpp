@@ -67,7 +67,8 @@ int64_t NowMs() {
 }
 
 struct Sound {
-    float pos[3] = {}, listener[3] = {};
+    float pos[3] = {};  // in the level's space
+    float raw[3] = {};  // as the mixer gave it, for the log
     int64_t seen = 0;
     float target[3] = {1, 1, 1};  // the rays' last result
     float heard[3] = {1, 1, 1};   // what the mixer was given, following target
@@ -80,13 +81,22 @@ std::optional<Scene> g_pending;  // a level for the thread to build
 bool g_scene = false;            // a level is built and in use
 float g_meters = 1;
 bool g_started = false;
+float g_listener[3] = {};  // in the level's space, as the mixer last gave it
+float g_origin[3] = {}, g_axes[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the sounds' space in the level (SetSoundSpace)
+
+void ToLevel(const float in[3], float out[3]) {
+    for (int i = 0; i < 3; i++) out[i] = g_origin[i] + in[0] * g_axes[i] + in[1] * g_axes[3 + i] + in[2] * g_axes[6 + i];
+}
 
 std::atomic<bool> g_on{false};
 std::atomic<float> g_strength{1.0f};
 std::atomic<int> g_state{0};  // 0 not tried, 1 loaded, -1 unavailable
-bool g_log = [] {  // XBE_ACOUSTICS_LOG=1: where the listener is and how many sounds are blocked, every five seconds
+// XBE_ACOUSTICS_LOG=1: where the listener is, the sounds' space and how many sounds are blocked, every five seconds; a
+// number above 1 is the milliseconds between
+int64_t g_log = [] {
     const char* v = std::getenv("XBE_ACOUSTICS_LOG");
-    return v && *v && std::strcmp(v, "0") != 0;
+    int64_t ms = v ? std::atoll(v) : 0;
+    return ms <= 0 ? 0 : ms == 1 ? 5000 : ms;
 }();
 
 bool Env(const char* name, bool& value) {
@@ -224,7 +234,7 @@ IPLCoordinateSpace3 At(const float p[3], float meters) {
 struct Job {
     uint32_t id;
     float pos[3];
-    bool near;
+    bool beside;
 };
 
 void Run() {
@@ -249,16 +259,16 @@ void Run() {
             level.swap(g_pending);
             meters = g_meters;
             int64_t now = NowMs();
+            std::memcpy(listener, g_listener, sizeof listener);
             for (auto it = g_sounds.begin(); it != g_sounds.end();) {
                 if (now - it->second.seen > kStaleMs) {
                     it = g_sounds.erase(it);
                     continue;
                 }
                 const Sound& sound = it->second;
-                std::memcpy(listener, sound.listener, sizeof listener);
                 float d[3] = {sound.pos[0] - listener[0], sound.pos[1] - listener[1], sound.pos[2] - listener[2]};
-                bool near = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * meters < kNear;
-                jobs.push_back({it->first, {sound.pos[0], sound.pos[1], sound.pos[2]}, near});
+                bool beside = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * meters < kNear;
+                jobs.push_back({it->first, {sound.pos[0], sound.pos[1], sound.pos[2]}, beside});
                 ++it;
             }
         }
@@ -287,7 +297,7 @@ void Run() {
             continue;
         }
         for (const Job& j : jobs) {
-            if (j.near || s.sources.count(j.id)) continue;
+            if (j.beside || s.sources.count(j.id)) continue;
             IPLSourceSettings ss{};
             ss.flags = IPL_SIMULATIONFLAGS_DIRECT;
             IPLSource source = nullptr;
@@ -302,7 +312,7 @@ void Run() {
         g_ipl.iplSimulatorSetSharedInputs(s.simulator, IPL_SIMULATIONFLAGS_DIRECT, &shared);
         for (const Job& j : jobs) {
             auto it = s.sources.find(j.id);
-            if (j.near || it == s.sources.end()) continue;
+            if (j.beside || it == s.sources.end()) continue;
             IPLSimulationInputs in{};
             in.flags = IPL_SIMULATIONFLAGS_DIRECT;
             in.directFlags =
@@ -321,7 +331,7 @@ void Run() {
             if (sound == g_sounds.end()) continue;
             float* target = sound->second.target;
             auto it = s.sources.find(j.id);
-            if (j.near || it == s.sources.end()) {
+            if (j.beside || it == s.sources.end()) {
                 std::fill(target, target + 3, 1.0f);
                 continue;
             }
@@ -330,12 +340,19 @@ void Run() {
             float open = std::clamp(out.direct.occlusion, 0.0f, 1.0f);
             for (int b = 0; b < 3; b++) target[b] = open + (1 - open) * std::clamp(out.direct.transmission[b], 0.0f, 1.0f);
         }
-        if (g_log && NowMs() - said >= 5000) {
+        if (g_log && NowMs() - said >= g_log) {
             said = NowMs();
-            uint32_t blocked = 0;
+            uint32_t blocked = 0, n = 0;
             for (const auto& [id, sound] : g_sounds) blocked += sound.target[1] < 0.5f;
-            LOGR("acoustics: listener %.2f %.2f %.2f, %zu sounds, %u behind walls", listener[0], listener[1], listener[2],
-                 g_sounds.size(), blocked);
+            LOGR("acoustics: listener %.2f %.2f %.2f, %zu sounds, %u behind walls; space at %.2f %.2f %.2f, axes %.3f %.3f "
+                 "%.3f  %.3f %.3f %.3f  %.3f %.3f %.3f",
+                 listener[0], listener[1], listener[2], g_sounds.size(), blocked, g_origin[0], g_origin[1], g_origin[2],
+                 g_axes[0], g_axes[1], g_axes[2], g_axes[3], g_axes[4], g_axes[5], g_axes[6], g_axes[7], g_axes[8]);
+            for (const auto& [id, sound] : g_sounds)
+                if (n++ < 8)
+                    LOGR("acoustics: sound %08X given %.2f %.2f %.2f, in the level %.2f %.2f %.2f, mid %.2f", id,
+                         sound.raw[0], sound.raw[1], sound.raw[2], sound.pos[0], sound.pos[1], sound.pos[2],
+                         sound.target[1]);
         }
     }
 }
@@ -357,6 +374,12 @@ void SetScene(Scene scene) {
     g_wake.notify_one();
 }
 
+void SetSoundSpace(const float origin[3], const float axes[9]) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::memcpy(g_origin, origin, sizeof g_origin);
+    std::memcpy(g_axes, axes, sizeof g_axes);
+}
+
 void Configure(bool on, float strength) {
     Env("XBE_ACOUSTICS", on);
     g_strength = std::clamp(strength, 0.0f, 1.0f);
@@ -373,8 +396,9 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
     if (!g_on || g_state < 0) return false;
     std::lock_guard<std::mutex> lock(g_mutex);
     Sound& sound = g_sounds[id];
-    std::memcpy(sound.pos, pos, sizeof sound.pos);
-    std::memcpy(sound.listener, listener, sizeof sound.listener);
+    std::memcpy(sound.raw, pos, sizeof sound.raw);
+    ToLevel(pos, sound.pos);
+    ToLevel(listener, g_listener);
     sound.seen = NowMs();
     if (!g_scene) return false;
     float strength = g_strength;

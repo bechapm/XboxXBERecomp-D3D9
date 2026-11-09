@@ -40,6 +40,12 @@ struct Scene {
 // any thread: the level sounds are heard through from now on, replacing the last; an empty scene, none
 void SetScene(Scene scene);
 
+// any thread, as often as it changes: where the game's 3D sound positions are in the level. A sound at x y z (the
+// listener's space, as the game hands DirectSound its positions) is at origin + x * axes[0..2] + y * axes[3..5] +
+// z * axes[6..8] among the scene's triangles. A game that moves its sounds with the camera rather than its listener
+// says so here every frame; until it does, the two spaces are the same
+void SetSoundSpace(const float origin[3], const float axes[9]);
+
 // on, and how much of the blocking is heard, 0 to 1 (the settings file's acoustics and acoustics_strength; XBE_ACOUSTICS
 // 0 or 1 overrides on)
 void Configure(bool on, float strength);
