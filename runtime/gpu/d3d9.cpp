@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -451,6 +452,43 @@ bool OffsetsPolygons(const State& s, Topology topology) {
     return topology == Topology::Triangles && SimpleState(s, kMSolidOffsetEnable);
 }
 
+// Front faces for a ray tracer. Direct3D 9 has no front face setting, and a tool that reads its draws (RTX Remix) takes
+// clockwise as the front unless a draw's cull mode says otherwise; one that culls nothing says nothing. A console title
+// whose fronts are counter clockwise (it culls clockwise) then has every cull-none draw seen from behind there, and
+// whatever the tool keeps for fronts only (Remix's decals) is lost. So a cull-none triangle draw goes with its winding
+// reversed when the title's front is counter clockwise; culling nothing, Direct3D 9 draws the same pixels. Which front:
+// gpu::g_cullnone_front, the game's, unless XBE_D3D9_CULLNONE_FRONT (off, auto, cw, ccw) says. auto decides once the
+// title has culled 64 triangle draws clockwise and none counter clockwise, and a counter clockwise one decides clockwise
+// for good; the verdict is logged. Called for every draw, so auto counts them all (docs/d3d9.md)
+bool CullNoneFrontIsCcw(bool triangles, DWORD dcull) {
+    static const int setting = [] {
+        if (const char* e = std::getenv("XBE_D3D9_CULLNONE_FRONT")) {
+            if (!std::strcmp(e, "off")) return 0;
+            if (!std::strcmp(e, "auto")) return 1;
+            if (!std::strcmp(e, "cw")) return 2;
+            if (!std::strcmp(e, "ccw")) return 3;
+        }
+        return gpu::g_cullnone_front;
+    }();
+    if (setting == 0) return false;
+    static uint64_t draws = 0, culled_cw = 0, culled_ccw = 0;
+    static int verdict = 0;  // 0 none yet, 1 counter clockwise, 2 clockwise
+    if (triangles) {
+        draws++;
+        if (dcull == D3DCULL_CW) culled_cw++;
+        if (dcull == D3DCULL_CCW) culled_ccw++;
+    }
+    int v = setting == 3 ? 1 : setting == 2 ? 2 : culled_ccw ? 2 : culled_cw >= 64 ? 1 : 0;
+    if (v != verdict) {
+        verdict = v;
+        LOGR("d3d9: cull-none front %s after %llu triangle draws (%llu culled clockwise, %llu counter clockwise): "
+             "the title's front is %s, cull-none draws %s", setting == 1 ? "auto" : setting == 2 ? "cw" : "ccw",
+             (unsigned long long)draws, (unsigned long long)culled_cw, (unsigned long long)culled_ccw,
+             v == 1 ? "counter clockwise" : "clockwise", v == 1 ? "reversed" : "as they are");
+    }
+    return verdict == 1;
+}
+
 // A small draw whose every float2 input lies in 0..1: sprites, HUD pieces, text, full screen passes. Upscaled, the far
 // edge's last half texel is drawn too, and wrapped it blends in the opposite edge: such draws clamp (as the D3D12
 // renderer does, which says more)
@@ -757,9 +795,8 @@ private:
     void ApplySettings();
 
     HMODULE lib_ = nullptr;
-    // d3d9.dll is a tool's, from beside the exe and not Windows' own: the picture keeps its size from the start
+    // d3d9.dll is a tool's, from beside the exe and not Windows' own: a new render scale resizes the back buffer too
     bool tool_ = false;
-    float held_scale_ = 0, held_wide_ = 0;  // what a settings change asked for while it is kept, told once
     ComPtr<IDirect3D9> d3d_;
     ComPtr<IDirect3D9Ex> d3d_ex_;
     ComPtr<IDirect3DDevice9> dev_;
@@ -804,6 +841,7 @@ private:
     Target* draw_ds_ = nullptr;
     Assembled asm_;
     std::vector<uint16_t> index_copy_;  // a draw's 16 bit indices rebased, for the mods
+    bool flip_winding_ = false;  // SetOutputState to DrawGeometry: the draw's triangles go reversed (CullNoneFrontIsCcw)
     // mods: the draw in hand, the transforms as the device has them (WORLD, VIEW, PROJECTION) and those a mod set
     const State* mod_state_ = nullptr;
     const Assembled* mod_asm_ = nullptr;
@@ -957,8 +995,7 @@ bool D3D9Backend::CreateDevice(HWND hwnd) {
     std::wstring_view loaded(path);
     std::wstring dir(loaded.substr(0, std::min(loaded.rfind(L'\\'), loaded.size())));
     tool_ = !path[0] || lstrcmpiW(dir.c_str(), sys) != 0;
-    app::SetSizeAtStart(tool_);
-    if (tool_) LOGR("d3d9: a tool's d3d9.dll draws, the picture keeps its size until the next start");
+    if (tool_) LOGR("d3d9: a tool's d3d9.dll draws, a new render scale resets the back buffer to its size");
     using Create9Ex = HRESULT(WINAPI*)(UINT, IDirect3D9Ex**);
     using Create9 = IDirect3D9*(WINAPI*)(UINT);
     // Ex first: its windowed device is never lost, so nothing has to be made again after the PC sleeps
@@ -2027,6 +2064,8 @@ void D3D9Backend::SetOutputState(const State& s, const Assembled& a, bool ffp) {
     if (a.topology == Topology::Triangles && cull == kCullCw) dcull = D3DCULL_CW;
     if (a.topology == Topology::Triangles && cull == kCullCcw) dcull = D3DCULL_CCW;
     Rs(D3DRS_CULLMODE, dcull);
+    bool front_ccw = CullNoneFrontIsCcw(a.topology == Topology::Triangles, dcull);  // counts every draw: auto's verdict
+    flip_winding_ = front_ccw && a.topology == Topology::Triangles && dcull == D3DCULL_NONE && !a.pretransformed;
     uint32_t fill = s.rs[kRsFillMode];
     Rs(D3DRS_FILLMODE, fill == kFillWireframe ? D3DFILL_WIREFRAME : fill == kFillPoint ? D3DFILL_POINT : D3DFILL_SOLID);
     Rs(D3DRS_SHADEMODE, SimpleState(s, kMShadeMode) == kShadeFlat ? D3DSHADE_FLAT : D3DSHADE_GOURAUD);
@@ -2331,16 +2370,55 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
         dev_->SetStreamSource(a.buffer_count, vb_.Get(), at, conv_stride);
     }
     g.type = PrimitiveType(a);
+    bool flip = flip_winding_;
+    flip_winding_ = false;
     if (!a.index_count) {
         g.prims = PrimitiveCount(a, a.draw_count);
         g.vertices = a.draw_count;
+        if (!flip || !g.prims || a.draw_count > 0xFFFFu) return true;
+        // reversed by indices made here: a list's every triangle 0 2 1, a strip one more index in front; the mods read
+        // the same indices
+        uint32_t n = a.draw_count, more = a.strip ? 1 : 0, nbytes = (n + more) * 2;
+        if (nbytes > kIbRingBytes) return true;
+        DWORD lock = D3DLOCK_NOOVERWRITE;
+        if (ib16_at_ + nbytes > kIbRingBytes) {
+            ib16_at_ = 0;
+            lock = D3DLOCK_DISCARD;
+        }
+        // made in memory the CPU reads (the mods read what is drawn), then copied: the ring is write only
+        index_copy_.resize(n + more);
+        uint16_t* o = index_copy_.data();
+        if (a.strip) {
+            o[0] = 0;
+            for (uint32_t i = 0; i < n; i++) o[i + 1] = uint16_t(i);
+        } else {
+            for (uint32_t i = 0; i < n; i++) o[i] = uint16_t(i);
+            for (uint32_t i = 0; i + 2 < n; i += 3) std::swap(o[i + 1], o[i + 2]);
+        }
+        void* q = nullptr;
+        if (FAILED(ib16_->Lock(ib16_at_, nbytes, &q, lock))) return true;
+        std::memcpy(q, o, nbytes);
+        ib16_->Unlock();
+        g.indices = index_copy_.data();
+        g.indexed = true;
+        g.first_index = ib16_at_ / 2;
+        g.index_bytes = 2;
+        g.index_count = n + more;
+        g.prims = PrimitiveCount(a, n + more);
+        ib16_at_ += nbytes;
+        dev_->SetIndices(ib16_.Get());
+        static uint64_t made = 0;
+        if (made++ == 0) LOGR("d3d9: cull-none winding: a draw without indices given reversed ones (first one)");
         return true;
     }
     g.prims = PrimitiveCount(a, a.index_count);
     g.vertices = a.vertex_count;
     if (!g.prims) return true;
     bool wide = !a.index16;
-    uint32_t bytes = a.index_count * (wide ? 4 : 2);
+    // a strip is reversed by one more index in front, a copy of its first: one empty triangle, and every one after it
+    // swaps the parity that sets its winding
+    uint32_t extra = flip && a.strip ? 1 : 0;
+    uint32_t bytes = (a.index_count + extra) * (wide ? 4 : 2);
     IDirect3DIndexBuffer9* ib = wide ? ib32_.Get() : ib16_.Get();
     uint32_t& ring = wide ? ib32_at_ : ib16_at_;
     if (bytes > kIbRingBytes) return false;
@@ -2352,26 +2430,61 @@ bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement
     void* p = nullptr;
     if (FAILED(ib->Lock(ring, bytes, &p, flags))) return false;
     g.indices = a.index_src;
+    // reversed while written, from the title's indices: the ring is write only and never read back. A list's every
+    // triangle 0 2 1, a strip the first index twice
+    uint32_t n = a.index_count;
     if (wide) {
-        std::memcpy(p, a.index_src, bytes);
-    } else {
-        // the title's indices, moved down to the first vertex the buffers start at; a copy for the mods
-        const uint16_t* in = static_cast<const uint16_t*>(a.index_src);
-        uint16_t* o = static_cast<uint16_t*>(p);
-        if (!mods::D3d9().draw.empty()) {
-            index_copy_.resize(a.index_count);
-            for (uint32_t i = 0; i < a.index_count; i++) index_copy_[i] = uint16_t(in[i] + a.base_vertex);
-            std::memcpy(o, index_copy_.data(), bytes);
-            g.indices = index_copy_.data();
+        const uint32_t* in = static_cast<const uint32_t*>(a.index_src);
+        uint32_t* o = static_cast<uint32_t*>(p);
+        if (flip && a.strip) {
+            o[0] = in[0];
+            std::memcpy(o + 1, in, size_t(n) * 4);
+        } else if (flip) {
+            uint32_t i = 0;
+            for (; i + 2 < n; i += 3) {
+                o[i] = in[i];
+                o[i + 1] = in[i + 2];
+                o[i + 2] = in[i + 1];
+            }
+            for (; i < n; i++) o[i] = in[i];
         } else {
-            for (uint32_t i = 0; i < a.index_count; i++) o[i] = uint16_t(in[i] + a.base_vertex);
+            std::memcpy(o, in, size_t(n) * 4);
         }
+    } else {
+        // the title's indices, moved down to the first vertex the buffers start at; a copy for the mods, so what they
+        // read is what is drawn
+        const uint16_t* in = static_cast<const uint16_t*>(a.index_src);
+        bool copy = !mods::D3d9().draw.empty();
+        if (copy) index_copy_.resize(n + extra);
+        uint16_t* o = copy ? index_copy_.data() : static_cast<uint16_t*>(p);
+        auto at = [&](uint32_t i) { return uint16_t(in[i] + a.base_vertex); };
+        if (flip && a.strip) {
+            o[0] = at(0);
+            for (uint32_t i = 0; i < n; i++) o[i + 1] = at(i);
+        } else if (flip) {
+            uint32_t i = 0;
+            for (; i + 2 < n; i += 3) {
+                o[i] = at(i);
+                o[i + 1] = at(i + 2);
+                o[i + 2] = at(i + 1);
+            }
+            for (; i < n; i++) o[i] = at(i);
+        } else {
+            for (uint32_t i = 0; i < n; i++) o[i] = at(i);
+        }
+        if (copy) {
+            std::memcpy(p, o, bytes);
+            g.indices = index_copy_.data();
+        }
+        static uint64_t flipped = 0;
+        if (flip && flipped++ == 0) LOGR("d3d9: cull-none winding: a draw's winding reversed (first one)");
     }
     ib->Unlock();
     g.indexed = true;
     g.first_index = ring / (wide ? 4 : 2);
     g.index_bytes = wide ? 4 : 2;
-    g.index_count = a.index_count;
+    g.index_count = a.index_count + (wide ? 0 : extra);  // what the mods read from g.indices (a wide draw's: the title's own)
+    if (extra) g.prims = PrimitiveCount(a, a.index_count + extra);
     ring += bytes;
     dev_->SetIndices(ib);
     return true;
@@ -3245,21 +3358,13 @@ void D3D9Backend::ApplySettings() {
     float want = app::RenderScale(guest_h_);
     float wide = PictureWide(guest_w_, guest_h_);
     bool rescale = std::fabs(want - scale_) > 1e-4f || std::fabs(wide - wide_) > 1e-4f;
-    // a tool's d3d9.dll keeps the size the picture started at: RTX Remix path traces only into a target the back
-    // buffer's size, so new targets on the old back buffer lost its picture until a restart, and a reset that resized
-    // the swap chain with its DLSS frame generation on crashed in the driver about a second later (8 of 9 runs)
-    if (tool_ && rescale) {
-        if (std::fabs(want - held_scale_) > 1e-4f || std::fabs(wide - held_wide_) > 1e-4f)
-            LOGR("d3d9: render scale %.3f, picture %.3f wide from the next start; this run keeps %.3f, %.3f wide", want,
-                 wide, scale_, wide_);
-        held_scale_ = want;
-        held_wide_ = wide;
-        want = scale_;
-        wide = wide_;
-        rescale = false;
-    }
+    // under a tool's d3d9.dll a new render scale resets with the back buffer resized: RTX Remix path traces only into
+    // a target the back buffer's size, so new targets on the old back buffer lost its picture until a restart. With
+    // its DLSS frame generation on, that reset crashed in the driver about a second later (8 of 9 runs) unless a mod
+    // pauses frame generation around it, so the reset is the mod's to make safe, and the size stays live
+    bool tool_reset = tool_ && rescale;
     if (!rescale && app::Get().vsync == vsync_) return;
-    bool reset = std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
+    bool reset = tool_reset || std::fabs(wide - wide_) > 1e-4f || app::Get().vsync != vsync_;
     vsync_ = app::Get().vsync;
     scale_ = want;
     wide_ = wide;
