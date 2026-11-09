@@ -2655,61 +2655,122 @@ uint32_t PrimitiveCount(const Assembled& a, uint32_t n) {
 // channel). Only the converted stream is new; positions, indices and the title's other streams stay bound.
 void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride,
                              const Geometry& g) {
-    const DeclElement* col = nullptr;
-    for (const DeclElement& e : el)
+    // The pass draws the same triangles again, black, with the darkening as its coverage. Its colour comes in a
+    // stream of its own (the only element the pass changes), so its vertex layout differs from the draw it follows
+    // and a renderer that keys draws by their layout keeps the two apart. The black is the texture factor on stage 1,
+    // never a vertex colour of 0.
+    std::vector<DeclElement> el2 = el;
+    DeclElement* col = nullptr;
+    for (DeclElement& e : el2)
         if (e.reg >= 0 && e.type == D3DDECLTYPE_D3DCOLOR && e.usage == D3DDECLUSAGE_COLOR && e.index == 0) col = &e;
-    if (!col || !conv_stride || !g.prims) return;
+    if (!col || !conv_stride || !g.prims) {
+        LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw has no converted colour");
+        return;
+    }
+    DWORD stage1 = D3DTOP_DISABLE;
+    dev_->GetTextureStageState(1, D3DTSS_COLOROP, &stage1);
+    if (stage1 != D3DTOP_DISABLE) {
+        LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw uses stage 1");
+        return;
+    }
     uint32_t n = a.vertex_count;
     uint8_t* out = nullptr;
-    uint32_t at = RingVertices(nullptr, n * conv_stride, reinterpret_cast<void**>(&out));
+    uint32_t at = RingVertices(nullptr, n * 4, reinterpret_cast<void**>(&out));
     if (at == ~0u) return;
-    for (const DeclElement& e : el) {
-        if (e.reg < 0) continue;
-        const VertexElement& ve = a.elements[size_t(e.reg)];
-        const VertexBuffer& b = a.buffers[ve.buffer];
-        for (uint32_t v = 0; v < n; v++) {
-            float f[4];
-            const uint8_t* src = b.src + size_t(v) * b.stride + ve.offset;
-            if (size_t(v) * b.stride + ve.offset + 4 > b.bytes) std::fill(f, f + 4, 0.0f);
-            else ReadElement(ve.format, e.decode, src, f);
-            uint8_t* dst = out + size_t(v) * conv_stride + e.offset;
-            if (e.type == D3DDECLTYPE_D3DCOLOR) {
-                if (e.swap) std::swap(f[0], f[2]);
-                if (&e == col) {
-                    float bright = std::max(f[0], std::max(f[1], f[2]));
-                    f[3] = std::clamp(f[3] * (1.0f - 2.0f * bright), 0.0f, 1.0f);
-                }
-                uint32_t c = PackColor4(f);
-                std::memcpy(dst, &c, 4);
-            } else {
-                std::memcpy(dst, f, DeclBytes(e.type));
-            }
-        }
+    const VertexElement& ve = a.elements[size_t(col->reg)];
+    const VertexBuffer& b = a.buffers[ve.buffer];
+    for (uint32_t v = 0; v < n; v++) {
+        float f[4];
+        const uint8_t* src = b.src + size_t(v) * b.stride + ve.offset;
+        if (size_t(v) * b.stride + ve.offset + 4 > b.bytes) std::fill(f, f + 4, 0.0f);
+        else ReadElement(ve.format, col->decode, src, f);
+        if (col->swap) std::swap(f[0], f[2]);
+        float bright = std::max(f[0], std::max(f[1], f[2]));
+        f[3] = std::clamp(f[3] * (1.0f - 2.0f * bright), 0.0f, 1.0f);
+        uint32_t c = PackColor4(f);
+        std::memcpy(out + size_t(v) * 4, &c, 4);
     }
     vb_->Unlock();
-    dev_->SetStreamSource(a.buffer_count, vb_.Get(), at, conv_stride);
-    DWORD saved[6];
-    dev_->GetTextureStageState(0, D3DTSS_COLOROP, &saved[0]);
-    dev_->GetTextureStageState(0, D3DTSS_COLORARG1, &saved[1]);
-    dev_->GetTextureStageState(0, D3DTSS_ALPHAOP, &saved[2]);
-    dev_->GetTextureStageState(0, D3DTSS_ALPHAARG1, &saved[3]);
-    dev_->GetTextureStageState(0, D3DTSS_ALPHAARG2, &saved[4]);
-    dev_->GetRenderState(D3DRS_TEXTUREFACTOR, &saved[5]);
+    BYTE stream = BYTE(a.buffer_count + 1);
+    col->stream = stream;
+    col->offset = 0;
+    IDirect3DVertexDeclaration9* decl = EnsureDeclaration(el2);
+    if (!decl) {
+        LOG_FIRST(2, "d3d9: a darkening pass skipped: its declaration was refused");
+        return;
+    }
+    IDirect3DVertexDeclaration9* was = nullptr;
+    dev_->GetVertexDeclaration(&was);
+    dev_->SetStreamSource(stream, vb_.Get(), at, 4);
+    dev_->SetVertexDeclaration(decl);
+    struct Saved { DWORD stage, type, value; } saved[] = {
+        {0, D3DTSS_COLOROP, 0},   {0, D3DTSS_COLORARG1, 0}, {0, D3DTSS_ALPHAOP, 0},  {0, D3DTSS_ALPHAARG1, 0},
+        {0, D3DTSS_ALPHAARG2, 0}, {1, D3DTSS_COLOROP, 0},   {1, D3DTSS_COLORARG1, 0}, {1, D3DTSS_COLORARG2, 0},
+        {1, D3DTSS_ALPHAOP, 0},   {1, D3DTSS_ALPHAARG1, 0}, {2, D3DTSS_COLOROP, 0},   {2, D3DTSS_ALPHAOP, 0}};
+    for (Saved& x : saved) dev_->GetTextureStageState(x.stage, D3DTEXTURESTAGESTATETYPE(x.type), &x.value);
+    DWORD factor = 0;
+    dev_->GetRenderState(D3DRS_TEXTUREFACTOR, &factor);
     dev_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
-    dev_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+    dev_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
     dev_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE2X);
     dev_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
     dev_->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    dev_->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    dev_->SetTextureStageState(1, D3DTSS_COLORARG1, D3DTA_CURRENT);
+    dev_->SetTextureStageState(1, D3DTSS_COLORARG2, D3DTA_TFACTOR);
+    dev_->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    dev_->SetTextureStageState(1, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+    dev_->SetTextureStageState(2, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    dev_->SetTextureStageState(2, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
     dev_->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFF000000u);
-    if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
+    // XBE_D3D9_DARKEN_ROTATE=1: each triangle's indices start one along (a b c drawn b c a), the same triangles
+    // with the same winding, for a renderer that keys draws by their indices
+    static const bool rotate = [] {
+        const char* v = std::getenv("XBE_D3D9_DARKEN_ROTATE");
+        return v && v[0] == '1';
+    }();
+    uint32_t first = g.first_index;
+    if (rotate) {
+        bool can = g.indexed && g.type == D3DPT_TRIANGLELIST && g.index_bytes == 2 && g.indices &&
+                   g.index_count >= 3 && g.index_count * 2 <= kIbRingBytes;
+        if (can) {
+            uint32_t bytes = g.index_count * 2;
+            DWORD lock = D3DLOCK_NOOVERWRITE;
+            if (ib16_at_ + bytes > kIbRingBytes) {
+                ib16_at_ = 0;
+                lock = D3DLOCK_DISCARD;
+            }
+            void* q = nullptr;
+            can = SUCCEEDED(ib16_->Lock(ib16_at_, bytes, &q, lock));
+            if (can) {
+                const uint16_t* in = static_cast<const uint16_t*>(g.indices);
+                uint16_t* o = static_cast<uint16_t*>(q);
+                uint32_t i = 0;
+                for (; i + 2 < g.index_count; i += 3) {
+                    o[i] = in[i + 1];
+                    o[i + 1] = in[i + 2];
+                    o[i + 2] = in[i];
+                }
+                for (; i < g.index_count; i++) o[i] = in[i];
+                ib16_->Unlock();
+                dev_->SetIndices(ib16_.Get());
+                first = ib16_at_ / 2;
+                ib16_at_ += bytes;
+            }
+        }
+        if (!can) LOG_FIRST(2, "d3d9: a darkening pass drawn with its indices as they are (not a 16-bit list)");
+    }
+    if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, first, g.prims);
     else dev_->DrawPrimitive(g.type, 0, g.prims);
-    dev_->SetTextureStageState(0, D3DTSS_COLOROP, saved[0]);
-    dev_->SetTextureStageState(0, D3DTSS_COLORARG1, saved[1]);
-    dev_->SetTextureStageState(0, D3DTSS_ALPHAOP, saved[2]);
-    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG1, saved[3]);
-    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG2, saved[4]);
-    dev_->SetRenderState(D3DRS_TEXTUREFACTOR, saved[5]);
+    for (const Saved& x : saved) dev_->SetTextureStageState(x.stage, D3DTEXTURESTAGESTATETYPE(x.type), x.value);
+    dev_->SetRenderState(D3DRS_TEXTUREFACTOR, factor);
+    dev_->SetVertexDeclaration(was);
+    if (was) was->Release();
+    dev_->SetStreamSource(stream, nullptr, 0, 0);
     counts_.darkened++;
+    static uint64_t total = 0;  // the counts start again at every report, which comes before play
+    if (!total++) LOGR("d3d9: the first darkening pass drawn (%u vertices)", n);
+    else if (total % 5000 == 0) LOGR("d3d9: %llu darkening passes drawn", (unsigned long long)total);
 }
 
 bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride,
@@ -3940,6 +4001,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         drawn = false;
     }
     // deferred: kept as the mods left the device, which their afters then put back; made at the frame's end
+    if (drawn && say == ModsSay::defer && g_darken_pass) LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw is deferred");
     if (drawn && say == ModsSay::defer && Defer(a, el, conv_stride)) {
         ModsAfter();
         CountCamera(sh, false);
@@ -3962,6 +4024,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
         else dev_->DrawPrimitive(g.type, 0, g.prims);
         EndCountedDraw(query);
+        if (g_darken_pass && !sh.ffp) LOG_FIRST(2, "d3d9: a darkening pass skipped: the draw is not fixed function");
         if (g_darken_pass && sh.ffp) DarkenPass(a, el, conv_stride, g);
         g_darken_pass = false;
         if (probe) {
