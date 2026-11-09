@@ -113,6 +113,8 @@ inline std::atomic<bool> g_wireframe{false};
 // tracer): 0 off, 1 auto (counter clockwise once the title has culled clockwise and never counter clockwise), 2 clockwise
 // (Direct3D 9's own), 3 counter clockwise. The game repo names its own; XBE_D3D9_CULLNONE_FRONT (off, auto, cw, ccw) wins
 inline int g_cullnone_front = 0;
+// a mod asked for a darkening pass after the draw in hand (RecompModApi::d3d9_darken_pass); the renderer clears it
+inline bool g_darken_pass = false;
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:

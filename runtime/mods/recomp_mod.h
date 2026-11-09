@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 14
+#define RECOMP_MOD_API_VERSION 15
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -350,6 +350,19 @@ typedef struct RecompModApi {
      * tool: with one of these the mod takes that on, and the size changes
      * live. Up to 8 across mods; 0 when full. Register from init. */
     int  (*d3d9_on_resize)(RecompModResizeFn fn, void *user);
+
+    /* ---- version 15 (this SDK's) ---- */
+
+    /* From a draw's before: follow the draw in hand with a second pass over
+     * the same triangles that darkens what is under them by the draw's own
+     * vertex brightness -- black, at an opacity of its alpha times (1 - 2 x
+     * its vertex colour's brightest channel), 0.5 being neutral to the
+     * title's 2x. For a tool that takes vertex colour for baked light and
+     * keeps only its hue (RTX Remix), which loses a layer the title darkens
+     * by vertex colour; its vertex alpha it keeps. Only on a draw D3D9's
+     * fixed function makes (fixed_transform), whose vertex colour the
+     * renderer converts: elsewhere it does nothing. One draw at a time. */
+    void (*d3d9_darken_pass)(void);
 } RecompModApi;
 
 typedef int (*RecompModInitFn)(const RecompModApi *api);

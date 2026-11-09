@@ -196,6 +196,13 @@ void D3d9SkinnedMeshes(int on) {
     if (!said.exchange(true)) LOGR("mods: skinned meshes %s", on ? "on" : "off");
 }
 
+// the draw in hand gets a darkening pass after it (version 15)
+void D3d9DarkenPass() {
+    gpu::g_darken_pass = true;
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true)) LOGR("mods: a darkening pass asked for (first draw)");
+}
+
 RecompModApi MakeApi() {
     RecompModApi a{};
     a.version = RECOMP_MOD_API_VERSION;
@@ -225,6 +232,7 @@ RecompModApi MakeApi() {
     a.pointer_elsewhere = PointerElsewhere;
     a.d3d9_skinned_meshes = D3d9SkinnedMeshes;
     a.d3d9_on_resize = D3d9OnResize;
+    a.d3d9_darken_pass = D3d9DarkenPass;
     return a;
 }
 const RecompModApi g_api = MakeApi();

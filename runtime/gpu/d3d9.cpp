@@ -802,6 +802,9 @@ private:
     void SetShaderConstants(const State& s, const DrawShaders& sh, const DrawTextures& stages, GuestExtent size);
     void SetViewportScissor(const State& s, uint32_t gw, const Placed& pl);
     bool DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride, Geometry& g);
+    // a mod's darkening pass (RecompModApi::d3d9_darken_pass) after the draw in hand, through a copy of its converted
+    // stream whose vertex colour carries the darkening in its alpha
+    void DarkenPass(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride, const Geometry& g);
     // WORLD, VIEW and PROJECTION: the title's, or a mod's
     void HalfPixel(float* m) const;
     void FoldProjection(const State& s, GuestExtent size, const float* m, float* out) const;
@@ -987,7 +990,7 @@ private:
     uint64_t presents_ = 0;
     // where the draws went, reported twice early on: a black picture says which step refused them
     struct DrawCounts {
-        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods, deferred;
+        uint32_t made, assemble, targets, decl, shader, ffp, geometry, mods, deferred, darkened;
     } counts_{};
     // plain transforms (PlainDraw), by program hash; position -1 is a program that is not one
     std::unordered_map<uint64_t, PlainProgram> plain_;
@@ -2645,6 +2648,70 @@ uint32_t PrimitiveCount(const Assembled& a, uint32_t n) {
 
 // the draw's streams through the ring, the converted elements made on the way, then its indices, rebased to 0; g is
 // the draw to make
+// The darkening pass: the same triangles again, black, at an opacity of the title's alpha times (1 - 2 x the vertex
+// colour's brightest channel). A tool that takes vertex colour for baked light and keeps only its hue (RTX Remix)
+// loses what a layer darkens by its vertex colour; its alpha it keeps, so the darkening is put there. Black comes from
+// the texture factor, never a black vertex colour, which such a tool turns white (it divides a colour by its brightest
+// channel). Only the converted stream is new; positions, indices and the title's other streams stay bound.
+void D3D9Backend::DarkenPass(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride,
+                             const Geometry& g) {
+    const DeclElement* col = nullptr;
+    for (const DeclElement& e : el)
+        if (e.reg >= 0 && e.type == D3DDECLTYPE_D3DCOLOR && e.usage == D3DDECLUSAGE_COLOR && e.index == 0) col = &e;
+    if (!col || !conv_stride || !g.prims) return;
+    uint32_t n = a.vertex_count;
+    uint8_t* out = nullptr;
+    uint32_t at = RingVertices(nullptr, n * conv_stride, reinterpret_cast<void**>(&out));
+    if (at == ~0u) return;
+    for (const DeclElement& e : el) {
+        if (e.reg < 0) continue;
+        const VertexElement& ve = a.elements[size_t(e.reg)];
+        const VertexBuffer& b = a.buffers[ve.buffer];
+        for (uint32_t v = 0; v < n; v++) {
+            float f[4];
+            const uint8_t* src = b.src + size_t(v) * b.stride + ve.offset;
+            if (size_t(v) * b.stride + ve.offset + 4 > b.bytes) std::fill(f, f + 4, 0.0f);
+            else ReadElement(ve.format, e.decode, src, f);
+            uint8_t* dst = out + size_t(v) * conv_stride + e.offset;
+            if (e.type == D3DDECLTYPE_D3DCOLOR) {
+                if (e.swap) std::swap(f[0], f[2]);
+                if (&e == col) {
+                    float bright = std::max(f[0], std::max(f[1], f[2]));
+                    f[3] = std::clamp(f[3] * (1.0f - 2.0f * bright), 0.0f, 1.0f);
+                }
+                uint32_t c = PackColor4(f);
+                std::memcpy(dst, &c, 4);
+            } else {
+                std::memcpy(dst, f, DeclBytes(e.type));
+            }
+        }
+    }
+    vb_->Unlock();
+    dev_->SetStreamSource(a.buffer_count, vb_.Get(), at, conv_stride);
+    DWORD saved[6];
+    dev_->GetTextureStageState(0, D3DTSS_COLOROP, &saved[0]);
+    dev_->GetTextureStageState(0, D3DTSS_COLORARG1, &saved[1]);
+    dev_->GetTextureStageState(0, D3DTSS_ALPHAOP, &saved[2]);
+    dev_->GetTextureStageState(0, D3DTSS_ALPHAARG1, &saved[3]);
+    dev_->GetTextureStageState(0, D3DTSS_ALPHAARG2, &saved[4]);
+    dev_->GetRenderState(D3DRS_TEXTUREFACTOR, &saved[5]);
+    dev_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    dev_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+    dev_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE2X);
+    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    dev_->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFF000000u);
+    if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
+    else dev_->DrawPrimitive(g.type, 0, g.prims);
+    dev_->SetTextureStageState(0, D3DTSS_COLOROP, saved[0]);
+    dev_->SetTextureStageState(0, D3DTSS_COLORARG1, saved[1]);
+    dev_->SetTextureStageState(0, D3DTSS_ALPHAOP, saved[2]);
+    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG1, saved[3]);
+    dev_->SetTextureStageState(0, D3DTSS_ALPHAARG2, saved[4]);
+    dev_->SetRenderState(D3DRS_TEXTUREFACTOR, saved[5]);
+    counts_.darkened++;
+}
+
 bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride,
                                Geometry& g) {
     for (uint32_t i = 0; i < a.buffer_count; i++) {
@@ -3865,6 +3932,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     mod_state_ = &s;
     mod_asm_ = &a;
     mod_size_ = size;
+    g_darken_pass = false;  // asked for again by a mod's before, for this draw only
     ModsSay say = sh.prog && diag::D3d9SkipProgram(s.vs->hash) ? ModsSay::skip : ModsBefore(s, a, sh, stages, g);
     bool drawn = say != ModsSay::skip;
     if (drawn && sh.plain && !PlainTakeOver(s, a, sh, stages, size, g)) {
@@ -3894,6 +3962,8 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         if (g.indexed) dev_->DrawIndexedPrimitive(g.type, 0, 0, g.vertices, g.first_index, g.prims);
         else dev_->DrawPrimitive(g.type, 0, g.prims);
         EndCountedDraw(query);
+        if (g_darken_pass && sh.ffp) DarkenPass(a, el, conv_stride, g);
+        g_darken_pass = false;
         if (probe) {
             camera_.after_mark = PixelStats(dev_.Get(), probe);
             probe->Release();
@@ -4424,9 +4494,10 @@ void D3D9Backend::Present(const Surface& front) {
     PlacementFrame();
     if (report) {
         const DrawCounts& c = counts_;
-        LOGR("d3d9: %llu frames, %u draws made (%u fixed function); refused: %u assembly, %u targets, %u declarations, "
-             "%u shaders, %u geometry, %u by mods; front %08X %ux%u%s, Present %08X",
-             (unsigned long long)presents_, c.made, c.ffp, c.assemble, c.targets, c.decl, c.shader, c.geometry, c.mods,
+        LOGR("d3d9: %llu frames, %u draws made (%u fixed function, %u darkening passes); refused: %u assembly, %u targets, "
+             "%u declarations, %u shaders, %u geometry, %u by mods; front %08X %ux%u%s, Present %08X",
+             (unsigned long long)presents_, c.made, c.ffp, c.darkened, c.assemble, c.targets, c.decl, c.shader, c.geometry,
+             c.mods,
              front.data, t ? t->gw : 0, t ? t->gh : 0, t ? (t->drawn ? ", drawn" : ", never drawn") : ", no target",
              unsigned(hr));
     }
