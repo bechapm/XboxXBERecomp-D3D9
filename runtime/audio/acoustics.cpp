@@ -52,7 +52,8 @@ static_assert(sizeof(Material) == sizeof(IPLMaterial), "Material is IPLMaterial"
 
 constexpr auto kStep = std::chrono::milliseconds(15);  // a run of the rays, about once a frame
 constexpr int64_t kStaleMs = 1000;                     // a sound not mixed for this long is let go
-constexpr float kNear = 1.0f;                          // metres: a sound this close to the listener is never blocked
+constexpr float kNear = 2.0f;                          // metres: a sound this close to the listener is never blocked,
+                                                       // the listener's own steps and shots among them
 constexpr float kRadius = 0.3f;                        // metres: a sound is a ball, partly hidden behind an edge
 constexpr int kSamples = 16;                           // points in that ball
 constexpr int kSurfaces = 3;                           // walls between counted for transmission
@@ -68,7 +69,8 @@ int64_t NowMs() {
 
 struct Sound {
     float pos[3] = {};  // in the level's space
-    float raw[3] = {};  // as the mixer gave it, for the log
+    float raw[3] = {};  // as the mixer gave it
+    bool placed = false;
     int64_t seen = 0;
     float target[3] = {1, 1, 1};  // the rays' last result
     float heard[3] = {1, 1, 1};   // what the mixer was given, following target
@@ -80,6 +82,7 @@ std::unordered_map<uint32_t, Sound> g_sounds;
 std::optional<Scene> g_pending;  // a level for the thread to build
 bool g_scene = false;            // a level is built and in use
 float g_meters = 1;
+float g_raise = 0;  // the level's Scene::raise
 bool g_started = false;
 float g_listener[3] = {};  // in the level's space, as the mixer last gave it
 float g_origin[3] = {}, g_axes[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the sounds' space in the level (SetSoundSpace)
@@ -91,6 +94,10 @@ void ToLevel(const float in[3], float out[3]) {
 std::atomic<bool> g_on{false};
 std::atomic<float> g_strength{1.0f};
 std::atomic<int> g_state{0};  // 0 not tried, 1 loaded, -1 unavailable
+int64_t g_alternate = [] {  // XBE_ACOUSTICS_ALTERNATE: milliseconds on, then as many off
+    const char* v = std::getenv("XBE_ACOUSTICS_ALTERNATE");
+    return v ? int64_t(std::atof(v) * 1000) : 0;
+}();
 // XBE_ACOUSTICS_LOG=1: where the listener is, the sounds' space and how many sounds are blocked, every five seconds; a
 // number above 1 is the milliseconds between
 int64_t g_log = [] {
@@ -277,6 +284,7 @@ void Run() {
             std::lock_guard<std::mutex> lock(g_mutex);
             g_scene = built;
             g_meters = meters = level->meters;
+            g_raise = level->raise;
             for (auto& [id, sound] : g_sounds) std::fill(sound.target, sound.target + 3, 1.0f);
         }
         // sources follow the sounds playing
@@ -392,15 +400,31 @@ void Configure(bool on, float strength) {
 bool On() { return g_on; }
 bool Available() { return g_state >= 0; }
 
+// on now: XBE_ACOUSTICS_ALTERNATE's half of its period, said when it turns
+bool Heard(int64_t now) {
+    if (g_alternate <= 0) return true;
+    static int s_half = -1;
+    int half = int(now / g_alternate % 2);
+    if (half != s_half) LOGR("acoustics: %s (XBE_ACOUSTICS_ALTERNATE)", half ? "off" : "on");
+    s_half = half;
+    return half == 0;
+}
+
 bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3]) {
     if (!g_on || g_state < 0) return false;
     std::lock_guard<std::mutex> lock(g_mutex);
     Sound& sound = g_sounds[id];
-    std::memcpy(sound.raw, pos, sizeof sound.raw);
-    ToLevel(pos, sound.pos);
+    // placed when it moves (a hundredth of a unit), then left where it was put
+    if (!sound.placed || std::fabs(pos[0] - sound.raw[0]) + std::fabs(pos[1] - sound.raw[1]) +
+                                 std::fabs(pos[2] - sound.raw[2]) > 0.01f) {
+        std::memcpy(sound.raw, pos, sizeof sound.raw);
+        ToLevel(pos, sound.pos);
+        sound.pos[1] += g_raise;
+        sound.placed = true;
+    }
     ToLevel(listener, g_listener);
     sound.seen = NowMs();
-    if (!g_scene) return false;
+    if (!g_scene || !Heard(sound.seen)) return false;
     float strength = g_strength;
     for (int b = 0; b < 3; b++) {
         float kept = kFloor[b] + (1 - kFloor[b]) * sound.target[b];
