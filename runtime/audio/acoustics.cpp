@@ -86,6 +86,9 @@ float g_raise = 0;  // the level's Scene::raise
 bool g_started = false;
 float g_listener[3] = {};  // in the level's space, as the mixer last gave it
 float g_origin[3] = {}, g_axes[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the sounds' space in the level (SetSoundSpace)
+bool g_test = false;   // a test sound is placed (PlaceTestSound)
+float g_test_at[3] = {};  // where, in the level, before the level's raise
+constexpr uint32_t kTestSound = 0xFFFFFFFEu;  // its id among the sounds
 
 void ToLevel(const float in[3], float out[3]) {
     for (int i = 0; i < 3; i++) out[i] = g_origin[i] + in[0] * g_axes[i] + in[1] * g_axes[3 + i] + in[2] * g_axes[6 + i];
@@ -98,6 +101,7 @@ int64_t g_alternate = [] {  // XBE_ACOUSTICS_ALTERNATE: milliseconds on, then as
     const char* v = std::getenv("XBE_ACOUSTICS_ALTERNATE");
     return v ? int64_t(std::atof(v) * 1000) : 0;
 }();
+std::atomic<int64_t> g_alternate_set{-1};  // Alternate's, when it has been called
 // XBE_ACOUSTICS_LOG=1: where the listener is, the sounds' space and how many sounds are blocked, every five seconds; a
 // number above 1 is the milliseconds between
 int64_t g_log = [] {
@@ -402,10 +406,11 @@ bool Available() { return g_state >= 0; }
 
 // on now: XBE_ACOUSTICS_ALTERNATE's half of its period, said when it turns
 bool Heard(int64_t now) {
+    if (int64_t set = g_alternate_set; set >= 0) g_alternate = set;
     if (g_alternate <= 0) return true;
     static int s_half = -1;
     int half = int(now / g_alternate % 2);
-    if (half != s_half) LOGR("acoustics: %s (XBE_ACOUSTICS_ALTERNATE)", half ? "off" : "on");
+    if (half != s_half) LOGR("acoustics: %s (alternating)", half ? "off" : "on");
     s_half = half;
     return half == 0;
 }
@@ -438,6 +443,61 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
 void Forget(uint32_t id) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_sounds.erase(id);
+}
+
+void PlaceTestSound() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < 3; i++) g_test_at[i] = g_origin[i];
+    g_test_at[1] -= g_raise;  // Gains raises it again: the sound sits at the eye
+    g_test = true;
+    g_sounds.erase(kTestSound);
+    LOGR("acoustics: test sound at %.2f %.2f %.2f", g_test_at[0], g_test_at[1] + g_raise, g_test_at[2]);
+}
+
+void RemoveTestSound() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_test = false;
+    g_sounds.erase(kTestSound);
+}
+
+bool TestSound(float pos[3]) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_test) return false;
+    // the level's point taken back into the sounds' space: its axes are at right angles, so the turn is their transpose
+    float d[3] = {g_test_at[0] - g_origin[0], g_test_at[1] - g_origin[1], g_test_at[2] - g_origin[2]};
+    for (int i = 0; i < 3; i++) pos[i] = d[0] * g_axes[i * 3] + d[1] * g_axes[i * 3 + 1] + d[2] * g_axes[i * 3 + 2];
+    return true;
+}
+
+void Alternate(float seconds) {
+    g_alternate_set = int64_t(std::max(seconds, 0.0f) * 1000);
+    LOGR("acoustics: alternating every %.1f s", seconds);
+}
+
+float Alternating() {
+    int64_t set = g_alternate_set;
+    return float(set >= 0 ? set : g_alternate) / 1000.0f;
+}
+
+Status Now() {
+    Status st;
+    st.loaded = g_state > 0;
+    st.on = g_on;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    st.level = g_scene;
+    st.test_placed = g_test;
+    st.heard = st.on && Heard(NowMs());
+    int64_t now = NowMs();
+    for (const auto& [id, sound] : g_sounds) {
+        if (now - sound.seen > 200) continue;
+        if (id == kTestSound) {
+            st.test = sound.heard[1];
+            continue;
+        }
+        st.sounds++;
+        st.blocked += sound.target[1] < 0.5f;
+    }
+    return st;
 }
 
 }  // namespace audio::acoustics

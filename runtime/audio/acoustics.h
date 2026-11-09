@@ -61,4 +61,23 @@ bool Available();  // Steam Audio loaded, or not tried yet
 bool Gains(uint32_t sound, const float pos[3], const float listener[3], float out[3]);
 void Forget(uint32_t sound);  // the sound is gone
 
+// Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
+// made by the mixer and heard through the walls as any 3D sound; placing it again moves it
+void PlaceTestSound();
+void RemoveTestSound();
+bool TestSound(float pos[3]);  // the mixer: where it is, in the game's space as its sounds are given; false: none
+// the effect switched off and on every `seconds` (0 stops), as XBE_ACOUSTICS_ALTERNATE does
+void Alternate(float seconds);
+float Alternating();
+struct Status {
+    bool loaded = false;  // Steam Audio is running
+    bool level = false;   // a level is in use
+    bool on = false;      // switched on
+    bool heard = false;   // on, and not in the off half of Alternate
+    uint32_t sounds = 0, blocked = 0;  // 3D sounds playing, and those more than half blocked
+    float test = -1;                   // the test sound's middle band heard, 0 to 1; -1: none
+    bool test_placed = false;
+};
+Status Now();
+
 }  // namespace audio::acoustics
