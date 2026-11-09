@@ -659,6 +659,58 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     v.walls = through;
 }
 
+// The acoustics test sound (audio/acoustics.h, PlaceTestSound): made here, a low buzz under bursts of hiss, so a wall's
+// dulling is plain to hear. Panned by its direction, full within 3 m and halved with each doubling past, and heard
+// through the walls as any 3D voice
+struct TestVoice {
+    uint32_t n = 0;           // frames made
+    uint32_t noise = 0x9E3779B9u;
+    float phase = 0;
+    float split[2] = {};
+    float band[3] = {1, 1, 1};
+    float left = 0, right = 0;
+};
+TestVoice g_test;
+constexpr uint32_t kTestSound = 0xFFFFFFFEu;  // acoustics.cpp's id for it
+
+void MixTest(float* bins, uint32_t frames) {
+    float pos[3];
+    if (!audio::acoustics::TestSound(pos)) {
+        g_test.left = g_test.right = 0;
+        return;
+    }
+    float d[3] = {pos[0] - g_listener[0], pos[1] - g_listener[1], pos[2] - g_listener[2]};
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    float att = std::min(1.0f, 3.0f / std::max(std::sqrt(Dot(d, d)), 0.01f));
+    float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
+    float left = att * std::cos((pan + 1) * 0.78539816f), rightg = att * std::sin((pan + 1) * 0.78539816f);
+    float walls[3] = {1, 1, 1};
+    audio::acoustics::Gains(kTestSound, pos, g_listener, walls);
+    float band_step[3], left_step = (left - g_test.left) / float(frames), right_step = (rightg - g_test.right) / float(frames);
+    for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - g_test.band[b]) / float(frames);
+    constexpr uint32_t kPeriod = audio::kRate * 6 / 10, kBurst = audio::kRate * 35 / 100, kFade = audio::kRate / 200;
+    for (uint32_t i = 0; i < frames; i++, g_test.n++) {
+        uint32_t at = g_test.n % kPeriod;
+        float env = at >= kBurst ? 0.0f : std::min({1.0f, float(at) / kFade, float(kBurst - at) / kFade});
+        g_test.noise ^= g_test.noise << 13;
+        g_test.noise ^= g_test.noise >> 17;
+        g_test.noise ^= g_test.noise << 5;
+        float hiss = float(int32_t(g_test.noise)) / 2147483648.0f;
+        g_test.phase += 110.0f / audio::kRate;
+        if (g_test.phase >= 1) g_test.phase -= 1;
+        float x = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
+        for (int b = 0; b < 3; b++) g_test.band[b] += band_step[b];
+        x = Through(x, g_test.split, g_test.band);
+        g_test.left += left_step;
+        g_test.right += right_step;
+        float* frame = bins + size_t(i) * kBins;
+        frame[kFrontLeft] += x * g_test.left;
+        frame[kFrontRight] += x * g_test.right;
+    }
+    std::memcpy(g_test.band, walls, sizeof walls);
+}
+
 void Render(float* out, uint32_t frames) {
     static std::vector<float> bins;  // the output thread alone renders
     bins.assign(size_t(frames) * kBins, 0.0f);
@@ -667,6 +719,7 @@ void Render(float* out, uint32_t frames) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);
     }
+    MixTest(bins.data(), frames);
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
     for (uint32_t i = 0; i < frames; i++) {
         const float* b = &bins[size_t(i) * kBins];
