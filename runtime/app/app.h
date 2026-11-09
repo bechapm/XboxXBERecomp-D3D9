@@ -61,8 +61,9 @@ Mode Desktop();
 std::vector<Mode> DisplayModes();  // the game window's monitor's modes, width then height ascending, no repeats
 Mode Output();
 float RenderScale(uint32_t guest_height);
-// the renderer keeps the picture's size from the start until the next: a tool's d3d9.dll draws (RTX Remix), which takes
-// the screen by the back buffer's size. A settings page says so beside what changes it (render scale, resolution, shape)
+// the renderer keeps the picture's size from the start until the next; a settings page says so beside what changes it
+// (render scale, resolution, shape). No renderer of the SDK's sets it now: under a tool's d3d9.dll (RTX Remix) a new
+// size resets the back buffer live
 bool SizeAtStart();
 void SetSizeAtStart(bool at_start);
 // the output is 3:2 or wider: the console reports a widescreen TV and the frame is shown 16:9, else 4:3 as on a 4:3 TV
