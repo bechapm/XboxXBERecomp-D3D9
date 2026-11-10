@@ -12,6 +12,7 @@
 
 #include "audio/acoustics.h"
 #include "audio/audio.h"
+#include "audio/sounds.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
 #include "xdk/dsp_image.h"
@@ -145,6 +146,7 @@ struct Voice {
     // play region in bytes from data, loop region in bytes from the play region
     uint32_t data = 0, bytes = 0, loop_start = 0, loop_len = 0, play_start = 0, play_len = 0;
     uint32_t owned = 0;  // memory the library made for the buffer
+    std::shared_ptr<const audio::sounds::Sample> host;  // a game's own sound (audio/sounds.h): read from it, not from data
     bool playing = false, looping = false, paused = false;
     bool sync = false;  // held until IDirectSound_SynchPlayback
     bool active = false, ending = false;  // stream: took a packet since it went quiet, quiet again once they run out
@@ -264,6 +266,7 @@ const int16_t* DecodedBlock(Voice& v, int64_t at) {
 
 // sample of channel c at frame f of memory starting at data
 float Sample(Voice& v, uint32_t data, uint32_t f, int c) {
+    if (v.host) return f < v.host->pcm.size() ? v.host->pcm[f] / 32768.0f : 0.0f;
     c = std::min<int>(c, v.channels - 1);
     const uint8_t* p = static_cast<const uint8_t*>(HostPtr(data));
     if (v.tag == 0x69) {
@@ -569,7 +572,7 @@ std::optional<Cursor> BufferFrame(Voice& v) {
         v.pos = start + std::fmod(v.pos - start, double(end - start));
         f = uint32_t(v.pos);
     }
-    if (!v.data) return std::nullopt;
+    if (!v.data && !v.host) return std::nullopt;
     uint32_t base = v.data + v.play_start;
     Cursor at = {base, f, base, f};
     if (f + 1 < end) {
@@ -854,6 +857,25 @@ void MixTest(float* bins, uint32_t frames) {
     std::memcpy(g_test.band, walls, sizeof walls);
 }
 
+// A game's own sounds (audio/sounds.h) are voices like the title's, under ids no guest object has. One that has played
+// to its end, or was stopped, is let go here
+constexpr uint32_t kHostFirst = 0xFE000000u, kHostCount = 0x01000000u;
+bool HostId(uint32_t obj) { return obj - kHostFirst < kHostCount; }
+uint32_t g_host_next = 0, g_host_voices = 0;
+
+void EndHostVoices() {
+    if (!g_host_voices) return;
+    for (auto it = g_voices.begin(); it != g_voices.end();) {
+        if (!it->second.host || it->second.playing) {
+            ++it;
+            continue;
+        }
+        audio::acoustics::Forget(it->first);
+        it = g_voices.erase(it);
+        g_host_voices--;
+    }
+}
+
 void Render(float* out, uint32_t frames) {
     static std::vector<float> bins;  // the output thread alone renders
     bins.assign(size_t(frames) * kBins, 0.0f);
@@ -862,6 +884,7 @@ void Render(float* out, uint32_t frames) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);
     }
+    EndHostVoices();
     MixTest(bins.data(), frames);
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
     for (uint32_t i = 0; i < frames; i++) {
@@ -1503,3 +1526,42 @@ STREAM(SetPosition, 5) {
 }
 STREAM(SetVelocity, 5) { return 0; }
 STREAM(SetI3DL2Source, 3) { return 0; }
+
+namespace audio::sounds {
+
+uint32_t Play(std::shared_ptr<const Sample> sample, const Shot& shot) {
+    if (!sample || sample->pcm.empty() || !sample->rate) return 0;
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (!g_started || g_host_voices >= kVoices) return 0;
+    uint32_t obj;
+    do obj = kHostFirst + g_host_next++ % kHostCount;
+    while (g_voices.count(obj));
+    Voice& v = g_voices[obj];
+    v.obj = obj;
+    v.rate = sample->rate;
+    v.freq = uint32_t(std::clamp(double(sample->rate) * shot.pitch, 100.0, 384000.0));
+    v.bytes = v.play_len = v.loop_len = uint32_t(sample->pcm.size()) * 2;
+    v.host = std::move(sample);
+    v.is3d = true;
+    v.mode = shot.relative ? 1 : 0;
+    std::memcpy(v.p, shot.pos, sizeof v.p);
+    v.min_dist = shot.min_distance;
+    v.max_dist = shot.max_distance;
+    v.volume = shot.volume;
+    // the library's bins for a 3D voice: the crosstalk pairs, which a mono voice's two ears play
+    static const uint8_t k3d[4] = {kCrosstalkFrontLeft, kCrosstalkFrontRight, kCrosstalkBackLeft, kCrosstalkBackRight};
+    std::memcpy(v.bin, k3d, sizeof k3d);
+    v.nbins = 4;
+    v.playing = true;
+    g_host_voices++;
+    return obj;
+}
+
+void Stop(uint32_t id) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (!HostId(id)) return;
+    auto it = g_voices.find(id);
+    if (it != g_voices.end() && it->second.host) it->second.playing = false;  // Render lets it go
+}
+
+}  // namespace audio::sounds
