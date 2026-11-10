@@ -43,7 +43,10 @@ namespace {
     X(iplSourceGetOutputs) X(iplHRTFCreate) X(iplBinauralEffectCreate) X(iplBinauralEffectRelease)                \
     X(iplBinauralEffectReset) X(iplBinauralEffectApply) X(iplSceneRetain) X(iplProbeBatchCreate)                 \
     X(iplProbeBatchRelease) X(iplProbeBatchAddProbe) X(iplProbeBatchCommit) X(iplPathBakerBake)                  \
-    X(iplSimulatorAddProbeBatch) X(iplSimulatorRemoveProbeBatch) X(iplSimulatorRunPathing)
+    X(iplSimulatorAddProbeBatch) X(iplSimulatorRemoveProbeBatch) X(iplSimulatorRunPathing)                       \
+    X(iplSimulatorRunReflections) X(iplReflectionEffectCreate) X(iplReflectionEffectApply)                       \
+    X(iplReflectionEffectReset) X(iplAmbisonicsDecodeEffectCreate) X(iplAmbisonicsDecodeEffectApply)             \
+    X(iplAmbisonicsDecodeEffectReset)
 struct Api {
 #define IPL_POINTER(name) decltype(&::name) name = nullptr;
     IPL_FUNCS(IPL_POINTER)
@@ -69,6 +72,10 @@ constexpr int kSurfaces = 3;                           // walls between counted 
 // was too strong in play (10 Nov 2026); now -6, -10.5 and -16.5 dB
 constexpr float kFloor[3] = {0.5f, 0.3f, 0.15f};
 constexpr float kFollow = 0.3f;  // each mix block moves this much of the way to the latest result, about 30 ms
+// Steam Audio's transmission is a wall's own (a wood wall passes 1.4% of the middle band, concrete 0.2%), and all of
+// it lies under kFloor: a listening check found a wood wall and a concrete one heard alike (31% and 30%, 10 Nov 2026).
+// Raised to this power a thin wall stands clear of a thick one: wood 18%, glass 29%, concrete 8% over the floor
+constexpr float kThin = 0.4f;
 // The ways round (Way). Points 1.5 m over every floor, this far apart; fewer than kMaxProbes, or they are spread wider
 constexpr float kProbeSpacing = 1.5f;
 constexpr float kProbeHeight = 1.5f;
@@ -145,6 +152,29 @@ struct Ear {
 std::mutex g_ears_mutex;
 std::unordered_map<uint64_t, Ear> g_ears;  // by sound and image
 int64_t g_ears_swept = 0;
+
+// The room (RoomAnswer). 4096 rays of 32 bounces from the listener, for two seconds of sound: the first half second is
+// kept as traced (first order Ambisonics), the rest is a reverb of the length the trace measured (Steam Audio's hybrid)
+constexpr int kRoomRays = 4096;
+constexpr int kRoomBounces = 32;
+constexpr int kRoomDiffuse = 32;
+constexpr float kRoomSeconds = 2.0f;
+constexpr float kRoomTraced = 0.5f;
+constexpr int kRoomIr = int(kRoomSeconds * 48000);
+constexpr int64_t kRoomRestMs = 100;  // between traces
+// The room at level 1, next to a sound made at the listener: a bare concrete room answers 8 dB over the sound itself
+// when traced as it is, more than a game's mix has room for
+constexpr float kRoomGain = 0.7f;
+constexpr float kRoomSpeakers = 0.47f;  // Steam Audio's speaker decode of a room is 6.6 dB over its head's (measured)
+std::atomic<bool> g_room{false};
+std::atomic<float> g_room_level{0.5f};
+std::atomic<bool> g_room_traced{false};  // the level in use has a trace
+std::atomic<float> g_room_ms{0};
+std::atomic<IPLSource> g_room_source{nullptr};  // the listener, in the room's own simulator; made once, never let go
+std::atomic<IPLReflectionEffect> g_room_effect{nullptr};
+std::atomic<IPLAmbisonicsDecodeEffect> g_room_decode{nullptr};
+std::condition_variable g_room_wake;
+std::optional<IPLScene> g_room_scene;  // under g_mutex: a level for the room's thread, its own hold on it; null, none
 
 std::atomic<bool> g_paths{[] {
     const char* v = std::getenv("XBE_ACOUSTICS_PATHS");
@@ -454,6 +484,109 @@ struct Job {
 
 constexpr IPLSimulationFlags kBoth = IPLSimulationFlags(IPL_SIMULATIONFLAGS_DIRECT | IPL_SIMULATIONFLAGS_PATHING);
 
+// The room's thread: a simulator of its own with the listener as its one source, so a trace never holds up the rays for
+// the sounds. Started when a room is first wanted; the levels reach it as the rays' thread builds them
+void RunRoom(IPLContext context, IPLSceneType type) {
+    IPLSimulationSettings ss{};
+    ss.flags = IPL_SIMULATIONFLAGS_REFLECTIONS;
+    ss.sceneType = type;
+    ss.reflectionType = IPL_REFLECTIONEFFECTTYPE_HYBRID;
+    ss.maxNumRays = kRoomRays;
+    ss.numDiffuseSamples = kRoomDiffuse;
+    ss.maxDuration = kRoomSeconds;
+    ss.maxOrder = 1;
+    ss.maxNumSources = 1;
+    ss.numThreads = int(std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u));
+    ss.samplingRate = 48000;
+    ss.frameSize = IPLint32(kFrame);
+    IPLSimulator simulator = nullptr;
+    IPLSource source = nullptr;
+    IPLSourceSettings so{};
+    so.flags = IPL_SIMULATIONFLAGS_REFLECTIONS;
+    IPLAudioSettings as{48000, IPLint32(kFrame)};
+    IPLReflectionEffectSettings rs{};
+    rs.type = IPL_REFLECTIONEFFECTTYPE_HYBRID;
+    rs.irSize = kRoomIr;
+    rs.numChannels = 4;
+    IPLReflectionEffect effect = nullptr;
+    if (g_ipl.iplSimulatorCreate(context, &ss, &simulator) != IPL_STATUS_SUCCESS ||
+        g_ipl.iplSourceCreate(simulator, &so, &source) != IPL_STATUS_SUCCESS ||
+        g_ipl.iplReflectionEffectCreate(context, &as, &rs, &effect) != IPL_STATUS_SUCCESS) {
+        LOGR("acoustics: Steam Audio's room did not start, sounds have no echo of their rooms");
+        return;
+    }
+    g_ipl.iplSourceAdd(source, simulator);
+    g_ipl.iplSimulatorCommit(simulator);
+    IPLScene scene = nullptr;
+    bool said = false;
+    for (;;) {
+        std::optional<IPLScene> next;
+        float listener[3], meters;
+        {
+            std::unique_lock<std::mutex> lock(g_mutex);
+            g_room_wake.wait_for(lock, std::chrono::milliseconds(kRoomRestMs));
+            next.swap(g_room_scene);
+            std::memcpy(listener, g_listener, sizeof listener);
+            meters = g_meters;
+        }
+        if (next) {
+            g_room_traced = false;  // the mixer fades the last level's room out
+            if (*next) {
+                g_ipl.iplSimulatorSetScene(simulator, *next);
+                g_ipl.iplSimulatorCommit(simulator);
+            }
+            if (scene) g_ipl.iplSceneRelease(&scene);
+            scene = *next;
+            said = false;
+        }
+        if (!scene || !g_room || !g_on) continue;
+        if (!g_room_decode.load()) {  // the head decodes it, made by the rays' thread
+            IPLHRTF hrtf = g_hrtf;
+            if (!hrtf) continue;
+            IPLAmbisonicsDecodeEffectSettings ds{};
+            ds.speakerLayout.type = IPL_SPEAKERLAYOUTTYPE_STEREO;
+            ds.hrtf = hrtf;
+            ds.maxOrder = 1;
+            IPLAmbisonicsDecodeEffect decode = nullptr;
+            if (g_ipl.iplAmbisonicsDecodeEffectCreate(context, &as, &ds, &decode) != IPL_STATUS_SUCCESS) {
+                LOGR("acoustics: Steam Audio's room has no decoder, sounds have no echo of their rooms");
+                return;
+            }
+            g_room_decode = decode;
+            g_room_effect = effect;
+            g_room_source = source;
+        }
+        // traced from the listener to the listener: the room as a sound made where the listener stands is answered
+        IPLSimulationSharedInputs shared{};
+        shared.listener = At(listener, meters);
+        shared.numRays = kRoomRays;
+        shared.numBounces = kRoomBounces;
+        shared.duration = kRoomSeconds;
+        shared.order = 1;
+        shared.irradianceMinDistance = 1.0f;
+        IPLSimulationInputs in{};
+        in.flags = IPL_SIMULATIONFLAGS_REFLECTIONS;
+        in.source = shared.listener;
+        in.reverbScale[0] = in.reverbScale[1] = in.reverbScale[2] = 1.0f;
+        in.hybridReverbTransitionTime = kRoomTraced;
+        in.hybridReverbOverlapPercent = 0.25f;
+        int64_t began = NowMs();
+        g_ipl.iplSimulatorSetSharedInputs(simulator, IPL_SIMULATIONFLAGS_REFLECTIONS, &shared);
+        g_ipl.iplSourceSetInputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &in);
+        g_ipl.iplSimulatorRunReflections(simulator);
+        float took = float(NowMs() - began);
+        g_room_ms = took;
+        g_room_traced = true;
+        if (!said) {
+            IPLSimulationOutputs out{};
+            g_ipl.iplSourceGetOutputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &out);
+            LOGR("acoustics: the room round the listener traced in %.0f ms, its reverb %.2f %.2f %.2f s", took,
+                 out.reflections.reverbTimes[0], out.reflections.reverbTimes[1], out.reflections.reverbTimes[2]);
+            said = true;
+        }
+    }
+}
+
 void Run() {
     Simulation s;
     if (!Open(s)) {
@@ -466,8 +599,13 @@ void Run() {
     float listener[3] = {};
     std::vector<Job> jobs;
     int64_t said = NowMs();
+    bool room_started = false;
     for (;;) {
-        if (g_headphones) MakeHead(s);
+        if (g_headphones || g_room) MakeHead(s);
+        if (g_room && !room_started) {
+            room_started = true;
+            std::thread(RunRoom, s.context, s.type).detach();
+        }
         std::optional<Scene> level;
         std::optional<Baked> taken;
         float meters;
@@ -501,6 +639,10 @@ void Run() {
                 g_scale = meters;
                 g_raise = level->raise;
                 g_probes = 0;
+                // the room's thread takes the level too, with a hold of its own (one it never took is let go)
+                if (g_room_scene && *g_room_scene) g_ipl.iplSceneRelease(&*g_room_scene);
+                g_room_scene = built ? g_ipl.iplSceneRetain(s.scene) : nullptr;
+                g_room_wake.notify_one();
                 for (auto& [id, sound] : g_sounds) {
                     std::fill(sound.target, sound.target + 3, 1.0f);
                     sound.way = false;
@@ -593,7 +735,8 @@ void Run() {
             IPLSimulationOutputs out{};
             g_ipl.iplSourceGetOutputs(it->second, flags, &out);
             float open = std::clamp(out.direct.occlusion, 0.0f, 1.0f);
-            for (int b = 0; b < 3; b++) target[b] = open + (1 - open) * std::clamp(out.direct.transmission[b], 0.0f, 1.0f);
+            for (int b = 0; b < 3; b++)
+                target[b] = open + (1 - open) * std::pow(std::clamp(out.direct.transmission[b], 0.0f, 1.0f), kThin);
             // The way round arrives as first order Ambisonics (W, Y to the left, Z up, X ahead, N3D) of a sound
             // fallen off as 1 / metres along it: its length is in W, where it comes from in the other three. It
             // brings what the walls took from the sound, less what its bends take
@@ -810,6 +953,92 @@ bool Way(uint32_t id, float pos[3], float gain[3]) {
     return true;
 }
 
+void SetRoom(bool on, float level) {
+    Env("XBE_ACOUSTICS_REVERB", on);
+    g_room_level = std::clamp(level, 0.0f, 1.0f);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (on != g_room) LOGR("acoustics: the room's echo %s", on ? "on" : "off");
+    g_room = on;
+    g_wake.notify_one();
+}
+
+bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
+
+bool RoomAnswer(const float* send, const float front[3], const float top[3], float* left, float* right, uint32_t frames) {
+    static float s_level = 0;   // the mixer's thread alone: the level the last block ended at
+    static bool s_ran = false;  // the effect holds sound since its last reset
+    IPLReflectionEffect effect = g_room_effect;
+    IPLAmbisonicsDecodeEffect decode = g_room_decode;
+    IPLSource source = g_room_source;
+    IPLHRTF hrtf = g_hrtf;
+    if (!effect || !decode || !source || !hrtf || frames != kFrame) return false;
+    bool on = g_room && g_on && g_room_traced && Heard(NowMs());
+    float want = on ? g_room_level * kRoomGain : 0.0f;
+    if (want == 0 && s_level == 0) {
+        if (s_ran) {  // switched off, or a new level: the next room starts without the last one's tail
+            g_ipl.iplReflectionEffectReset(effect);
+            g_ipl.iplAmbisonicsDecodeEffectReset(decode);
+            s_ran = false;
+        }
+        return false;
+    }
+    // the listener's right, up and ahead in the level, from the sounds' space as the mixer has them
+    float axes[9];
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        std::memcpy(axes, g_axes, sizeof axes);
+    }
+    float side[3] = {top[1] * front[2] - top[2] * front[1], top[2] * front[0] - top[0] * front[2],
+                     top[0] * front[1] - top[1] * front[0]};
+    float r[3], u[3], f[3];
+    for (int i = 0; i < 3; i++) {
+        r[i] = side[0] * axes[i] + side[1] * axes[3 + i] + side[2] * axes[6 + i];
+        u[i] = top[0] * axes[i] + top[1] * axes[3 + i] + top[2] * axes[6 + i];
+        f[i] = front[0] * axes[i] + front[1] * axes[3 + i] + front[2] * axes[6 + i];
+    }
+    IPLSimulationOutputs out{};
+    g_ipl.iplSourceGetOutputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &out);
+    IPLReflectionEffectParams params = out.reflections;
+    params.type = IPL_REFLECTIONEFFECTTYPE_HYBRID;
+    params.numChannels = 4;
+    params.irSize = kRoomIr;
+    static float ambi[4][kFrame], ears[2][kFrame];
+    float* in_channels[1] = {const_cast<float*>(send)};
+    float* ambi_channels[4] = {ambi[0], ambi[1], ambi[2], ambi[3]};
+    float* ear_channels[2] = {ears[0], ears[1]};
+    IPLAudioBuffer in{1, IPLint32(frames), in_channels};
+    IPLAudioBuffer room{4, IPLint32(frames), ambi_channels};
+    IPLAudioBuffer heard{2, IPLint32(frames), ear_channels};
+    g_ipl.iplReflectionEffectApply(effect, &params, &in, &room, nullptr);
+    // The trace is in the level's axes: W, then the sound's direction along -x, +y and -z (Ambisonics' left, up and
+    // ahead as Steam Audio lays them). Turned to the listener's own left, up and ahead here, so the decoder needs no
+    // orientation and a level of either handedness is heard the right way round
+    for (uint32_t i = 0; i < frames; i++) {
+        float d[3] = {-ambi[1][i], ambi[2][i], -ambi[3][i]};
+        ambi[1][i] = -(d[0] * r[0] + d[1] * r[1] + d[2] * r[2]);
+        ambi[2][i] = d[0] * u[0] + d[1] * u[1] + d[2] * u[2];
+        ambi[3][i] = d[0] * f[0] + d[1] * f[1] + d[2] * f[2];
+    }
+    bool head = g_headphones;
+    IPLAmbisonicsDecodeEffectParams dp{};
+    dp.order = 1;
+    dp.hrtf = hrtf;
+    dp.orientation.right = {1, 0, 0};
+    dp.orientation.up = {0, 1, 0};
+    dp.orientation.ahead = {0, 0, -1};
+    dp.binaural = head ? IPL_TRUE : IPL_FALSE;
+    g_ipl.iplAmbisonicsDecodeEffectApply(decode, &dp, &room, &heard);
+    s_ran = true;
+    float level = s_level, step = (want - s_level) / float(frames), scale = head ? 1.0f : kRoomSpeakers;
+    for (uint32_t i = 0; i < frames; i++) {
+        level += step;
+        left[i] += ears[0][i] * level * scale;
+        right[i] += ears[1][i] * level * scale;
+    }
+    s_level = want;
+    return true;
+}
+
 void Forget(uint32_t id) {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -865,6 +1094,8 @@ Status Now() {
     std::lock_guard<std::mutex> lock(g_mutex);
     st.level = g_scene;
     st.probes = g_probes;
+    st.room = st.on && g_room && g_room_traced && g_room_effect.load() != nullptr;
+    st.room_ms = g_room_ms;
     st.test_placed = g_test;
     st.heard = st.on && Heard(NowMs());
     int64_t now = NowMs();
