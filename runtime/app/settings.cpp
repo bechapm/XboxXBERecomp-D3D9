@@ -66,6 +66,7 @@ void Load() {
     s.aspect_ratio = t["aspect_ratio"].value_or(s.aspect_ratio);
     s.acoustics = t["acoustics"].value_or(s.acoustics);
     s.acoustics_strength = std::min(t["acoustics_strength"].value_or(s.acoustics_strength), 100u);
+    s.acoustics_headphones = t["acoustics_headphones"].value_or(s.acoustics_headphones);
     input::LoadControls(t["controls"].as_table());
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
@@ -75,7 +76,10 @@ void Load() {
     ApplyAcoustics();
 }
 
-void ApplyAcoustics() { audio::acoustics::Configure(Get().acoustics, Get().acoustics_strength / 100.0f); }
+void ApplyAcoustics() {
+    audio::acoustics::Configure(Get().acoustics, Get().acoustics_strength / 100.0f);
+    audio::acoustics::SetHeadphones(Get().acoustics_headphones);
+}
 
 namespace {
 
@@ -98,7 +102,8 @@ toml::table Table() {
                   {"mouse_sensitivity", int64_t(s.mouse_sensitivity)},
                   {"aspect_ratio", s.aspect_ratio},
                   {"acoustics", s.acoustics},
-                  {"acoustics_strength", int64_t(s.acoustics_strength)}};
+                  {"acoustics_strength", int64_t(s.acoustics_strength)},
+                  {"acoustics_headphones", s.acoustics_headphones}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
