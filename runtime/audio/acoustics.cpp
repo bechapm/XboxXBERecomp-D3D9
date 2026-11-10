@@ -164,15 +164,35 @@ constexpr float kRoomSeconds = 2.0f;
 constexpr float kRoomTraced = 0.5f;
 constexpr int kRoomIr = int(kRoomSeconds * 48000);
 constexpr int64_t kRoomRestMs = 100;  // between traces
-// The room at level 1, next to a sound made at the listener: a bare concrete room answers 8 dB over the sound itself
-// when traced as it is, more than a game's mix has room for. At 0.7 gunfire in a small room clipped and the mix rose
-// 8 dB (10 Nov 2026); halved, with the sounds sent no louder than they are heard
-constexpr float kRoomGain = 0.35f;
+// How loud the room answers. Traced as it is, a room's answer to a sound made at the listener has the room's size in
+// it and the floor under the listener's feet: a bare concrete room of 300 m3 answers 9 dB over the sound itself, most
+// of it the floor's and ceiling's first echo, and a hall of 45,000 m3 1 dB over, 94% of it the floor. A game's mix has
+// no room for the first, and a step's echo in the second was lost under its music (both heard in play, 10 Nov 2026).
+// So two things are done. Surfaces within kRoomNear of the listener give no first echo (Steam Audio's
+// irradianceMinDistance, which drops them: measured), since the sounds answered are not at the listener's feet. And
+// each trace is measured, an impulse run through it for a second, and fitted: its reverberation, the part later than
+// 80 ms, is brought to kRoomWet of the sound for a room that rings kRoomRing seconds and more or less as it rings
+// longer or shorter, whatever its size, as a game's reverb presets are; its early echoes are kept kRoomDry under what
+// was traced; and the one gain a trace can have lies between the two by how much of the answer is late. A hall then
+// differs from a room by how long it rings, a carpeted room stays dry, and the open air next to silent
+constexpr float kRoomNear = 3.0f;    // metres
+constexpr float kRoomWet = -4.0f;    // dB at level 1
+constexpr float kRoomRing = 1.5f;    // seconds
+constexpr float kRoomDry = -3.0f;    // dB
+constexpr float kRoomFitMin = -24.0f, kRoomFitMax = 24.0f;
+// an ear's share of the answer's energy, next to its W (first order Ambisonics through Steam Audio's head: measured,
+// 0.77 at an ear of 0.563 in W)
+constexpr float kRoomEar = 1.37f;
+constexpr int kRoomFitBlocks = 100;  // of 10 ms
+constexpr int kRoomFitEarly = 8;
+constexpr int64_t kRoomFitMs = 2000; // measured again this often, or when the listener has moved kRoomFitMove metres
+constexpr float kRoomFitMove = 1.5f;
 constexpr float kRoomSpeakers = 0.47f;  // Steam Audio's speaker decode of a room is 6.6 dB over its head's (measured)
 std::atomic<bool> g_room{false};
 std::atomic<float> g_room_level{0.5f};
 std::atomic<bool> g_room_traced{false};  // the level in use has a trace
 std::atomic<float> g_room_ms{0};
+std::atomic<float> g_room_fit{0};  // the gain that fits the last trace measured, at level 1
 std::atomic<IPLSource> g_room_source{nullptr};  // the listener, in the room's own simulator; made once, never let go
 std::atomic<IPLReflectionEffect> g_room_effect{nullptr};
 std::atomic<IPLAmbisonicsDecodeEffect> g_room_decode{nullptr};
@@ -494,6 +514,45 @@ constexpr IPLSimulationFlags kBoth = IPLSimulationFlags(IPL_SIMULATIONFLAGS_DIRE
 
 // The room's thread: a simulator of its own with the listener as its one source, so a trace never holds up the rays for
 // the sounds. Started when a room is first wanted; the levels reach it as the rays' thread builds them
+// A trace measured: an impulse through it, the energy of what comes back in the first second as an ear hears it next
+// to the impulse itself, in dB, and how much of it comes later than 80 ms. The gain that fits it (kRoomWet)
+float Fit(IPLReflectionEffect probe, IPLSource source, float* answered, float* late) {
+    IPLSimulationOutputs out{};
+    g_ipl.iplSourceGetOutputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &out);
+    IPLReflectionEffectParams params = out.reflections;
+    params.type = IPL_REFLECTIONEFFECTTYPE_HYBRID;
+    params.numChannels = 4;
+    params.irSize = kRoomIr;
+    static float impulse[kFrame], ambi[4][kFrame];  // the room's thread alone
+    float* in_channels[1] = {impulse};
+    float* ambi_channels[4] = {ambi[0], ambi[1], ambi[2], ambi[3]};
+    IPLAudioBuffer in{1, IPLint32(kFrame), in_channels};
+    IPLAudioBuffer room{4, IPLint32(kFrame), ambi_channels};
+    g_ipl.iplReflectionEffectReset(probe);
+    double first = 0, rest = 0;
+    for (int b = 0; b < kRoomFitBlocks; b++) {
+        std::fill(impulse, impulse + kFrame, 0.0f);
+        if (!b) impulse[0] = 1;
+        g_ipl.iplReflectionEffectApply(probe, &params, &in, &room, nullptr);
+        double sum = 0;
+        for (uint32_t i = 0; i < kFrame; i++) sum += double(ambi[0][i]) * ambi[0][i];
+        (b < kRoomFitEarly ? first : rest) += sum;
+    }
+    double all = first + rest;
+    if (!std::isfinite(all) || all < 1e-12) {
+        *answered = -120;
+        *late = 0;
+        return std::pow(10.0f, kRoomDry / 20);
+    }
+    *answered = float(10 * std::log10(all * kRoomEar));
+    *late = float(rest / all);
+    float rings = std::clamp((params.reverbTimes[0] + params.reverbTimes[1] + params.reverbTimes[2]) / 3, 0.1f, 6.0f);
+    float wet = kRoomWet + 10 * std::log10(rings / kRoomRing);
+    float reverberation = float(10 * std::log10(std::max(rest, 1e-12) * kRoomEar));
+    float db = *late * (wet - reverberation) + (1 - *late) * kRoomDry;
+    return std::pow(10.0f, std::clamp(db, kRoomFitMin, kRoomFitMax) / 20);
+}
+
 void RunRoom(IPLContext context, IPLSceneType type) {
     IPLSimulationSettings ss{};
     ss.flags = IPL_SIMULATIONFLAGS_REFLECTIONS;
@@ -503,12 +562,12 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     ss.numDiffuseSamples = kRoomDiffuse;
     ss.maxDuration = kRoomSeconds;
     ss.maxOrder = 1;
-    ss.maxNumSources = 1;
+    ss.maxNumSources = 2;  // the listener twice: one for the mixer, one to measure (a trace serves one effect only)
     ss.numThreads = int(std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u));
     ss.samplingRate = 48000;
     ss.frameSize = IPLint32(kFrame);
     IPLSimulator simulator = nullptr;
-    IPLSource source = nullptr;
+    IPLSource source = nullptr, twin = nullptr;
     IPLSourceSettings so{};
     so.flags = IPL_SIMULATIONFLAGS_REFLECTIONS;
     IPLAudioSettings as{48000, IPLint32(kFrame)};
@@ -516,17 +575,22 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     rs.type = IPL_REFLECTIONEFFECTTYPE_HYBRID;
     rs.irSize = kRoomIr;
     rs.numChannels = 4;
-    IPLReflectionEffect effect = nullptr;
+    IPLReflectionEffect effect = nullptr, probe = nullptr;  // the mixer's, and one to measure a trace with (Fit)
     if (g_ipl.iplSimulatorCreate(context, &ss, &simulator) != IPL_STATUS_SUCCESS ||
         g_ipl.iplSourceCreate(simulator, &so, &source) != IPL_STATUS_SUCCESS ||
-        g_ipl.iplReflectionEffectCreate(context, &as, &rs, &effect) != IPL_STATUS_SUCCESS) {
+        g_ipl.iplSourceCreate(simulator, &so, &twin) != IPL_STATUS_SUCCESS ||
+        g_ipl.iplReflectionEffectCreate(context, &as, &rs, &effect) != IPL_STATUS_SUCCESS ||
+        g_ipl.iplReflectionEffectCreate(context, &as, &rs, &probe) != IPL_STATUS_SUCCESS) {
         LOGR("acoustics: Steam Audio's room did not start, sounds have no echo of their rooms");
         return;
     }
     g_ipl.iplSourceAdd(source, simulator);
+    g_ipl.iplSourceAdd(twin, simulator);
     g_ipl.iplSimulatorCommit(simulator);
     IPLScene scene = nullptr;
     bool said = false;
+    int64_t fitted = 0;  // when the trace was last measured, 0: not for this level
+    float fitted_at[3] = {};
     for (;;) {
         std::optional<IPLScene> next;
         float listener[3], meters;
@@ -546,6 +610,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             if (scene) g_ipl.iplSceneRelease(&scene);
             scene = *next;
             said = false;
+            fitted = 0;
         }
         if (!scene || !g_room || !g_on) continue;
         if (!g_room_decode.load()) {  // the head decodes it, made by the rays' thread
@@ -571,7 +636,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         shared.numBounces = kRoomBounces;
         shared.duration = kRoomSeconds;
         shared.order = 1;
-        shared.irradianceMinDistance = 1.0f;
+        shared.irradianceMinDistance = kRoomNear;
         IPLSimulationInputs in{};
         in.flags = IPL_SIMULATIONFLAGS_REFLECTIONS;
         in.source = shared.listener;
@@ -581,17 +646,34 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         int64_t began = NowMs();
         g_ipl.iplSimulatorSetSharedInputs(simulator, IPL_SIMULATIONFLAGS_REFLECTIONS, &shared);
         g_ipl.iplSourceSetInputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &in);
+        g_ipl.iplSourceSetInputs(twin, IPL_SIMULATIONFLAGS_REFLECTIONS, &in);
         g_ipl.iplSimulatorRunReflections(simulator);
         float took = float(NowMs() - began);
         g_room_ms = took;
-        g_room_traced = true;
-        if (!said) {
+        // measured before the mixer first hears a level's room, then as the listener moves on
+        float moved = 0;
+        for (int k = 0; k < 3; k++) moved += (listener[k] - fitted_at[k]) * (listener[k] - fitted_at[k]);
+        int64_t now = NowMs();
+        if (!fitted || now - fitted >= kRoomFitMs || std::sqrt(moved) * meters >= kRoomFitMove) {
+            float answered = 0, late = 0;
+            float fit = Fit(probe, twin, &answered, &late);
+            g_room_fit = fit;
+            fitted = now;
+            std::memcpy(fitted_at, listener, sizeof fitted_at);
             IPLSimulationOutputs out{};
             g_ipl.iplSourceGetOutputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &out);
-            LOGR("acoustics: the room round the listener traced in %.0f ms, its reverb %.2f %.2f %.2f s", took,
-                 out.reflections.reverbTimes[0], out.reflections.reverbTimes[1], out.reflections.reverbTimes[2]);
+            if (!said)
+                LOGR("acoustics: the room round the listener traced in %.0f ms, its reverb %.2f %.2f %.2f s", took,
+                     out.reflections.reverbTimes[0], out.reflections.reverbTimes[1], out.reflections.reverbTimes[2]);
+            if (!said || g_log)
+                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, fitted by %.1f dB (reverb %.2f %.2f %.2f s, "
+                     "measured in %lld ms)",
+                     answered, late * 100, 20 * std::log10(fit), out.reflections.reverbTimes[0],
+                     out.reflections.reverbTimes[1], out.reflections.reverbTimes[2],
+                     static_cast<long long>(NowMs() - now));
             said = true;
         }
+        g_room_traced = true;
     }
 }
 
@@ -981,7 +1063,11 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
     IPLHRTF hrtf = g_hrtf;
     if (!effect || !decode || !source || !hrtf || frames != kFrame) return false;
     bool on = g_room && g_on && g_room_traced && Heard(NowMs());
-    float want = on ? g_room_level * kRoomGain : 0.0f;
+    // the trace's fit is followed over a few blocks: it steps as the listener walks from one room into another
+    static float s_fit = 0;
+    float fit = g_room_fit;
+    s_fit = s_level == 0 ? fit : s_fit + (fit - s_fit) * 0.05f;
+    float want = on ? g_room_level * s_fit : 0.0f;
     if (want == 0 && s_level == 0) {
         if (s_ran) {  // switched off, or a new level: the next room starts without the last one's tail
             g_ipl.iplReflectionEffectReset(effect);
