@@ -165,7 +165,9 @@ constexpr int kRoomDiffuse = 32;
 constexpr float kRoomSeconds = 2.0f;
 constexpr float kRoomTraced = 0.5f;
 constexpr int kRoomIr = int(kRoomSeconds * 48000);
-constexpr int64_t kRoomRestMs = 100;  // between traces
+// between traces: four a second follow a listener at a run (a room's echo changes over metres, not steps), and at 100
+// the traces took a third of a processor on a PC (12 ms each on four threads, 10 Nov 2026)
+constexpr int64_t kRoomRestMs = 250;
 // How loud the room answers. Traced as it is, a room's answer to a sound made at the listener has the room's size in
 // it and the floor under the listener's feet: a bare concrete room of 300 m3 answers 9 dB over the sound itself, most
 // of it the floor's and ceiling's first echo, and a hall of 45,000 m3 1 dB over, 94% of it the floor. A game's mix has
@@ -185,6 +187,9 @@ constexpr float kRoomRing = 1.5f;    // seconds
 constexpr float kRoomEarly = -3.0f;  // dB at level 1
 constexpr float kRoomFitMin = -24.0f, kRoomFitMax = 24.0f;
 constexpr float kRoomRingMin = 0.3f, kRoomRingMax = 6.0f;  // seconds a room is taken to ring, for the fit
+// a place has a reverberation to raise when this share of its answer is late: none under it, all of the raise over it
+// (open ground with a block beside it 0%, a carpeted room 32%, a nave 21% to 79% by where in it)
+constexpr float kRoomLateNone = 0.02f, kRoomLateAll = 0.15f;
 constexpr int kRoomFitBlocks = 100;  // of 10 ms
 constexpr int kRoomFitEarly = 8;
 constexpr int64_t kRoomFitMs = 2000; // measured again this often, or when the listener has moved kRoomFitMove metres
@@ -596,6 +601,12 @@ float Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource s
     float echoes = float(10 * std::log10(std::max(first, 1e-12)));
     float wet = kRoomWet + 10 * std::log10(rings / kRoomRing);
     float db = std::min(wet - reverberation, kRoomEarly - echoes);
+    // raised only as far as there is a reverberation to raise: none of it under the open sky, where a few faint
+    // echoes would come up 24 dB to stand in for one
+    if (db > 0) {
+        float has = std::clamp((*late - kRoomLateNone) / (kRoomLateAll - kRoomLateNone), 0.0f, 1.0f);
+        db *= has * has * (3 - 2 * has);
+    }
     return std::pow(10.0f, std::clamp(db, kRoomFitMin, kRoomFitMax) / 20);
 }
 
