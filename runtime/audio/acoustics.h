@@ -117,6 +117,7 @@ struct Status {
     float room_ms = 0;                 // how long its last trace took
     float test = -1;                   // the test sound's middle band heard, 0 to 1; -1: none
     bool test_placed = false;
+    bool test_way = false;             // the test sound is also heard by a way round
 };
 Status Now();
 // the 3D sounds mixed in the last fifth of a second, where they are in the level (as the rays see them, raise and
