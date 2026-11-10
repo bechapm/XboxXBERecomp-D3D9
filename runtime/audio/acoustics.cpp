@@ -54,12 +54,17 @@ constexpr auto kStep = std::chrono::milliseconds(15);  // a run of the rays, abo
 constexpr int64_t kStaleMs = 1000;                     // a sound not mixed for this long is let go
 constexpr float kNear = 2.0f;                          // metres: a sound this close to the listener is never blocked,
                                                        // the listener's own steps and shots among them
-constexpr float kRadius = 0.3f;                        // metres: a sound is a ball, partly hidden behind an edge
-constexpr int kSamples = 16;                           // points in that ball
+// metres: a sound is a ball, partly hidden behind an edge, so a sound by a doorway or round a corner fades in rather
+// than switching, the nearest thing to sound bending round an edge before paths through doorways (raised from 0.3 on
+// 10 Nov 2026: a player heard the muffling come on too hard). Keep it under the game's raise plus a little, or the
+// floor hides part of every sound
+constexpr float kRadius = 0.6f;
+constexpr int kSamples = 32;                           // points in that ball
 constexpr int kSurfaces = 3;                           // walls between counted for transmission
 // the least of each band a blocked sound keeps (low, middle, high): a sound behind a thick wall stays a dull sound
-// rather than none, so a game's warnings and footsteps still carry. A starting point, tuned by ear
-constexpr float kFloor[3] = {0.25f, 0.12f, 0.06f};
+// rather than none, so a game's warnings and footsteps still carry. Tuned by ear: 0.25 0.12 0.06 (-12, -18 and -24 dB)
+// was too strong in play (10 Nov 2026); now -6, -10.5 and -16.5 dB
+constexpr float kFloor[3] = {0.5f, 0.3f, 0.15f};
 constexpr float kFollow = 0.3f;  // each mix block moves this much of the way to the latest result, about 30 ms
 
 int64_t NowMs() {
@@ -416,8 +421,7 @@ bool Heard(int64_t now) {
 }
 
 bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3]) {
-    if (!g_on || g_state < 0) return false;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> lock(g_mutex);  // every sound is kept track of, on or off, for Sources
     Sound& sound = g_sounds[id];
     // placed when it moves (a hundredth of a unit), then left where it was put
     if (!sound.placed || std::fabs(pos[0] - sound.raw[0]) + std::fabs(pos[1] - sound.raw[1]) +
@@ -429,7 +433,10 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
     }
     ToLevel(listener, g_listener);
     sound.seen = NowMs();
-    if (!g_scene) return false;
+    if (!g_on || g_state < 0 || !g_scene) {
+        std::fill(sound.heard, sound.heard + 3, 1.0f);  // switched back on, it eases in from whole
+        return false;
+    }
     // in the off half of an alternation the sound follows back to whole, as it follows the rays: the change is ramped,
     // and what it was given (Now()'s test sound included) is what it is heard at, not the last muffled value
     float strength = Heard(sound.seen) ? float(g_strength) : 0.0f;
@@ -500,6 +507,31 @@ Status Now() {
         st.blocked += sound.target[1] < 0.5f;
     }
     return st;
+}
+
+std::vector<Source> Sources() {
+    std::vector<Source> out;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    int64_t now = NowMs();
+    bool on = g_on && g_state >= 0 && g_scene;
+    for (auto it = g_sounds.begin(); it != g_sounds.end();) {
+        const Sound& sound = it->second;
+        if (now - sound.seen > kStaleMs && !g_started) {  // the thread lets go of stale sounds; until it runs, here
+            it = g_sounds.erase(it);
+            continue;
+        }
+        if (now - sound.seen <= 200) {
+            Source src{};
+            std::memcpy(src.pos, sound.pos, sizeof src.pos);
+            float d[3] = {sound.pos[0] - g_listener[0], sound.pos[1] - g_listener[1], sound.pos[2] - g_listener[2]};
+            src.beside = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * g_meters < kNear;
+            src.through = on ? sound.heard[1] : 1.0f;
+            src.test = it->first == kTestSound;
+            out.push_back(src);
+        }
+        ++it;
+    }
+    return out;
 }
 
 }  // namespace audio::acoustics
