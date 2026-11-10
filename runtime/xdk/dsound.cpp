@@ -618,13 +618,47 @@ float Through(float x, float* split, const float* gain) {
 std::vector<float> g_room_send;
 std::vector<float> g_way_mono;
 
-// a voice's own level, apart from where it is: its volume on the loudest of its bins
+// a voice's own level, apart from where it is: its volume on the loudest of its bins, as SlotGains has it
 float OwnLevel(const Voice& v) {
+    bool image = dsp::Loaded();
     float most = 0;
-    if (!v.nbins) most = 1;
-    for (uint32_t s = 0; s < v.nbins; s++) most = std::max(most, Db(v.bin_mb[v.bin[s]]));
+    if (!v.nbins) most = image ? std::ldexp(1.0f, -g_bin_headroom[kFrontLeft]) : 1.0f;
+    for (uint32_t s = 0; s < v.nbins; s++) {
+        float level = Db(v.bin_mb[v.bin[s]]);
+        if (image) level = std::ldexp(level, -g_bin_headroom[v.bin[s]]);
+        most = std::max(most, level);
+    }
     float level = most * v.volume * v.headroom;
     return std::isfinite(level) ? level : 0.0f;
+}
+
+// The room's answer never clips the mix: where the two speakers and the answer together would pass full scale, the
+// answer gives way within a millisecond and comes back over a fifth of a second
+struct Duck {
+    float gain = 1;
+};
+void AddAnswer(Duck& duck, const float* bins, const float* left, const float* right, float* out, uint32_t frames) {
+    constexpr float kTop = 0.98f;
+    float need = 1;
+    for (uint32_t i = 0; i < frames; i++) {
+        const float* b = bins + size_t(i) * kBins;
+        float dry[2] = {b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight])};
+        float wet[2] = {std::fabs(left[i]), std::fabs(right[i])};
+        for (int c = 0; c < 2; c++) {
+            float room = std::max(kTop - std::fabs(dry[c]), 0.0f);
+            if (wet[c] > room) need = std::min(need, room / wet[c]);
+        }
+    }
+    constexpr uint32_t kDown = 48;  // frames to give way in
+    float from = duck.gain, to = std::min(need, std::min(1.0f, duck.gain + float(frames) / (0.2f * audio::kRate)));
+    for (uint32_t i = 0; i < frames; i++) {
+        float t = to < from ? std::min(1.0f, float(i + 1) / kDown) : float(i + 1) / float(frames);
+        float gain = from + (to - from) * t;
+        const float* b = bins + size_t(i) * kBins;
+        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]) + left[i] * gain, -1.0f, 1.0f);
+        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]) + right[i] * gain, -1.0f, 1.0f);
+    }
+    duck.gain = to;
 }
 
 // A mono 3D sound heard a second time, by its way round the walls: `dry` (the sound before the walls dulled it) comes
@@ -767,12 +801,12 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     } else if (detour) {
         v.way = Detour{};  // the sound ended: its next play starts without the last one's way
     }
-    // The room hears it too: what the walls left of it and what its way round brings. A room's reverberation is as
-    // loud wherever in it a sound is made, a game's sounds fall off by their distance alone; between the two, the
-    // sound itself is sent at the root of its distance's level, its way round as it is heard
+    // The room hears it too: what the walls left of it and what its way round brings, each as loud as it is heard.
+    // (Sent louder than heard, at the root of its distance's level as a real room's even reverberation would have
+    // it, a level's many far sounds raised the whole mix 8 dB, 10 Nov 2026)
     float send = ears && audio::acoustics::Room() ? OwnLevel(v) : 0.0f;
     if (got && (send != 0 || v.send != 0) && g_room_send.size() >= frames) {
-        float direct = std::sqrt(std::max(at.att, 0.0f)), round = got == frames && detour && way ? at.att * at.front : 0.0f;
+        float direct = std::max(at.att, 0.0f), round = got == frames && detour && way ? at.att * at.front : 0.0f;
         float level = v.send, step = (send - v.send) / float(frames);
         for (uint32_t i = 0; i < got; i++) {
             level += step;
@@ -879,7 +913,7 @@ void MixTest(float* bins, uint32_t frames) {
             l += both[size_t(i) * kRows + kLeftEar];
             r += both[size_t(i) * kRows + kRightEar];
         }
-        if (room) g_room_send[i] += mono[i] * 0.70710678f * std::sqrt(att) + (detour ? g_way_mono[i] : 0.0f);
+        if (room) g_room_send[i] += mono[i] * level + (detour ? g_way_mono[i] : 0.0f);
         float* frame = bins + size_t(i) * kBins;
         frame[kFrontLeft] += l;
         frame[kFrontRight] += r;
@@ -923,11 +957,16 @@ void Render(float* out, uint32_t frames) {
     // the level's own rooms answer the 3D sounds in place of the title's reverb, added to the two speakers as heard
     dsp::StandDown(audio::acoustics::Room());
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
-    audio::acoustics::RoomAnswer(g_room_send.data(), g_front, g_top, answer[0].data(), answer[1].data(), frames);
+    static Duck duck;
+    if (audio::acoustics::RoomAnswer(g_room_send.data(), g_front, g_top, answer[0].data(), answer[1].data(), frames)) {
+        AddAnswer(duck, bins.data(), answer[0].data(), answer[1].data(), out, frames);
+        return;
+    }
+    duck = Duck{};
     for (uint32_t i = 0; i < frames; i++) {
         const float* b = &bins[size_t(i) * kBins];
-        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]) + answer[0][i], -1.0f, 1.0f);
-        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]) + answer[1][i], -1.0f, 1.0f);
+        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
+        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
     }
 }
 
