@@ -78,6 +78,8 @@ constexpr float kFollow = 0.3f;  // each mix block moves this much of the way to
 constexpr float kThin = 0.4f;
 // The ways round (Way). Points 1.5 m over every floor, this far apart; fewer than kMaxProbes, or they are spread wider
 constexpr float kProbeSpacing = 1.5f;
+constexpr uint32_t kProbeOpen = 3;   // under the open sky, this many times as far apart, or more:
+constexpr float kProbeOpenFar = 12.0f;  // up to this, where the points along a diagonal still join (kVisRange)
 constexpr float kProbeHeight = 1.5f;
 constexpr float kProbeClear = 0.3f;  // metres of room a point needs over it
 // The work of joining them, and the memory it takes while it runs, grow with the square of their number: 5,800 points
@@ -203,6 +205,11 @@ std::atomic<bool> g_paths{[] {
     const char* v = std::getenv("XBE_ACOUSTICS_PATHS");
     return !(v && (std::strcmp(v, "0") == 0 || std::strcmp(v, "off") == 0));
 }()};
+const size_t g_max_probes = [] {  // XBE_ACOUSTICS_POINTS=<n>: another most, to weigh the ways against the memory
+    const char* v = std::getenv("XBE_ACOUSTICS_POINTS");
+    long n = v ? std::atol(v) : 0;
+    return n >= 100 && n <= 6000 ? size_t(n) : kMaxProbes;
+}();
 std::atomic<bool> g_on{false};
 std::atomic<float> g_strength{1.0f};
 std::atomic<int> g_state{0};  // 0 not tried, 1 loaded, -1 unavailable
@@ -382,8 +389,12 @@ bool Build(Simulation& s, const Scene& level) {
 // Points for the level's ways: on a grid, kProbeHeight over every surface that lies flat enough to stand on and has
 // room above it, in metres. A level's floors and ceilings both lie flat, and which side of a triangle is up is not
 // known, so a ceiling with nothing over it gets points too: they join nothing inside and cost only their share of the
-// work. `spacing` is widened until there are no more than kMaxProbes
-std::vector<IPLSphere> Probes(const Scene& level, float& spacing) {
+// work. Where nothing lies over a point, the open air or the top of a roof, the points are kProbeOpen times as far
+// apart: the ways that matter turn at doorways and corridors, and there the points have to stand close enough for one
+// either side of a doorway (at 7.5 m apart a corner in Siberia's dam lost its way, 10 Nov 2026). So the open air's are
+// spread first, to `wide`, and then `spacing`, of the points under a roof, is widened until there are no more than
+// kMaxProbes; `roofed` is how many of them are
+std::vector<IPLSphere> Probes(const Scene& level, float& spacing, float& wide, size_t& roofed) {
     std::vector<IPLSphere> probes;
     size_t tris = level.triangles.size() / 3, points = level.vertices.size() / 3;
     if (!tris || !points) return probes;
@@ -441,22 +452,39 @@ std::vector<IPLSphere> Probes(const Scene& level, float& spacing) {
         }
         std::sort(hits.begin(), hits.end(),
                   [](const Hit& a, const Hit& b) { return a.column != b.column ? a.column < b.column : a.y < b.y; });
-        probes.clear();
-        for (size_t h = 0; h < hits.size(); h++) {
-            if (!hits[h].flat) continue;
-            bool room = true;
-            for (size_t o = h + 1; o < hits.size() && hits[o].column == hits[h].column && room; o++) {
-                float over = hits[o].y - hits[h].y;
-                if (over > kProbeHeight + kProbeClear) break;
-                room = over <= 0.05f;
+        // under the open sky (and on top of a roof) one point in `open` each way, reaching as far
+        auto place = [&](uint32_t open) {
+            probes.clear();
+            roofed = 0;
+            for (size_t h = 0; h < hits.size(); h++) {
+                if (!hits[h].flat) continue;
+                bool room = true, roof = false;
+                for (size_t o = h + 1; o < hits.size() && hits[o].column == hits[h].column && room && !roof; o++) {
+                    float over = hits[o].y - hits[h].y;
+                    if (over > kProbeHeight + kProbeClear) roof = true;
+                    else room = over <= 0.05f;
+                }
+                if (!room) continue;
+                uint32_t i = hits[h].column % nx, j = hits[h].column / nx;
+                if (!roof && (i % open != open / 2 || j % open != open / 2)) continue;
+                float x = lo[0] + (i + 0.5f) * spacing, z = lo[2] + (j + 0.5f) * spacing;
+                probes.push_back({{x, hits[h].y + kProbeHeight, z}, roof ? spacing : spacing * open});
+                roofed += roof;
             }
-            if (!room) continue;
-            float x = lo[0] + (hits[h].column % nx + 0.5f) * spacing, z = lo[2] + (hits[h].column / nx + 0.5f) * spacing;
-            probes.push_back({{x, hits[h].y + kProbeHeight, z}, spacing});
+        };
+        // the open air's points are spread first, as far as they still join (kProbeOpenFar), and further where they
+        // alone would take half the points there may be; only then the rest
+        uint32_t most = std::max(uint32_t(kProbeOpenFar / spacing), 1u);
+        for (uint32_t open = std::min(kProbeOpen, most);; open++) {
+            place(open);
+            wide = spacing * open;
+            if (probes.size() <= g_max_probes) return probes;
+            if (open >= most && (probes.size() - roofed) * 2 <= g_max_probes) break;
         }
-        if (probes.size() <= kMaxProbes) return probes;
-        // their number falls with the square of the spacing: the spacing that should just fit, and a little over
-        spacing *= std::max(1.05f, 1.03f * std::sqrt(float(probes.size()) / float(kMaxProbes)));
+        // the roofed points' number falls with the square of the spacing while the open air's stays: the spacing that
+        // should just fit, and a little over
+        float fits = std::sqrt(float(roofed) / float(g_max_probes - (probes.size() - roofed)));
+        spacing *= std::clamp(1.03f * fits, 1.05f, 1.5f);
     }
 }
 
@@ -466,8 +494,9 @@ void IPLCALL BakeProgress(IPLfloat32, void*) {}
 // `scene` is the thread's own hold on the level
 void Bake(IPLContext context, IPLScene scene, Scene level, uint64_t number) {
     int64_t began = NowMs();
-    float spacing = 0;
-    std::vector<IPLSphere> probes = Probes(level, spacing);
+    float spacing = 0, wide = 0;
+    size_t roofed = 0;
+    std::vector<IPLSphere> probes = Probes(level, spacing, wide, roofed);
     IPLProbeBatch batch = nullptr;
     if (!probes.empty() && g_ipl.iplProbeBatchCreate(context, &batch) == IPL_STATUS_SUCCESS) {
         for (const IPLSphere& probe : probes) g_ipl.iplProbeBatchAddProbe(batch, probe);
@@ -486,8 +515,9 @@ void Bake(IPLContext context, IPLScene scene, Scene level, uint64_t number) {
         g_ipl.iplPathBakerBake(context, &params, BakeProgress, nullptr);
     }
     g_ipl.iplSceneRelease(&scene);
-    LOGR("acoustics: %s: ways round between %zu points %.1f m apart, worked out in %lld ms", level.name, probes.size(),
-         spacing, static_cast<long long>(NowMs() - began));
+    LOGR("acoustics: %s: ways round between %zu points, %zu under a roof %.1f m apart and the rest %.1f m, worked out "
+         "in %lld ms",
+         level.name, probes.size(), roofed, spacing, wide, static_cast<long long>(NowMs() - began));
     if (!batch) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_baked) g_ipl.iplProbeBatchRelease(&g_baked->batch);  // a level since replaced, never taken up
