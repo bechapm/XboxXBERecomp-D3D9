@@ -187,6 +187,11 @@ constexpr float kRoomRing = 1.5f;    // seconds
 constexpr float kRoomEarly = -3.0f;  // dB at level 1
 constexpr float kRoomFitMin = -24.0f, kRoomFitMax = 24.0f;
 constexpr float kRoomRingMin = 0.3f, kRoomRingMax = 6.0f;  // seconds a room is taken to ring, for the fit
+// Steam Audio's first order binaural decode adds its virtual speakers' heads up alike at low frequencies: next to the
+// speaker decode a room came out 11 dB louder under 250 Hz, 4 dB at 1 kHz and 5 dB quieter at 2 kHz (measured, 10 Nov
+// 2026), and a footstep's echo in a nave was heard as a thump under 1 kHz and no tail. A shelf takes the lows back down
+constexpr float kRoomHeadLow = -9.0f;    // dB, under the shelf
+constexpr float kRoomHeadShelf = 700.0f; // Hz, its middle
 // a place has a reverberation to raise when this share of its answer is late: none under it, all of the raise over it
 // (open ground with a block beside it 0%, a carpeted room 32%, a nave 21% to 79% by where in it)
 constexpr float kRoomLateNone = 0.02f, kRoomLateAll = 0.15f;
@@ -547,6 +552,27 @@ struct Job {
 
 constexpr IPLSimulationFlags kBoth = IPLSimulationFlags(IPL_SIMULATIONFLAGS_DIRECT | IPL_SIMULATIONFLAGS_PATHING);
 
+// The shelf on a binaural room (kRoomHeadLow), one per ear: first order, unity above it
+struct Shelf {
+    float b0 = 1, b1 = 0, a1 = 0, x1 = 0, y1 = 0;
+    Shelf() {
+        float g = std::pow(10.0f, kRoomHeadLow / 20), c = 2.0f * 48000;
+        float pole = 2 * 3.14159265f * kRoomHeadShelf / std::sqrt(g), zero = pole * g;  // middle at kRoomHeadShelf
+        b0 = (c + zero) / (c + pole);
+        b1 = (zero - c) / (c + pole);
+        a1 = (pole - c) / (c + pole);
+    }
+    void Reset() { x1 = y1 = 0; }
+    void Run(float* x, uint32_t n) {
+        for (uint32_t i = 0; i < n; i++) {
+            float y = b0 * x[i] + b1 * x1 - a1 * y1;
+            x1 = x[i];
+            y1 = y;
+            x[i] = y;
+        }
+    }
+};
+
 // The room's thread: a simulator of its own with the listener as its one source, so a trace never holds up the rays for
 // the sounds. Started when a room is first wanted; the levels reach it as the rays' thread builds them
 // A trace measured: an impulse through it and through the head, the energy of what comes back in the first second at
@@ -574,12 +600,15 @@ float Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource s
     dp.binaural = IPL_TRUE;
     g_ipl.iplReflectionEffectReset(probe);
     g_ipl.iplAmbisonicsDecodeEffectReset(ears);
+    Shelf shelf[2];
     double first = 0, rest = 0;
     for (int b = 0; b < kRoomFitBlocks; b++) {
         std::fill(impulse, impulse + kFrame, 0.0f);
         if (!b) impulse[0] = 1;
         g_ipl.iplReflectionEffectApply(probe, &params, &in, &room, nullptr);
         g_ipl.iplAmbisonicsDecodeEffectApply(ears, &dp, &room, &two);
+        shelf[0].Run(heard[0], kFrame);
+        shelf[1].Run(heard[1], kFrame);
         double sum = 0;
         for (uint32_t i = 0; i < kFrame; i++)
             sum += 0.5 * (double(heard[0][i]) * heard[0][i] + double(heard[1][i]) * heard[1][i]);
@@ -1113,6 +1142,8 @@ void SetRoom(bool on, float level) {
 
 bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
 
+Shelf g_room_shelf[2];  // the mixer's thread alone
+
 bool RoomAnswer(const float* send, const float front[3], const float top[3], float* left, float* right, uint32_t frames) {
     static float s_level = 0;   // the mixer's thread alone: the level the last block ended at
     static bool s_ran = false;  // the effect holds sound since its last reset
@@ -1131,6 +1162,8 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
         if (s_ran) {  // switched off, or a new level: the next room starts without the last one's tail
             g_ipl.iplReflectionEffectReset(effect);
             g_ipl.iplAmbisonicsDecodeEffectReset(decode);
+            g_room_shelf[0].Reset();
+            g_room_shelf[1].Reset();
             s_ran = false;
         }
         return false;
@@ -1181,6 +1214,10 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
     dp.orientation.ahead = {0, 0, -1};
     dp.binaural = head ? IPL_TRUE : IPL_FALSE;
     g_ipl.iplAmbisonicsDecodeEffectApply(decode, &dp, &room, &heard);
+    if (head) {
+        g_room_shelf[0].Run(ears[0], frames);
+        g_room_shelf[1].Run(ears[1], frames);
+    }
     s_ran = true;
     float level = s_level, step = (want - s_level) / float(frames), scale = head ? 1.0f : kRoomSpeakers;
     static double s_sent = 0, s_answered = 0;  // XBE_ACOUSTICS_LOG: what went in and what came back, squared and summed
