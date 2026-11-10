@@ -40,6 +40,8 @@ struct Settings {
     uint32_t acoustics_strength = 100;
     // headphones: 3D sounds placed all round the listener, above and behind too, by a head's filter (audio/acoustics.h)
     bool acoustics_headphones = false;
+    // with acoustics: a sound the walls block is also heard by its way round them, from the doorway or the corner
+    bool acoustics_paths = true;
 };
 // the shapes aspect_ratio takes besides "screen", width over height
 struct Aspect {

@@ -127,6 +127,13 @@ struct Gains {
     float bin[kRows][kBins];
 };
 
+// A mono 3D sound's second hearing, by its way round the walls (audio/acoustics.h, Way): the last block's level in each
+// band, and the two low passes that split the sound into them
+struct Detour {
+    float band[3] = {0, 0, 0};
+    float split[2] = {};
+};
+
 struct Voice {
     uint32_t obj = 0;
     bool stream = false;
@@ -161,6 +168,7 @@ struct Voice {
     float ear[kEarLength] = {};
     uint32_t ear_pos = 0;
     bool head = false;  // the last block's ears came from the head's filter (audio/acoustics.h, Ears)
+    Detour way;         // its second hearing, by the way round the walls (audio/acoustics.h, Way)
     // sound through the level (audio/acoustics.h): the last block's low, middle and high gains, and each channel's two
     // low passes that split it into those bands
     bool walls = false;
@@ -601,6 +609,47 @@ float Through(float x, float* split, const float* gain) {
     return gain[0] * split[0] + gain[1] * (split[1] - split[0]) + gain[2] * (x - split[1]);
 }
 
+// A mono 3D sound heard a second time, by its way round the walls: `dry` (the sound before the walls dulled it) comes
+// from where the way reaches the listener, at `level` times the bands the way leaves, the level of a sound as far off as
+// the way is long next to the sound's own. Added to its two ears, which the head's filter makes on headphones and a pan
+// otherwise. `gain` is zero once the way is gone: the block fades it out
+void MixDetour(Detour& way, uint32_t sound, const float from[3], const float gain[3], float level, const float* dry,
+               float* rows, uint32_t frames) {
+    static std::vector<float> mono, ear[2];  // the output thread alone renders
+    mono.resize(frames);
+    float band[3], step[3];
+    for (int b = 0; b < 3; b++) {
+        band[b] = way.band[b];
+        float to = std::isfinite(level) ? gain[b] * level : 0.0f;
+        step[b] = (to - band[b]) / float(frames);
+        way.band[b] = to;
+    }
+    for (uint32_t i = 0; i < frames; i++) {
+        for (int b = 0; b < 3; b++) band[b] += step[b];
+        mono[i] = Through(dry[i], way.split, band);
+    }
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    float d[3] = {from[0] - g_listener[0], from[1] - g_listener[1], from[2] - g_listener[2]};
+    float local[3] = {Dot(d, right), Dot(d, g_top), Dot(d, g_front)};
+    ear[0].resize(frames);
+    ear[1].resize(frames);
+    if (!audio::acoustics::Headphones() ||
+        !audio::acoustics::Ears(sound, 1, local, mono.data(), ear[0].data(), ear[1].data(), frames)) {
+        // no head: by level, both ears whole straight ahead as a sound's own ears are
+        float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
+        float left = 1.41421356f * std::cos((pan + 1) * 0.78539816f), rightg = 1.41421356f * std::sin((pan + 1) * 0.78539816f);
+        for (uint32_t i = 0; i < frames; i++) {
+            ear[0][i] = mono[i] * left;
+            ear[1][i] = mono[i] * rightg;
+        }
+    }
+    for (uint32_t i = 0; i < frames; i++) {
+        rows[size_t(i) * kRows + kLeftEar] += ear[0][i];
+        rows[size_t(i) * kRows + kRightEar] += ear[1][i];
+    }
+}
+
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
     Place at = Locate(v);
@@ -635,6 +684,12 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     // the block's rows are read first and mixed after, the head's filter between: the output thread alone renders
     static std::vector<float> rows;
     rows.assign(size_t(frames) * kRows, 0.0f);
+    // its way round the walls, a second hearing of the sound as it was before they dulled it
+    float way_from[3] = {}, way_gain[3] = {0, 0, 0};
+    bool way = ears && through && audio::acoustics::Way(v.obj, way_from, way_gain);
+    bool detour = way || v.way.band[0] != 0 || v.way.band[1] != 0 || v.way.band[2] != 0;
+    static std::vector<float> dry;
+    if (detour) dry.assign(frames, 0.0f);
     uint32_t got = 0;
     for (uint32_t i = 0; i < frames; i++) {
         std::optional<Cursor> cursor = v.stream ? StreamFrame(v) : BufferFrame(v);
@@ -646,6 +701,7 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
             float x = Sample(v, cursor->data, cursor->f, int(c));
             row[c] = x + (Sample(v, cursor->next_data, cursor->next_f, int(c)) - x) * t;
         }
+        if (detour) dry[i] = row[0];
         if (filter) {
             for (int b = 0; b < 3; b++) band[b] += band_step[b];
             for (uint32_t c = 0; c < channels; c++)
@@ -666,7 +722,7 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
         left.resize(frames);
         right.resize(frames);
         for (uint32_t i = 0; i < frames; i++) mono[i] = rows[size_t(i) * kRows];
-        if (audio::acoustics::Ears(v.obj, at.d, mono.data(), left.data(), right.data(), frames)) {
+        if (audio::acoustics::Ears(v.obj, 0, at.d, mono.data(), left.data(), right.data(), frames)) {
             // a block that turns the head on or off fades from one pair of ears to the other
             float mix = v.head ? 1.0f : 0.0f;
             float mix_step = ((head ? 1.0f : 0.0f) - mix) / float(frames);
@@ -680,6 +736,17 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
         } else {
             head = false;
         }
+    }
+    if (got && detour) {
+        // as loud as the sound would be that far off, next to how loud its levels already make it
+        float d[3] = {way_from[0] - g_listener[0], way_from[1] - g_listener[1], way_from[2] - g_listener[2]};
+        // (the ears' own level: its distance, and the share of it a sound ahead leaves to the centre speaker)
+        float own = at.att * at.front;
+        float level = way && own > 1e-6f ? Attenuation(v, std::sqrt(Dot(d, d))) / own : 0.0f;
+        MixDetour(v.way, v.obj, way_from, way_gain, level, dry.data(), rows.data(), frames);
+        got = frames;
+    } else if (detour) {
+        v.way = Detour{};  // the sound ended: its next play starts without the last one's way
     }
     for (uint32_t i = 0; i < got; i++) {
         const float* row = &rows[size_t(i) * kRows];
@@ -707,6 +774,7 @@ struct TestVoice {
     float band[3] = {1, 1, 1};
     float left = 0, right = 0;
     float head = 0;  // how much of it the head's filter places (headphones), ramped as its levels are
+    Detour way;      // its way round the walls
 };
 TestVoice g_test;
 constexpr uint32_t kTestSound = 0xFFFFFFFEu;  // acoustics.cpp's id for it
@@ -728,8 +796,9 @@ void MixTest(float* bins, uint32_t frames) {
     float band_step[3], left_step = (left - g_test.left) / float(frames), right_step = (rightg - g_test.right) / float(frames);
     for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - g_test.band[b]) / float(frames);
     constexpr uint32_t kPeriod = audio::kRate * 6 / 10, kBurst = audio::kRate * 35 / 100, kFade = audio::kRate / 200;
-    static std::vector<float> mono, ear[2];
+    static std::vector<float> mono, ear[2], dry, both;
     mono.resize(frames);
+    dry.resize(frames);
     for (uint32_t i = 0; i < frames; i++, g_test.n++) {
         uint32_t at = g_test.n % kPeriod;
         float env = at >= kBurst ? 0.0f : std::min({1.0f, float(at) / kFade, float(kBurst - at) / kFade});
@@ -741,7 +810,18 @@ void MixTest(float* bins, uint32_t frames) {
         if (g_test.phase >= 1) g_test.phase -= 1;
         float x = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
         for (int b = 0; b < 3; b++) g_test.band[b] += band_step[b];
+        dry[i] = x;
         mono[i] = Through(x, g_test.split, g_test.band);
+    }
+    // its way round the walls, as a voice's: made as two ears at the level of a sound that far off, added below
+    float way_from[3] = {}, way_gain[3] = {0, 0, 0};
+    bool way = audio::acoustics::Way(kTestSound, way_from, way_gain);
+    bool detour = way || g_test.way.band[0] != 0 || g_test.way.band[1] != 0 || g_test.way.band[2] != 0;
+    if (detour) {
+        float wd[3] = {way_from[0] - g_listener[0], way_from[1] - g_listener[1], way_from[2] - g_listener[2]};
+        float far = way ? 0.70710678f * std::min(1.0f, 3.0f / std::max(std::sqrt(Dot(wd, wd)), 0.01f)) : 0.0f;
+        both.assign(size_t(frames) * kRows, 0.0f);
+        MixDetour(g_test.way, kTestSound, way_from, way_gain, far, dry.data(), both.data(), frames);
     }
     // headphones: from its direction through the head's filter, at the level a sound straight ahead is panned to
     bool head = audio::acoustics::Headphones() || g_test.head > 0;
@@ -749,7 +829,7 @@ void MixTest(float* bins, uint32_t frames) {
         ear[0].resize(frames);
         ear[1].resize(frames);
         float local[3] = {Dot(d, right), Dot(d, g_top), Dot(d, g_front)};
-        head = audio::acoustics::Ears(kTestSound, local, mono.data(), ear[0].data(), ear[1].data(), frames);
+        head = audio::acoustics::Ears(kTestSound, 0, local, mono.data(), ear[0].data(), ear[1].data(), frames);
     }
     float head_step = ((head && audio::acoustics::Headphones() ? 1.0f : 0.0f) - g_test.head) / float(frames);
     float level = att * 0.70710678f;
@@ -761,6 +841,10 @@ void MixTest(float* bins, uint32_t frames) {
         if (head) {
             l += (ear[0][i] * level - l) * g_test.head;
             r += (ear[1][i] * level - r) * g_test.head;
+        }
+        if (detour) {
+            l += both[size_t(i) * kRows + kLeftEar];
+            r += both[size_t(i) * kRows + kRightEar];
         }
         float* frame = bins + size_t(i) * kBins;
         frame[kFrontLeft] += l;

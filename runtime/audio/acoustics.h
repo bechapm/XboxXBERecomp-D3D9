@@ -62,14 +62,26 @@ void SetHeadphones(bool on);
 bool Headphones();  // on, and the head is ready
 // The mixer, a block of a mono sound (480 frames at 48 kHz) that is `d` from the listener in the listener's own space (x
 // right, y up, z ahead, the game's units): its left and right ear. Within half a metre it moves into the head, heard
-// less and less from a direction, as a player's own gun is. false: no head, and the mixer places it as it always has
-bool Ears(uint32_t sound, const float d[3], const float* in, float* left, float* right, uint32_t frames);
+// less and less from a direction, as a player's own gun is. `image` tells a sound's hearings apart: 0 the sound itself, 1
+// its way round (Way). false: no head, and the mixer places it as it always has
+bool Ears(uint32_t sound, uint32_t image, const float d[3], const float* in, float* left, float* right, uint32_t frames);
 
 // The mixer, for a 3D sound at `pos` heard at `listener` (the game's units): its gain in the low, middle and high band,
 // 1 where nothing is in the way. The rays run on a thread of their own, so this is the last result, a frame or two
 // behind; false when acoustics are off or have no level, and the sound is left as it is.
 bool Gains(uint32_t sound, const float pos[3], const float listener[3], float out[3]);
 void Forget(uint32_t sound);  // the sound is gone
+
+// The way round. A sound the walls block is also heard by the shortest way round them, through a doorway or round a
+// corner, from where that way reaches the listener: quieter by its length and duller by its bends. The ways are Steam
+// Audio's baked paths between points it is given all over the level's floors, worked out in a few seconds after each
+// SetScene on a thread of their own (until then, and for a level with no floors, sounds are only muffled). On with the
+// acoustics unless switched off (the settings file's acoustics_paths; XBE_ACOUSTICS_PATHS 0 or 1 overrides)
+void SetPaths(bool on);
+// The mixer, for a mono 3D sound it has asked Gains about: where the sound seems to come from by its way round, in the
+// space its position was given in and as far off as the way is long, and how much of each band arrives that way next
+// to what a sound that far off in the open would give (nothing while the sound is in plain view). false: no way
+bool Way(uint32_t sound, float pos[3], float gain[3]);
 
 // Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
 // made by the mixer and heard through the walls as any 3D sound; placing it again moves it
@@ -85,6 +97,8 @@ struct Status {
     bool on = false;      // switched on
     bool heard = false;   // on, and not in the off half of Alternate
     uint32_t sounds = 0, blocked = 0;  // 3D sounds playing, and those more than half blocked
+    uint32_t ways = 0;                 // of those, the ones also heard by a way round
+    uint32_t probes = 0;               // the points the ways run between; 0: none worked out (yet)
     float test = -1;                   // the test sound's middle band heard, 0 to 1; -1: none
     bool test_placed = false;
 };
