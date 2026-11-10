@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define RECOMP_MOD_API_VERSION 14
+#define RECOMP_MOD_API_VERSION 15
 
 /* ---- the Direct3D 9 renderer (renderer = "d3d9" in the settings file) ----
  *
@@ -149,6 +149,12 @@ typedef struct RecompModDraw {
      * same address the title keeps in its own tables, so a mod tells which of
      * the title's textures a draw uses without hashing it. Stages 0 to 3. */
     uint32_t texture_guest[8];
+    /* version 15 (this SDK's): the call site the game named for the 2D it is
+     * drawing (gpu::SetTwoDPlacement's tag): the guest address of the code
+     * that queued the draw's pieces, the same every frame. 0 when the game
+     * names none, as for a draw it does not make through its 2D batch. So a
+     * mod tells which of the title's screen effects a draw is. */
+    uint32_t two_d_site;
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */
