@@ -55,6 +55,16 @@ void Configure(bool on, float strength);
 bool On();
 bool Available();  // Steam Audio loaded, or not tried yet
 
+// Headphones: a mono 3D sound's two ears come from a head's filter (Steam Audio's HRTF) for the direction it is heard
+// from, in place of a mixer's own left and right, so above, below and behind sound as such. Needs no level and is
+// apart from the walls (the settings file's acoustics_headphones; XBE_HEADPHONES 0 or 1 overrides)
+void SetHeadphones(bool on);
+bool Headphones();  // on, and the head is ready
+// The mixer, a block of a mono sound (480 frames at 48 kHz) that is `d` from the listener in the listener's own space (x
+// right, y up, z ahead, the game's units): its left and right ear. Within half a metre it moves into the head, heard
+// less and less from a direction, as a player's own gun is. false: no head, and the mixer places it as it always has
+bool Ears(uint32_t sound, const float d[3], const float* in, float* left, float* right, uint32_t frames);
+
 // The mixer, for a 3D sound at `pos` heard at `listener` (the game's units): its gain in the low, middle and high band,
 // 1 where nothing is in the way. The rays run on a thread of their own, so this is the last result, a frame or two
 // behind; false when acoustics are off or have no level, and the sound is left as it is.
