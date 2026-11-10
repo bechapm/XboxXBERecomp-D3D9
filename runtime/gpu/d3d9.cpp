@@ -3117,6 +3117,7 @@ D3D9Backend::ModsSay D3D9Backend::ModsBefore(const State& s, const Assembled& a,
         const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
         d.screen_box_set = t && ScreenBox(s, a, sh.prog, t->gw, t->gh, d.screen_box);
     }
+    d.two_d_site = s.place_tag;
     d.where = &D3D9Backend::ModWhere;
     d.pick = &D3D9Backend::ModPick;
     mod_where_ = this;

@@ -52,8 +52,9 @@ enum : uint32_t {
     kPlacePanelAnchored = 0x200,
 };
 
-// Where the game's next 2D draws go, and the call site they come from (XBE_2D_TAGS reports each site's extent). The
-// game's thread, from its hooks; it reaches the renderer with the draws that follow (State::place)
+// Where the game's next 2D draws go, and the call site they come from (XBE_2D_TAGS reports each site's extent; a mod
+// reads it as RecompModDraw.two_d_site). The game's thread, from its hooks; it reaches the renderer with the draws that
+// follow (State::place)
 void SetTwoDPlacement(uint32_t placement, uint32_t tag);
 // A piece reaching past the console's screen goes on past the old edge, as the console's screen edge was what cut it:
 // CSS's overflow visible. Off, a placed draw stops at its 4:3 box (overflow hidden). A scissor narrower than the
