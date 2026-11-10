@@ -40,7 +40,8 @@ namespace {
     X(iplSceneCommit) X(iplStaticMeshCreate) X(iplStaticMeshRelease) X(iplStaticMeshAdd) X(iplSimulatorCreate)    \
     X(iplSimulatorSetScene) X(iplSimulatorCommit) X(iplSimulatorSetSharedInputs) X(iplSimulatorRunDirect)        \
     X(iplSourceCreate) X(iplSourceRelease) X(iplSourceAdd) X(iplSourceRemove) X(iplSourceSetInputs)               \
-    X(iplSourceGetOutputs)
+    X(iplSourceGetOutputs) X(iplHRTFCreate) X(iplBinauralEffectCreate) X(iplBinauralEffectRelease)                \
+    X(iplBinauralEffectReset) X(iplBinauralEffectApply)
 struct Api {
 #define IPL_POINTER(name) decltype(&::name) name = nullptr;
     IPL_FUNCS(IPL_POINTER)
@@ -99,6 +100,24 @@ void ToLevel(const float in[3], float out[3]) {
     for (int i = 0; i < 3; i++) out[i] = g_origin[i] + in[0] * g_axes[i] + in[1] * g_axes[3 + i] + in[2] * g_axes[6 + i];
 }
 
+// Headphones (Ears). The head is Steam Audio's own, made by the thread when headphones are first asked for; each sound's
+// filter is made, run and let go under g_ears_mutex, by the mixer's thread but for Forget
+constexpr uint32_t kFrame = 480;        // frames in a block: 10 ms, what the output asks for
+constexpr float kHeadNear = 0.5f;       // metres: nearer than this a sound moves into the head
+constexpr int64_t kEarRestMs = 60;      // a filter not run for this long starts clean: the sound began again
+constexpr int64_t kEarStaleMs = 2000;   // and one not run for this long is let go
+std::atomic<bool> g_headphones{false};
+std::atomic<IPLContext> g_context{nullptr};
+std::atomic<IPLHRTF> g_hrtf{nullptr};
+std::atomic<float> g_scale{1.0f};  // metres in one unit, as g_meters, for the mixer's thread
+struct Ear {
+    IPLBinauralEffect effect = nullptr;
+    int64_t used = 0;
+};
+std::mutex g_ears_mutex;
+std::unordered_map<uint32_t, Ear> g_ears;
+int64_t g_ears_swept = 0;
+
 std::atomic<bool> g_on{false};
 std::atomic<float> g_strength{1.0f};
 std::atomic<int> g_state{0};  // 0 not tried, 1 loaded, -1 unavailable
@@ -154,6 +173,7 @@ struct Simulation {
     IPLScene scene = nullptr;
     IPLStaticMesh mesh = nullptr;
     std::unordered_map<uint32_t, IPLSource> sources;
+    bool head_tried = false;
 };
 
 void IPLCALL Log(IPLLogLevel level, const char* message) {
@@ -184,7 +204,26 @@ bool Open(Simulation& s) {
     }
     LOGR("acoustics: Steam Audio %u.%u.%u, %s rays", STEAMAUDIO_VERSION_MAJOR, STEAMAUDIO_VERSION_MINOR,
          STEAMAUDIO_VERSION_PATCH, s.type == IPL_SCENETYPE_EMBREE ? "Embree" : "built-in");
+    g_context = s.context;
     return true;
+}
+
+// the head for headphones, Steam Audio's own, once
+void MakeHead(Simulation& s) {
+    if (s.head_tried) return;
+    s.head_tried = true;
+    IPLAudioSettings as{48000, IPLint32(kFrame)};
+    IPLHRTFSettings hs{};
+    hs.type = IPL_HRTFTYPE_DEFAULT;
+    hs.volume = 1.0f;
+    hs.normType = IPL_HRTFNORMTYPE_NONE;
+    IPLHRTF hrtf = nullptr;
+    if (g_ipl.iplHRTFCreate(s.context, &as, &hs, &hrtf) != IPL_STATUS_SUCCESS) {
+        LOGR("acoustics: Steam Audio's head did not load, headphones sound as before");
+        return;
+    }
+    g_hrtf = hrtf;
+    LOGR("acoustics: headphones: 3D sounds through Steam Audio's head");
 }
 
 // the level built and handed to the simulator, the one before let go; false for an empty level
@@ -266,6 +305,7 @@ void Run() {
     std::vector<Job> jobs;
     int64_t said = NowMs();
     for (;;) {
+        if (g_headphones) MakeHead(s);
         std::optional<Scene> level;
         float meters;
         jobs.clear();
@@ -293,6 +333,7 @@ void Run() {
             std::lock_guard<std::mutex> lock(g_mutex);
             g_scene = built;
             g_meters = meters = level->meters;
+            g_scale = meters;
             g_raise = level->raise;
             for (auto& [id, sound] : g_sounds) std::fill(sound.target, sound.target + 3, 1.0f);
         }
@@ -407,6 +448,63 @@ void Configure(bool on, float strength) {
 }
 
 bool On() { return g_on; }
+
+void SetHeadphones(bool on) {
+    Env("XBE_HEADPHONES", on);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (on != g_headphones) LOGR("acoustics: headphones %s", on ? "on" : "off");
+    g_headphones = on;
+    if (on && g_state >= 0) {
+        Start();
+        g_wake.notify_one();
+    }
+}
+
+bool Headphones() { return g_headphones && g_hrtf.load() != nullptr; }
+
+bool Ears(uint32_t id, const float d[3], const float* in, float* left, float* right, uint32_t frames) {
+    IPLHRTF hrtf = g_hrtf;
+    IPLContext context = g_context;
+    if (!hrtf || !context || frames != kFrame) return false;
+    std::lock_guard<std::mutex> lock(g_ears_mutex);
+    int64_t now = NowMs();
+    Ear& ear = g_ears[id];
+    if (!ear.effect) {
+        IPLAudioSettings as{48000, IPLint32(kFrame)};
+        IPLBinauralEffectSettings es{hrtf};
+        if (g_ipl.iplBinauralEffectCreate(context, &as, &es, &ear.effect) != IPL_STATUS_SUCCESS) {
+            g_ears.erase(id);
+            return false;
+        }
+    } else if (now - ear.used > kEarRestMs) {
+        g_ipl.iplBinauralEffectReset(ear.effect);
+    }
+    ear.used = now;
+    float length = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    IPLBinauralEffectParams params{};
+    // Steam Audio looks down -z
+    params.direction = length > 1e-5f ? IPLVector3{d[0] / length, d[1] / length, -d[2] / length} : IPLVector3{0, 0, -1};
+    params.interpolation = IPL_HRTFINTERPOLATION_BILINEAR;
+    params.spatialBlend = std::isfinite(length) ? std::clamp(length * float(g_scale) / kHeadNear, 0.0f, 1.0f) : 0.0f;
+    params.hrtf = hrtf;
+    float* source = const_cast<float*>(in);
+    float* ears[2] = {left, right};
+    IPLAudioBuffer from{1, IPLint32(frames), &source};
+    IPLAudioBuffer to{2, IPLint32(frames), ears};
+    g_ipl.iplBinauralEffectApply(ear.effect, &params, &from, &to);
+    if (now - g_ears_swept > kEarStaleMs) {
+        g_ears_swept = now;
+        for (auto it = g_ears.begin(); it != g_ears.end();) {
+            if (now - it->second.used <= kEarStaleMs) {
+                ++it;
+                continue;
+            }
+            g_ipl.iplBinauralEffectRelease(&it->second.effect);
+            it = g_ears.erase(it);
+        }
+    }
+    return true;
+}
 bool Available() { return g_state >= 0; }
 
 // on now: XBE_ACOUSTICS_ALTERNATE's half of its period, said when it turns
@@ -450,8 +548,15 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
 }
 
 void Forget(uint32_t id) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    g_sounds.erase(id);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_sounds.erase(id);
+    }
+    std::lock_guard<std::mutex> lock(g_ears_mutex);
+    auto ear = g_ears.find(id);
+    if (ear == g_ears.end()) return;
+    g_ipl.iplBinauralEffectRelease(&ear->second.effect);
+    g_ears.erase(ear);
 }
 
 void PlaceTestSound() {

@@ -38,6 +38,8 @@ struct Settings {
     // between them and the listener, by material, as much as acoustics_strength says (0 to 100)
     bool acoustics = false;
     uint32_t acoustics_strength = 100;
+    // headphones: 3D sounds placed all round the listener, above and behind too, by a head's filter (audio/acoustics.h)
+    bool acoustics_headphones = false;
 };
 // the shapes aspect_ratio takes besides "screen", width over height
 struct Aspect {
