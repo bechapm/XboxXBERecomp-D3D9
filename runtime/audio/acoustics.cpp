@@ -172,17 +172,17 @@ constexpr int64_t kRoomRestMs = 100;  // between traces
 // irradianceMinDistance, which drops them: measured), since the sounds answered are not at the listener's feet. And
 // each trace is measured, an impulse run through it for a second, and fitted: its reverberation, the part later than
 // 80 ms, is brought to kRoomWet of the sound for a room that rings kRoomRing seconds and more or less as it rings
-// longer or shorter, whatever its size, as a game's reverb presets are; its early echoes are kept kRoomDry under what
-// was traced; and the one gain a trace can have lies between the two by how much of the answer is late. A hall then
-// differs from a room by how long it rings, a carpeted room stays dry, and the open air next to silent
+// longer or shorter, whatever its size, as a game's reverb presets are (a reverb's level there is how loud it starts,
+// so its energy goes with its length). A trace has one gain, so its early echoes rise with it, but no higher than
+// kRoomEarly of the sound: a carpeted room, nearly all early echo, stays dry. A hall then differs from a room by how
+// long it rings, and the open air stays next to silent. (Weighing the gain by how much of the answer is late, tried
+// first, let the reverberation of a nave swing 14 dB between one place in it and the next, 10 Nov 2026)
 constexpr float kRoomNear = 3.0f;    // metres
 constexpr float kRoomWet = -4.0f;    // dB at level 1
 constexpr float kRoomRing = 1.5f;    // seconds
-constexpr float kRoomDry = -3.0f;    // dB
+constexpr float kRoomEarly = -3.0f;  // dB at level 1
 constexpr float kRoomFitMin = -24.0f, kRoomFitMax = 24.0f;
-// an ear's share of the answer's energy, next to its W (first order Ambisonics through Steam Audio's head: measured,
-// 0.77 at an ear of 0.563 in W)
-constexpr float kRoomEar = 1.37f;
+constexpr float kRoomRingMin = 0.3f, kRoomRingMax = 6.0f;  // seconds a room is taken to ring, for the fit
 constexpr int kRoomFitBlocks = 100;  // of 10 ms
 constexpr int kRoomFitEarly = 8;
 constexpr int64_t kRoomFitMs = 2000; // measured again this often, or when the listener has moved kRoomFitMove metres
@@ -514,42 +514,58 @@ constexpr IPLSimulationFlags kBoth = IPLSimulationFlags(IPL_SIMULATIONFLAGS_DIRE
 
 // The room's thread: a simulator of its own with the listener as its one source, so a trace never holds up the rays for
 // the sounds. Started when a room is first wanted; the levels reach it as the rays' thread builds them
-// A trace measured: an impulse through it, the energy of what comes back in the first second as an ear hears it next
-// to the impulse itself, in dB, and how much of it comes later than 80 ms. The gain that fits it (kRoomWet)
-float Fit(IPLReflectionEffect probe, IPLSource source, float* answered, float* late) {
+// A trace measured: an impulse through it and through the head, the energy of what comes back in the first second at
+// an ear next to the impulse itself, in dB, and how much of it comes later than 80 ms. The gain that fits it (kRoomWet)
+float Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource source, float* answered, float* late) {
     IPLSimulationOutputs out{};
     g_ipl.iplSourceGetOutputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &out);
     IPLReflectionEffectParams params = out.reflections;
     params.type = IPL_REFLECTIONEFFECTTYPE_HYBRID;
     params.numChannels = 4;
     params.irSize = kRoomIr;
-    static float impulse[kFrame], ambi[4][kFrame];  // the room's thread alone
+    static float impulse[kFrame], ambi[4][kFrame], heard[2][kFrame];  // the room's thread alone
     float* in_channels[1] = {impulse};
     float* ambi_channels[4] = {ambi[0], ambi[1], ambi[2], ambi[3]};
+    float* ear_channels[2] = {heard[0], heard[1]};
     IPLAudioBuffer in{1, IPLint32(kFrame), in_channels};
     IPLAudioBuffer room{4, IPLint32(kFrame), ambi_channels};
+    IPLAudioBuffer two{2, IPLint32(kFrame), ear_channels};
+    IPLAmbisonicsDecodeEffectParams dp{};
+    dp.order = 1;
+    dp.hrtf = g_hrtf;
+    dp.orientation.right = {1, 0, 0};
+    dp.orientation.up = {0, 1, 0};
+    dp.orientation.ahead = {0, 0, -1};
+    dp.binaural = IPL_TRUE;
     g_ipl.iplReflectionEffectReset(probe);
+    g_ipl.iplAmbisonicsDecodeEffectReset(ears);
     double first = 0, rest = 0;
     for (int b = 0; b < kRoomFitBlocks; b++) {
         std::fill(impulse, impulse + kFrame, 0.0f);
         if (!b) impulse[0] = 1;
         g_ipl.iplReflectionEffectApply(probe, &params, &in, &room, nullptr);
+        g_ipl.iplAmbisonicsDecodeEffectApply(ears, &dp, &room, &two);
         double sum = 0;
-        for (uint32_t i = 0; i < kFrame; i++) sum += double(ambi[0][i]) * ambi[0][i];
+        for (uint32_t i = 0; i < kFrame; i++)
+            sum += 0.5 * (double(heard[0][i]) * heard[0][i] + double(heard[1][i]) * heard[1][i]);
         (b < kRoomFitEarly ? first : rest) += sum;
     }
     double all = first + rest;
     if (!std::isfinite(all) || all < 1e-12) {
         *answered = -120;
         *late = 0;
-        return std::pow(10.0f, kRoomDry / 20);
+        return 1.0f;
     }
-    *answered = float(10 * std::log10(all * kRoomEar));
+    *answered = float(10 * std::log10(all));
     *late = float(rest / all);
-    float rings = std::clamp((params.reverbTimes[0] + params.reverbTimes[1] + params.reverbTimes[2]) / 3, 0.1f, 6.0f);
+    // The reverberation as it starts: what came after 80 ms, and what 80 ms of its own decay had already taken (60 dB
+    // in the time it rings, the three bands' mean). A dead room's is then small, not small and late
+    float rings = (params.reverbTimes[0] + params.reverbTimes[1] + params.reverbTimes[2]) / 3;
+    rings = std::isfinite(rings) ? std::clamp(rings, kRoomRingMin, kRoomRingMax) : kRoomRingMin;
+    float reverberation = float(10 * std::log10(std::max(rest, 1e-12))) + 60 * (kRoomFitEarly * 0.01f) / rings;
+    float echoes = float(10 * std::log10(std::max(first, 1e-12)));
     float wet = kRoomWet + 10 * std::log10(rings / kRoomRing);
-    float reverberation = float(10 * std::log10(std::max(rest, 1e-12) * kRoomEar));
-    float db = *late * (wet - reverberation) + (1 - *late) * kRoomDry;
+    float db = std::min(wet - reverberation, kRoomEarly - echoes);
     return std::pow(10.0f, std::clamp(db, kRoomFitMin, kRoomFitMax) / 20);
 }
 
@@ -576,6 +592,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     rs.irSize = kRoomIr;
     rs.numChannels = 4;
     IPLReflectionEffect effect = nullptr, probe = nullptr;  // the mixer's, and one to measure a trace with (Fit)
+    IPLAmbisonicsDecodeEffect probe_ears = nullptr;
     if (g_ipl.iplSimulatorCreate(context, &ss, &simulator) != IPL_STATUS_SUCCESS ||
         g_ipl.iplSourceCreate(simulator, &so, &source) != IPL_STATUS_SUCCESS ||
         g_ipl.iplSourceCreate(simulator, &so, &twin) != IPL_STATUS_SUCCESS ||
@@ -621,7 +638,8 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             ds.hrtf = hrtf;
             ds.maxOrder = 1;
             IPLAmbisonicsDecodeEffect decode = nullptr;
-            if (g_ipl.iplAmbisonicsDecodeEffectCreate(context, &as, &ds, &decode) != IPL_STATUS_SUCCESS) {
+            if (g_ipl.iplAmbisonicsDecodeEffectCreate(context, &as, &ds, &decode) != IPL_STATUS_SUCCESS ||
+                g_ipl.iplAmbisonicsDecodeEffectCreate(context, &as, &ds, &probe_ears) != IPL_STATUS_SUCCESS) {
                 LOGR("acoustics: Steam Audio's room has no decoder, sounds have no echo of their rooms");
                 return;
             }
@@ -656,7 +674,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         int64_t now = NowMs();
         if (!fitted || now - fitted >= kRoomFitMs || std::sqrt(moved) * meters >= kRoomFitMove) {
             float answered = 0, late = 0;
-            float fit = Fit(probe, twin, &answered, &late);
+            float fit = Fit(probe, probe_ears, twin, &answered, &late);
             g_room_fit = fit;
             fitted = now;
             std::memcpy(fitted_at, listener, sizeof fitted_at);
