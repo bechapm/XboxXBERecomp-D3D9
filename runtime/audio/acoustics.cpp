@@ -80,14 +80,16 @@ constexpr float kThin = 0.4f;
 constexpr float kProbeSpacing = 1.5f;
 constexpr float kProbeHeight = 1.5f;
 constexpr float kProbeClear = 0.3f;  // metres of room a point needs over it
-constexpr size_t kMaxProbes = 6000;
+// The work of joining them, and the memory it takes while it runs, grow with the square of their number: 5,800 points
+// took 4.6 GB for 9 s on a PC (10 Nov 2026), 2,000 take about 0.6 GB for one
+constexpr size_t kMaxProbes = 2000;
 // two points are joined when half of 4 x 4 rays between balls of half a metre round them pass (a doorway 1.2 m wide
-// joins the points either side of it), up to 20 m apart; a way is at most 150 m long
+// joins the points either side of it), up to 20 m apart; a way is at most 100 m long
 constexpr int kVisSamples = 4;
 constexpr float kVisRadius = 0.5f;
 constexpr float kVisThreshold = 0.5f;
 constexpr float kVisRange = 20.0f;
-constexpr float kPathRange = 150.0f;
+constexpr float kPathRange = 100.0f;
 constexpr float kWayFollow = 0.15f;  // a way's place and level follow the latest result more slowly: ways switch
 // a sound with a way round keeps this much of kFloor through the wall itself: the way carries it now, and it should be
 // heard from the doorway, not from behind the wall
@@ -163,8 +165,9 @@ constexpr float kRoomTraced = 0.5f;
 constexpr int kRoomIr = int(kRoomSeconds * 48000);
 constexpr int64_t kRoomRestMs = 100;  // between traces
 // The room at level 1, next to a sound made at the listener: a bare concrete room answers 8 dB over the sound itself
-// when traced as it is, more than a game's mix has room for
-constexpr float kRoomGain = 0.7f;
+// when traced as it is, more than a game's mix has room for. At 0.7 gunfire in a small room clipped and the mix rose
+// 8 dB (10 Nov 2026); halved, with the sounds sent no louder than they are heard
+constexpr float kRoomGain = 0.35f;
 constexpr float kRoomSpeakers = 0.47f;  // Steam Audio's speaker decode of a room is 6.6 dB over its head's (measured)
 std::atomic<bool> g_room{false};
 std::atomic<float> g_room_level{0.5f};
@@ -297,7 +300,7 @@ void MakeHead(Simulation& s) {
         return;
     }
     g_hrtf = hrtf;
-    LOGR("acoustics: headphones: 3D sounds through Steam Audio's head");
+    LOGR("acoustics: Steam Audio's head is ready, for headphones and the room");
 }
 
 // the level built and handed to the simulator, the one before let go; false for an empty level
@@ -359,7 +362,7 @@ bool Build(Simulation& s, const Scene& level) {
 // Points for the level's ways: on a grid, kProbeHeight over every surface that lies flat enough to stand on and has
 // room above it, in metres. A level's floors and ceilings both lie flat, and which side of a triangle is up is not
 // known, so a ceiling with nothing over it gets points too: they join nothing inside and cost only their share of the
-// work. `spacing` is widened until there are fewer than kMaxProbes
+// work. `spacing` is widened until there are no more than kMaxProbes
 std::vector<IPLSphere> Probes(const Scene& level, float& spacing) {
     std::vector<IPLSphere> probes;
     size_t tris = level.triangles.size() / 3, points = level.vertices.size() / 3;
@@ -378,9 +381,12 @@ std::vector<IPLSphere> Probes(const Scene& level, float& spacing) {
         bool flat;
     };
     std::vector<Hit> hits;
-    for (spacing = kProbeSpacing;; spacing *= 1.3f) {
+    for (spacing = kProbeSpacing;;) {
         double across = std::ceil((hi[0] - lo[0]) / spacing), deep = std::ceil((hi[2] - lo[2]) / spacing);
-        if (across * deep > 4e6) continue;  // a level too wide for this grid
+        if (across * deep > 4e6) {  // a level too wide for this grid
+            spacing *= 1.3f;
+            continue;
+        }
         uint32_t nx = uint32_t(std::max(across, 1.0)), nz = uint32_t(std::max(deep, 1.0));
         hits.clear();
         for (size_t t = 0; t < tris; t++) {
@@ -429,6 +435,8 @@ std::vector<IPLSphere> Probes(const Scene& level, float& spacing) {
             probes.push_back({{x, hits[h].y + kProbeHeight, z}, spacing});
         }
         if (probes.size() <= kMaxProbes) return probes;
+        // their number falls with the square of the spacing: the spacing that should just fit, and a little over
+        spacing *= std::max(1.05f, 1.03f * std::sqrt(float(probes.size()) / float(kMaxProbes)));
     }
 }
 
@@ -1030,12 +1038,25 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
     g_ipl.iplAmbisonicsDecodeEffectApply(decode, &dp, &room, &heard);
     s_ran = true;
     float level = s_level, step = (want - s_level) / float(frames), scale = head ? 1.0f : kRoomSpeakers;
+    static double s_sent = 0, s_answered = 0;  // XBE_ACOUSTICS_LOG: what went in and what came back, squared and summed
+    static uint32_t s_blocks = 0;
     for (uint32_t i = 0; i < frames; i++) {
         level += step;
-        left[i] += ears[0][i] * level * scale;
-        right[i] += ears[1][i] * level * scale;
+        float l = ears[0][i] * level * scale, r = ears[1][i] * level * scale;
+        left[i] += l;
+        right[i] += r;
+        s_sent += double(send[i]) * send[i];
+        s_answered += 0.5 * (double(l) * l + double(r) * r);
     }
     s_level = want;
+    if (g_log && ++s_blocks >= uint32_t(g_log / 10)) {
+        double n = double(s_blocks) * frames;
+        LOGR("acoustics: the room: sent %.1f dB, answered %.1f dB an ear (level %.2f, reverb %.2f %.2f %.2f s)",
+             10 * std::log10(s_sent / n + 1e-12), 10 * std::log10(s_answered / n + 1e-12), want,
+             params.reverbTimes[0], params.reverbTimes[1], params.reverbTimes[2]);
+        s_sent = s_answered = 0;
+        s_blocks = 0;
+    }
     return true;
 }
 
@@ -1103,6 +1124,7 @@ Status Now() {
         if (now - sound.seen > 200) continue;
         if (id == kTestSound) {
             st.test = sound.heard[1];
+            st.test_way = sound.way && g_paths && g_probes;
             continue;
         }
         st.sounds++;
