@@ -83,6 +83,20 @@ void SetPaths(bool on);
 // to what a sound that far off in the open would give (nothing while the sound is in plain view). false: no way
 bool Way(uint32_t sound, float pos[3], float gain[3]);
 
+// The room. Every mono 3D sound is also heard as the room round the listener answers it: its echoes off the level's own
+// surfaces, each from where it comes, and the reverberation after them, as long and as bright as the room is large and
+// hard. Steam Audio traces the room from where the listener stands ten times a second on a thread of its own (a trace
+// is a few hundredths of a second, so nothing is kept in a file), and the mixer runs what the sounds send through the
+// last trace: the first half second as traced, the rest as a reverb of the length the trace measured. On headphones it
+// is heard all round through the head's filter. `level` 0 to 1 is how much of it is heard (the settings file's
+// acoustics_reverb and acoustics_reverb_level; XBE_ACOUSTICS_REVERB 0 or 1 overrides). Needs the acoustics on and a
+// level
+void SetRoom(bool on, float level);
+bool Room();  // wanted and able: the mixer sends to it, and a title's own reverb stands down
+// The mixer, every block: `send` (480 frames, mono) is what the 3D sounds send to the room, `front` and `top` the
+// listener's in the sounds' space. The room's answer is added to `left` and `right`. false: nothing was added
+bool RoomAnswer(const float* send, const float front[3], const float top[3], float* left, float* right, uint32_t frames);
+
 // Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
 // made by the mixer and heard through the walls as any 3D sound; placing it again moves it
 void PlaceTestSound();
@@ -99,6 +113,8 @@ struct Status {
     uint32_t sounds = 0, blocked = 0;  // 3D sounds playing, and those more than half blocked
     uint32_t ways = 0;                 // of those, the ones also heard by a way round
     uint32_t probes = 0;               // the points the ways run between; 0: none worked out (yet)
+    bool room = false;                 // the room round the listener is traced and heard (SetRoom)
+    float room_ms = 0;                 // how long its last trace took
     float test = -1;                   // the test sound's middle band heard, 0 to 1; -1: none
     bool test_placed = false;
 };

@@ -42,6 +42,10 @@ struct Settings {
     bool acoustics_headphones = false;
     // with acoustics: a sound the walls block is also heard by its way round them, from the doorway or the corner
     bool acoustics_paths = true;
+    // with acoustics: 3D sounds are answered by the room round the listener, its echoes and reverberation traced from
+    // the level's own surfaces, and how much of that is heard, 0 to 100
+    bool acoustics_reverb = true;
+    uint32_t acoustics_reverb_level = 50;
 };
 // the shapes aspect_ratio takes besides "screen", width over height
 struct Aspect {
