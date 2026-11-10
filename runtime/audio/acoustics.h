@@ -79,5 +79,14 @@ struct Status {
     bool test_placed = false;
 };
 Status Now();
+// the 3D sounds mixed in the last fifth of a second, where they are in the level (as the rays see them, raise and
+// all), for a game's debug view; with acoustics off too
+struct Source {
+    float pos[3];
+    float through;  // the middle band heard, 0 to 1 (1 while switched off)
+    bool beside;    // within 2 m of the listener: never muffled
+    bool test;      // the test sound
+};
+std::vector<Source> Sources();
 
 }  // namespace audio::acoustics
