@@ -130,6 +130,8 @@ float g_raise = 0;  // the level's Scene::raise
 bool g_started = false;
 float g_listener[3] = {};  // in the level's space, as the mixer last gave it
 float g_listener_raw[3] = {};  // and in the sounds' own space, so a new space moves it with no sound playing
+bool g_hearing = false;  // SetHearing: the sounds heard from elsewhere than the game's listener
+float g_hearing_pose[9] = {};  // place, front, top, in the sounds' space
 float g_origin[3] = {}, g_axes[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the sounds' space in the level (SetSoundSpace)
 uint32_t g_probes = 0;  // points the level's ways run between, 0 until they are worked out
 bool g_test = false;   // a test sound is placed (PlaceTestSound)
@@ -1069,6 +1071,26 @@ void SetSoundSpace(const float origin[3], const float axes[9]) {
     // the listener goes with the space: given only with a sound, it stayed where the last one was heard while the
     // player walked on in silence, and the room was traced there (11 Nov 2026)
     ToLevel(g_listener_raw, g_listener);
+}
+
+void SetHearing(bool on, const float pos[3], const float front[3], const float top[3]) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_hearing = on;
+    if (!on) return;
+    std::memcpy(g_hearing_pose, pos, 3 * sizeof(float));
+    std::memcpy(g_hearing_pose + 3, front, 3 * sizeof(float));
+    std::memcpy(g_hearing_pose + 6, top, 3 * sizeof(float));
+    std::memcpy(g_listener_raw, pos, sizeof g_listener_raw);
+    ToLevel(g_listener_raw, g_listener);
+}
+
+bool Hearing(float pos[3], float front[3], float top[3]) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_hearing) return false;
+    std::memcpy(pos, g_hearing_pose, 3 * sizeof(float));
+    std::memcpy(front, g_hearing_pose + 3, 3 * sizeof(float));
+    std::memcpy(top, g_hearing_pose + 6, 3 * sizeof(float));
+    return true;
 }
 
 void Configure(bool on, float strength) {
