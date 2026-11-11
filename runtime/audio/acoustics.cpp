@@ -67,14 +67,15 @@ constexpr float kNear = 2.0f;                          // metres: a sound this c
 constexpr float kRadius = 0.6f;
 constexpr int kSamples = 32;                           // points in that ball
 constexpr int kSurfaces = 3;                           // walls between counted for transmission
-// the least of each band a blocked sound keeps (low, middle, high): a sound behind a thick wall stays a dull sound
-// rather than none, so a game's warnings and footsteps still carry. Tuned by ear: 0.25 0.12 0.06 (-12, -18 and -24 dB)
-// was too strong in play (10 Nov 2026); now -6, -10.5 and -16.5 dB
-constexpr float kFloor[3] = {0.5f, 0.3f, 0.15f};
+// A blocked sound keeps only what its walls pass: one thin wall (a face of concrete, wood or glass) leaves a dull sound,
+// a thick wall (two faces) or two walls next to nothing, and a sound with an opening near it is heard through the
+// opening (Way). There was a floor under it, the least of each band any blocked sound kept (-6, -10.5 and -16.5 dB),
+// and with it a person was heard walking outside a closed brick building (Ben, 11 Nov 2026). Under kSilent, nothing
+constexpr float kSilent = 0.003f;  // -50 dB
 constexpr float kFollow = 0.3f;  // each mix block moves this much of the way to the latest result, about 30 ms
 // Steam Audio's transmission is a wall's own (a wood wall passes 1.4% of the middle band, concrete 0.2%), and all of
-// it lies under kFloor: a listening check found a wood wall and a concrete one heard alike (31% and 30%, 10 Nov 2026).
-// Raised to this power a thin wall stands clear of a thick one: wood 18%, glass 29%, concrete 8% over the floor
+// it was under the floor there was: a listening check found a wood wall and a concrete one heard alike (31% and 30%,
+// 10 Nov 2026). Raised to this power a face of wood keeps 18%, glass 29%, concrete 8%, and two faces of concrete 0.7%
 constexpr float kThin = 0.4f;
 // The ways round (Way). Points 1.5 m over every floor, this far apart; fewer than kMaxProbes, or they are spread wider
 constexpr float kProbeSpacing = 1.5f;
@@ -93,9 +94,6 @@ constexpr float kVisThreshold = 0.5f;
 constexpr float kVisRange = 20.0f;
 constexpr float kPathRange = 100.0f;
 constexpr float kWayFollow = 0.15f;  // a way's place and level follow the latest result more slowly: ways switch
-// a sound with a way round keeps this much of kFloor through the wall itself: the way carries it now, and it should be
-// heard from the doorway, not from behind the wall
-constexpr float kWayFloor = 0.3f;
 
 int64_t NowMs() {
     using namespace std::chrono;
@@ -117,7 +115,6 @@ struct Sound {
     bool way_placed = false;
     float way_at[3] = {};
     float way_heard[3] = {};
-    float detour = 0;  // 1 while it has a way round, following: kFloor gives way to kWayFloor of it
 };
 
 std::mutex g_mutex;  // the members below
@@ -1403,13 +1400,12 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
         return false;
     }
     // in the off half of an alternation the sound follows back to whole, as it follows the rays: the change is ramped,
-    // and what it was given (Now()'s test sound included) is what it is heard at, not the last muffled value
+    // and what it was given (Now()'s test sound included) is what it is heard at, not the last muffled value. The
+    // strength is how much of the walls' loss, in dB, is heard: at 1 all of it, at 0.5 half as many dB
     float strength = Heard(sound.seen) ? float(g_strength) : 0.0f;
-    sound.detour += ((sound.way && g_paths && g_probes ? 1.0f : 0.0f) - sound.detour) * kWayFollow;
     for (int b = 0; b < 3; b++) {
-        float floor = kFloor[b] * (1 - (1 - kWayFloor) * sound.detour);
-        float kept = floor + (1 - floor) * sound.target[b];
-        float want = 1 - strength * (1 - kept);
+        float kept = std::max(sound.target[b], kSilent);
+        float want = kept <= kSilent && strength >= 1 ? 0.0f : std::pow(kept, strength);
         sound.heard[b] += (want - sound.heard[b]) * kFollow;
         out[b] = sound.heard[b];
     }
@@ -1438,7 +1434,7 @@ bool Way(uint32_t id, float pos[3], float gain[3]) {
     }
     bool any = false;
     for (int b = 0; b < 3; b++) {
-        float want = way ? strength * sound.way_gain[b] : 0.0f;
+        float want = way ? std::min(1.0f, 2 * strength) * sound.way_gain[b] : 0.0f;  // whole from half strength
         sound.way_heard[b] += (want - sound.way_heard[b]) * kWayFollow;
         if (sound.way_heard[b] < 1e-4f) sound.way_heard[b] = 0;
         gain[b] = sound.way_heard[b];
