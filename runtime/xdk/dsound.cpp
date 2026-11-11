@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -954,19 +955,54 @@ void Render(float* out, uint32_t frames) {
     }
     EndHostVoices();
     MixTest(bins.data(), frames);
+    // XBE_ACOUSTICS_LOG: where in the chain the mix is, once a second (a nave fell silent with its room on, 11 Nov 2026)
+    static const bool s_trace = [] {
+        const char* v = std::getenv("XBE_ACOUSTICS_LOG");
+        return v && *v && std::strcmp(v, "0") != 0;
+    }();
+    static uint32_t s_blocks = 0;
+    static float s_peak[5] = {};  // voices, after the effects image, sent to the room, the room's answer, out
+    static uint32_t s_voices = 0;
+    auto peak = [&](int at, const float* x, size_t n, size_t stride) {
+        for (size_t i = 0; i < n; i++) s_peak[at] = std::max(s_peak[at], std::fabs(x[i * stride]));
+    };
+    if (s_trace) {
+        for (auto& [obj, v] : g_voices) s_voices += !v.paused && !v.sync && (v.stream || v.playing);
+        peak(0, &bins[kFrontLeft], frames, kBins);
+        peak(0, &bins[kFrontRight], frames, kBins);
+    }
     // the level's own rooms answer the 3D sounds in place of the title's reverb, added to the two speakers as heard
     dsp::StandDown(audio::acoustics::Room());
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
     static Duck duck;
-    if (audio::acoustics::RoomAnswer(g_room_send.data(), g_front, g_top, answer[0].data(), answer[1].data(), frames)) {
+    bool answered =
+        audio::acoustics::RoomAnswer(g_room_send.data(), g_front, g_top, answer[0].data(), answer[1].data(), frames);
+    if (answered) {
         AddAnswer(duck, bins.data(), answer[0].data(), answer[1].data(), out, frames);
-        return;
+    } else {
+        duck = Duck{};
+        for (uint32_t i = 0; i < frames; i++) {
+            const float* b = &bins[size_t(i) * kBins];
+            out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
+            out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
+        }
     }
-    duck = Duck{};
-    for (uint32_t i = 0; i < frames; i++) {
-        const float* b = &bins[size_t(i) * kBins];
-        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
-        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
+    if (s_trace) {
+        peak(1, &bins[kFrontLeft], frames, kBins);
+        peak(1, &bins[kFrontRight], frames, kBins);
+        peak(2, g_room_send.data(), frames, 1);
+        peak(3, answer[0].data(), frames, 1);
+        peak(3, answer[1].data(), frames, 1);
+        peak(4, out, size_t(frames) * 2, 1);
+        if (++s_blocks >= 100) {
+            auto db = [](float x) { return 20 * std::log10(std::max(x, 1e-10f)); };
+            LOGR("dsound: the last second's peaks: voices %.1f dB (%u voices a block), after the effects image %.1f, sent "
+                 "to the room %.1f, its answer %.1f (giving way to %.2f), out %.1f",
+                 db(s_peak[0]), s_voices / s_blocks, db(s_peak[1]), db(s_peak[2]), db(s_peak[3]), duck.gain,
+                 db(s_peak[4]));
+            s_blocks = s_voices = 0;
+            std::fill(std::begin(s_peak), std::end(s_peak), 0.0f);
+        }
     }
 }
 
