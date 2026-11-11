@@ -842,8 +842,8 @@ Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource 
     double ear = w_all > 1e-15 ? heard_all / w_all : 0, strongest = 0, heard_echoes = 0;
     for (int b = traced_blocks; b < kRoomFitBlocks; b++) strongest = std::max(strongest, w_energy[b]);
     bool taken[kRoomFitBlocks] = {};
-    Echoes& far = fit.echoes;
-    while (closed < 1 && strongest > 0 && far.n < kEchoTaps) {
+    Echoes& distant = fit.echoes;
+    while (closed < 1 && strongest > 0 && distant.n < kEchoTaps) {
         int best = -1;
         for (int b = traced_blocks; b < kRoomFitBlocks; b++)
             if (!taken[b] && (b == 0 || !taken[b - 1]) && (b + 1 >= kRoomFitBlocks || !taken[b + 1]) &&
@@ -851,20 +851,20 @@ Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource 
                 best = b;
         if (best < 0 || w_energy[best] < strongest * std::pow(10.0, -kEchoRange / 10)) break;
         taken[best] = true;
-        int k = far.n++;
-        far.delay[k] = std::clamp(int(w_when[best]), 0, kEchoMax - 1);
-        far.gain[k] = float(std::sqrt(2 * w_energy[best] * ear));  // a pan's two ears share it
+        int k = distant.n++;
+        distant.delay[k] = std::clamp(int(w_when[best]), 0, kEchoMax - 1);
+        distant.gain[k] = float(std::sqrt(2 * w_energy[best] * ear));  // a pan's two ears share it
         heard_echoes += w_energy[best] * ear;
         double len = std::sqrt(w_dir[best][0] * w_dir[best][0] + w_dir[best][1] * w_dir[best][1] + w_dir[best][2] * w_dir[best][2]);
-        for (int c = 0; c < 3; c++) far.dir[k][c] = len > 1e-20 ? float(w_dir[best][c] / len) : 0.0f;
+        for (int c = 0; c < 3; c++) distant.dir[k][c] = len > 1e-20 ? float(w_dir[best][c] / len) : 0.0f;
     }
     if (heard_echoes > 1e-9) {
         double raise = std::min(std::pow(10.0, kRoomOpenEcho / 10) / heard_echoes, std::pow(10.0, kRoomOpenRaise / 10));
         double g = std::sqrt(raise * (1 - closed));
-        for (int k = 0; k < far.n; k++) far.gain[k] *= float(g);
+        for (int k = 0; k < distant.n; k++) distant.gain[k] *= float(g);
         fit.echo_db = float(10 * std::log10(heard_echoes * raise * (1 - closed)));
     } else {
-        far.n = 0;
+        distant.n = 0;
     }
     fit.early_db = early;
     fit.hall_db = hall2 > 0 ? float(10 * std::log10(hall2 * rings_late)) : -120.0f;
@@ -1539,7 +1539,7 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
     params.numChannels = 4;
     params.irSize = kRoomIr;
     for (float& eq : params.eq) eq *= 1e-4f;  // Steam Audio's own reverb kept out: the hall is ours (Fit)
-    static float ambi[4][kFrame], ears[2][kFrame], halls[2][kFrame], far[2][kFrame];
+    static float ambi[4][kFrame], ears[2][kFrame], halls[2][kFrame], distant[2][kFrame];
     float* in_channels[1] = {const_cast<float*>(send)};
     float* ambi_channels[4] = {ambi[0], ambi[1], ambi[2], ambi[3]};
     float* ear_channels[2] = {ears[0], ears[1]};
@@ -1597,8 +1597,8 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
                 l = l * t + ol * (1 - t);
                 rr = rr * t + orr * (1 - t);
             }
-            far[0][i] = l;
-            far[1][i] = rr;
+            distant[0][i] = l;
+            distant[1][i] = rr;
         }
         bus.w = (bus.w + int(frames)) % n;
     }
@@ -1608,8 +1608,8 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
     static uint32_t s_blocks = 0;
     for (uint32_t i = 0; i < frames; i++) {
         level += step;
-        float l = (ears[0][i] * scale + halls[0][i] * s_hall + far[0][i]) * level;
-        float r = (ears[1][i] * scale + halls[1][i] * s_hall + far[1][i]) * level;
+        float l = (ears[0][i] * scale + halls[0][i] * s_hall + distant[0][i]) * level;
+        float r = (ears[1][i] * scale + halls[1][i] * s_hall + distant[1][i]) * level;
         left[i] += l;
         right[i] += r;
         s_sent += double(send[i]) * send[i];
