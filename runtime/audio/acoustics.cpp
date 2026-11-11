@@ -191,6 +191,9 @@ constexpr float kRoomRing = 1.5f;    // seconds
 constexpr float kRoomEarly = -3.0f;  // dB at level 1
 constexpr float kRoomEarlyRaise = 12.0f;  // dB
 constexpr float kRoomFitMin = -24.0f, kRoomFitMax = 30.0f;
+// a reverberation may be raised further: a nave's trace answers so little late that 30 dB held nearly every place in
+// it under kRoomWet (11 Nov 2026); the open air is kept dry by kRoomSky, not by this
+constexpr float kRoomLateMax = 40.0f;
 constexpr float kRoomRingMin = 0.3f, kRoomRingMax = 6.0f;  // seconds a room is taken to ring, for the fit
 // Steam Audio's first order binaural decode adds its virtual speakers' heads up alike at low frequencies: next to the
 // speaker decode a room came out 11 dB louder under 250 Hz, 4 dB at 1 kHz and 5 dB quieter at 2 kHz (measured, 10 Nov
@@ -650,7 +653,7 @@ Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource 
     closed = closed * closed * (3 - 2 * closed);
     if (early > 0) early *= closed;
     if (late > 0) late *= closed;
-    late = std::clamp(late, kRoomFitMin, kRoomFitMax);
+    late = std::clamp(late, kRoomFitMin, kRoomLateMax);
     // The reverb's own level next to the early gain (`tail`) brings what comes after 80 ms to `late`. The traced part's
     // own echoes after 80 ms come with the early gain, and in a small room they are most of its reverberation: there
     // the reverb keeps at least the level Steam Audio gave it, so the room still rings on, and the early echoes are
