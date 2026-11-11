@@ -750,6 +750,9 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             fitted = 0;
         }
         if (!scene || !g_room || !g_on) continue;
+        // no listener yet: for its first seconds a level has it at the world's origin, often outside the level, and a
+        // trace from there would be the level's first fit (a crypt read 18% open, 11 Nov 2026)
+        if (listener[0] == 0 && listener[1] == 0 && listener[2] == 0) continue;
         if (!g_room_decode.load()) {  // the head decodes it, made by the rays' thread
             IPLHRTF hrtf = g_hrtf;
             if (!hrtf) continue;
