@@ -392,18 +392,29 @@ bool Build(Simulation& s, const Scene& level) {
         for (size_t i = 0; i < vertices.size(); i++)
             vertices[i] = {level.vertices[i * 3] * level.meters, level.vertices[i * 3 + 1] * level.meters,
                            level.vertices[i * 3 + 2] * level.meters};
-        std::vector<IPLTriangle> triangles(tris);
-        std::vector<IPLint32> material(tris);
+        // a surface that passes all of every band (a grate, a fence, a foliage card) is left out: in the rays it would
+        // still stop a way round and the sky (kRoomSky), and in the room's trace it would answer as a perfect mirror
+        std::vector<IPLTriangle> triangles;
+        std::vector<IPLint32> material;
+        triangles.reserve(tris);
+        material.reserve(tris);
         for (size_t t = 0; t < tris; t++) {
-            for (int k = 0; k < 3; k++) triangles[t].indices[k] = IPLint32(level.triangles[t * 3 + k]);
-            material[t] = t < level.material.size() ? IPLint32(level.material[t]) : 0;
-            if (material[t] < 0 || size_t(material[t]) >= level.materials.size()) material[t] = 0;
+            IPLint32 m = t < level.material.size() ? IPLint32(level.material[t]) : 0;
+            if (m < 0 || size_t(m) >= level.materials.size()) m = 0;
+            const Material& made = level.materials[size_t(m)];
+            if (made.transmission[0] >= 0.999f && made.transmission[1] >= 0.999f && made.transmission[2] >= 0.999f)
+                continue;
+            IPLTriangle tri{};
+            for (int k = 0; k < 3; k++) tri.indices[k] = IPLint32(level.triangles[t * 3 + k]);
+            triangles.push_back(tri);
+            material.push_back(m);
         }
+        tris = triangles.size();
         std::vector<IPLMaterial> materials(level.materials.size());
         std::memcpy(materials.data(), level.materials.data(), materials.size() * sizeof(IPLMaterial));
         IPLStaticMeshSettings ms{};
         ms.numVertices = IPLint32(vertices.size());
-        ms.numTriangles = IPLint32(tris);
+        ms.numTriangles = IPLint32(triangles.size());
         ms.numMaterials = IPLint32(materials.size());
         ms.vertices = vertices.data();
         ms.triangles = triangles.data();
@@ -1190,6 +1201,9 @@ void Run() {
                 in.visThreshold = kVisThreshold;
                 in.visRange = kVisRange;
                 in.pathingOrder = 1;
+                // each way's legs tested again against the walls as the sound plays, so a way the bake let past a
+                // wall is dropped (a sound behind four walls came nearly whole by a way, 11 Nov 2026)
+                in.enableValidation = IPL_TRUE;
             }
             g_ipl.iplSourceSetInputs(it->second, flags, &in);
         }
