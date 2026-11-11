@@ -968,8 +968,7 @@ void Render(float* out, uint32_t frames) {
     };
     if (s_trace) {
         for (auto& [obj, v] : g_voices) s_voices += !v.paused && !v.sync && (v.stream || v.playing);
-        peak(0, &bins[kFrontLeft], frames, kBins);
-        peak(0, &bins[kFrontRight], frames, kBins);
+        peak(0, bins.data(), size_t(frames) * kBins, 1);  // every bin: 3D voices reach the speakers through the image
     }
     // the level's own rooms answer the 3D sounds in place of the title's reverb, added to the two speakers as heard
     dsp::StandDown(audio::acoustics::Room());
