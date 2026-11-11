@@ -813,11 +813,13 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             }
             g_ipl.iplSimulatorRunDirect(simulator);
             float open = 0;
-            for (int k = 0; k < kRoomSky; k++) {
-                if (!sky[k]) continue;
+            char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 15 degrees up | 50
+            for (int k = 0, c = 0; k < kRoomSky; k++) {
                 IPLSimulationOutputs seen{};
-                g_ipl.iplSourceGetOutputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &seen);
+                if (sky[k]) g_ipl.iplSourceGetOutputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &seen);
                 open += seen.direct.occlusion;
+                if (k == 1 || k == 9) rays_seen[c++] = '|';
+                rays_seen[c++] = !sky[k] ? '?' : seen.direct.occlusion > 0.5f ? 'o' : '.';
             }
             open = rays ? open / float(rays) : 0;
             Fitted fit = Fit(probe, probe_ears, twin, open);
@@ -831,9 +833,9 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 LOGR("acoustics: the room round the listener traced in %.0f ms, its reverb %.2f %.2f %.2f s", took,
                      out.reflections.reverbTimes[0], out.reflections.reverbTimes[1], out.reflections.reverbTimes[2]);
             if (!said || g_log)
-                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, %.0f%% open; its echoes raised %.1f dB and "
-                     "its reverberation %.1f dB (reverb %.2f %.2f %.2f s, measured in %lld ms)",
-                     fit.answered, fit.late * 100, open * 100, fit.early_db, fit.tail_db, out.reflections.reverbTimes[0],
+                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, %.0f%% open (%s); its echoes raised %.1f dB "
+                     "and its reverberation %.1f dB (reverb %.2f %.2f %.2f s, measured in %lld ms)",
+                     fit.answered, fit.late * 100, open * 100, rays_seen, fit.early_db, fit.tail_db, out.reflections.reverbTimes[0],
                      out.reflections.reverbTimes[1], out.reflections.reverbTimes[2],
                      static_cast<long long>(NowMs() - now));
             said = true;
