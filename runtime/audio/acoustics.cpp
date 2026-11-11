@@ -129,6 +129,7 @@ float g_meters = 1;
 float g_raise = 0;  // the level's Scene::raise
 bool g_started = false;
 float g_listener[3] = {};  // in the level's space, as the mixer last gave it
+float g_listener_raw[3] = {};  // and in the sounds' own space, so a new space moves it with no sound playing
 float g_origin[3] = {}, g_axes[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the sounds' space in the level (SetSoundSpace)
 uint32_t g_probes = 0;  // points the level's ways run between, 0 until they are worked out
 bool g_test = false;   // a test sound is placed (PlaceTestSound)
@@ -750,6 +751,9 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             fitted = 0;
         }
         if (!scene || !g_room || !g_on) continue;
+        // no listener yet: for its first seconds a level has it at the world's origin, often outside the level, and a
+        // trace from there would be the level's first fit (a crypt read 18% open, 11 Nov 2026)
+        if (listener[0] == 0 && listener[1] == 0 && listener[2] == 0) continue;
         if (!g_room_decode.load()) {  // the head decodes it, made by the rays' thread
             IPLHRTF hrtf = g_hrtf;
             if (!hrtf) continue;
@@ -813,11 +817,13 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             }
             g_ipl.iplSimulatorRunDirect(simulator);
             float open = 0;
-            for (int k = 0; k < kRoomSky; k++) {
-                if (!sky[k]) continue;
+            char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 15 degrees up | 50
+            for (int k = 0, c = 0; k < kRoomSky; k++) {
                 IPLSimulationOutputs seen{};
-                g_ipl.iplSourceGetOutputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &seen);
+                if (sky[k]) g_ipl.iplSourceGetOutputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &seen);
                 open += seen.direct.occlusion;
+                if (k == 1 || k == 9) rays_seen[c++] = '|';
+                rays_seen[c++] = !sky[k] ? '?' : seen.direct.occlusion > 0.5f ? 'o' : '.';
             }
             open = rays ? open / float(rays) : 0;
             Fitted fit = Fit(probe, probe_ears, twin, open);
@@ -831,9 +837,9 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 LOGR("acoustics: the room round the listener traced in %.0f ms, its reverb %.2f %.2f %.2f s", took,
                      out.reflections.reverbTimes[0], out.reflections.reverbTimes[1], out.reflections.reverbTimes[2]);
             if (!said || g_log)
-                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, %.0f%% open; its echoes raised %.1f dB and "
-                     "its reverberation %.1f dB (reverb %.2f %.2f %.2f s, measured in %lld ms)",
-                     fit.answered, fit.late * 100, open * 100, fit.early_db, fit.tail_db, out.reflections.reverbTimes[0],
+                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, %.0f%% open (%s); its echoes raised %.1f dB "
+                     "and its reverberation %.1f dB (reverb %.2f %.2f %.2f s, measured in %lld ms)",
+                     fit.answered, fit.late * 100, open * 100, rays_seen, fit.early_db, fit.tail_db, out.reflections.reverbTimes[0],
                      out.reflections.reverbTimes[1], out.reflections.reverbTimes[2],
                      static_cast<long long>(NowMs() - now));
             said = true;
@@ -1056,6 +1062,9 @@ void SetSoundSpace(const float origin[3], const float axes[9]) {
     std::lock_guard<std::mutex> lock(g_mutex);
     std::memcpy(g_origin, origin, sizeof g_origin);
     std::memcpy(g_axes, axes, sizeof g_axes);
+    // the listener goes with the space: given only with a sound, it stayed where the last one was heard while the
+    // player walked on in silence, and the room was traced there (11 Nov 2026)
+    ToLevel(g_listener_raw, g_listener);
 }
 
 void Configure(bool on, float strength) {
@@ -1150,6 +1159,7 @@ bool Gains(uint32_t id, const float pos[3], const float listener[3], float out[3
         sound.pos[1] += g_raise;
         sound.placed = true;
     }
+    std::memcpy(g_listener_raw, listener, sizeof g_listener_raw);
     ToLevel(listener, g_listener);
     sound.seen = NowMs();
     if (!g_on || g_state < 0 || !g_scene) {
