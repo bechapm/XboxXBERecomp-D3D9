@@ -202,7 +202,9 @@ constexpr float kRoomRingMin = 0.3f, kRoomRingMax = 6.0f;  // seconds a room is 
 constexpr float kRoomHeadLow = -9.0f;    // dB, under the shelf
 constexpr float kRoomHeadShelf = 700.0f; // Hz, its middle
 // How open the place is: rays from the listener toward kRoomSky directions over and round it (the zenith, and rings
-// of 8 at 15 and 50 degrees up), that meet nothing within kRoomSkyFar. Open at kRoomOpenNone of them no longer has its
+// of 8 at 20 and 70 degrees up), that meet nothing within kRoomSkyFar. Only the zenith and the steep ring count: a
+// roof is what makes a room, and in a valley the cliffs stop the lower rays (beside a hut in Siberia, open sky
+// overhead, 2 of 17 rays at 15 and 50 degrees got out, 11 Nov 2026). Open at kRoomOpenNone of them no longer has its
 // echo raised at all, and at kRoomOpenAll and under, all of it. A nave or a crypt is closed in every direction
 constexpr int kRoomSky = 17;
 constexpr float kRoomSkyFar = 50.0f;  // metres
@@ -716,7 +718,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     sky_settings.flags = IPL_SIMULATIONFLAGS_DIRECT;
     for (int k = 0; k < kRoomSky; k++) {
         if (k) {
-            float up = (k <= 8 ? 15.0f : 50.0f) * 3.14159265f / 180, round = float(k % 8) * 3.14159265f / 4;
+            float up = (k <= 8 ? 20.0f : 70.0f) * 3.14159265f / 180, round = float(k % 8) * 3.14159265f / 4;
             sky_dir[k][0] = std::cos(up) * std::cos(round);
             sky_dir[k][1] = std::sin(up);
             sky_dir[k][2] = std::cos(up) * std::sin(round);
@@ -801,7 +803,6 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             IPLSimulationSharedInputs at{};
             at.listener = shared.listener;
             g_ipl.iplSimulatorSetSharedInputs(simulator, IPL_SIMULATIONFLAGS_DIRECT, &at);
-            int rays = 0;
             for (int k = 0; k < kRoomSky; k++) {
                 if (!sky[k]) continue;
                 IPLSimulationInputs ray{};
@@ -813,19 +814,22 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 ray.source.origin.y += sky_dir[k][1] * kRoomSkyFar;
                 ray.source.origin.z += sky_dir[k][2] * kRoomSkyFar;
                 g_ipl.iplSourceSetInputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &ray);
-                rays++;
             }
             g_ipl.iplSimulatorRunDirect(simulator);
             float open = 0;
-            char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 15 degrees up | 50
+            int steep = 0;
+            char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 20 degrees up | 70
             for (int k = 0, c = 0; k < kRoomSky; k++) {
                 IPLSimulationOutputs seen{};
                 if (sky[k]) g_ipl.iplSourceGetOutputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &seen);
-                open += seen.direct.occlusion;
+                if (sky[k] && (k == 0 || k > 8)) {
+                    open += seen.direct.occlusion;
+                    steep++;
+                }
                 if (k == 1 || k == 9) rays_seen[c++] = '|';
                 rays_seen[c++] = !sky[k] ? '?' : seen.direct.occlusion > 0.5f ? 'o' : '.';
             }
-            open = rays ? open / float(rays) : 0;
+            open = steep ? open / float(steep) : 0;
             Fitted fit = Fit(probe, probe_ears, twin, open);
             g_room_fit = fit.gain;
             g_room_tail = fit.tail;
