@@ -204,6 +204,13 @@ constexpr float kRoomHeadShelf = 700.0f; // Hz, its middle
 // echo raised at all, and at kRoomOpenAll and under, all of it. A nave or a crypt is closed in every direction. A roof
 // straight overhead (the zenith's ray stopped) counts the rest half
 constexpr int kRoomSky = 17;
+// How high the roof is: points straight up at these heights, the lowest a ray cannot reach is the roof. Under a roof
+// a room rings at least kRoomRingHigh seconds a metre of it: a cathedral's gallery under a roof 26 m up traced 0.8 s,
+// its sound let out through the high windows the level leaves open, where the nave beside it, 40 m, traced 4.6 s
+// (11 Nov 2026). A low room's own trace is longer than this, so it changes nothing there
+constexpr float kRoomRoofs[] = {3, 6, 10, 15, 20, 25, 30, 40};
+constexpr int kRoomRoof = int(std::size(kRoomRoofs));
+constexpr float kRoomRingHigh = 0.08f;  // seconds a metre
 constexpr float kRoomSkyFar = 50.0f;  // metres
 constexpr float kRoomOpenAll = 0.12f, kRoomOpenNone = 0.4f;
 // how closed a place is, 0 under the open sky to 1 under a roof (kRoomOpenAll, kRoomOpenNone)
@@ -243,6 +250,7 @@ std::atomic<bool> g_room_traced{false};  // the level in use has a trace
 std::atomic<float> g_room_ms{0};
 std::atomic<float> g_room_fit{0};   // the gain that fits the last trace measured, at level 1: its early echoes
 std::atomic<float> g_room_hall{0};  // and the hall's (Hall), at level 1
+std::atomic<float> g_room_least{0};  // the least the hall rings, for the roof's height (kRoomRingHigh)
 Echoes g_room_echoes;                 // under g_mutex: the open air's echoes (Fit), at level 1
 std::atomic<uint32_t> g_room_echoes_set{0};
 std::atomic<IPLSource> g_room_source{nullptr};  // the listener, in the room's own simulator; made once, never let go
@@ -669,10 +677,14 @@ struct Hall {
         std::fill(lo, lo + kHallLines, 0.0f);
         std::fill(hi, hi + kHallLines, 0.0f);
     }
-    // the room's reverberation times, low, middle and high (Steam Audio's reverbTimes)
-    void Set(const float times[3]) {
+    // the room's reverberation times, low, middle and high (Steam Audio's reverbTimes), and the least it rings for its
+    // height (kRoomRingHigh)
+    void Set(const float times[3], float least = 0) {
         float t[3];
-        for (int b = 0; b < 3; b++) t[b] = std::isfinite(times[b]) ? std::clamp(times[b], kRoomRingMin, kRoomRingMax) : kRoomRingMin;
+        for (int b = 0; b < 3; b++) {
+            t[b] = std::isfinite(times[b]) ? times[b] : 0.0f;
+            t[b] = std::clamp(std::max(t[b], b == 2 ? 0.8f * least : least), kRoomRingMin, kRoomRingMax);
+        }
         t[2] = std::min(t[2], t[1]);  // the highs never ring longer than the middle (and the loop stays under 1)
         bool same = true;
         for (int b = 0; b < 3; b++) same = same && std::fabs(t[b] - rt[b]) < 0.01f * t[b];
@@ -753,7 +765,7 @@ struct Fitted {
     float gain = 1, hall = 0, answered = -120, late = 0, early_db = 0, hall_db = -120, echo_db = -120;
     Echoes echoes;
 };
-Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource source, float open) {
+Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource source, float open, float least) {
     Fitted fit;
     IPLSimulationOutputs out{};
     g_ipl.iplSourceGetOutputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &out);
@@ -781,7 +793,7 @@ Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource 
     g_ipl.iplReflectionEffectReset(probe);
     g_ipl.iplAmbisonicsDecodeEffectReset(ears);
     hall.Reset();
-    hall.Set(params.reverbTimes);
+    hall.Set(params.reverbTimes, least);
     Shelf shelf[2];
     double first = 0, rest = 0, rings_late = 0, heard_all = 0, w_all = 0;
     static double w_energy[kRoomFitBlocks], w_when[kRoomFitBlocks], w_dir[kRoomFitBlocks][3];
@@ -827,7 +839,8 @@ Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource 
     // Closed: the reverberation as it starts, kRoomWet, more as it rings longer (60 dB in the time it rings, the three
     // bands' mean, taken off for its first 80 ms), is the hall's and the traced echoes' after 80 ms together. The early
     // echoes are raised by no more than kRoomEarlyRaise and to no more than kRoomEarly
-    float rings = (params.reverbTimes[0] + params.reverbTimes[1] + params.reverbTimes[2]) / 3;
+    float rings = 0;
+    for (int b = 0; b < 3; b++) rings += std::max(params.reverbTimes[b], b == 2 ? 0.8f * least : least) / 3;
     rings = std::isfinite(rings) ? std::clamp(rings, kRoomRingMin, kRoomRingMax) : kRoomRingMin;
     float echoes = float(10 * std::log10(std::max(first, 1e-12)));
     float wet = kRoomWet + 10 * std::log10(rings / kRoomRing) - 60 * (kRoomFitEarly * 0.01f) / rings;
@@ -892,7 +905,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     ss.maxDuration = kRoomSeconds;
     ss.maxOrder = 1;
     // the listener twice, one for the mixer and one to measure (a trace serves one effect only), and the sky's points
-    ss.maxNumSources = 2 + kRoomSky;
+    ss.maxNumSources = 2 + kRoomSky + kRoomRoof;
     ss.numThreads = int(std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u));
     ss.samplingRate = 48000;
     ss.frameSize = IPLint32(kFrame);
@@ -932,11 +945,15 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         if (g_ipl.iplSourceCreate(simulator, &sky_settings, &sky[k]) == IPL_STATUS_SUCCESS)
             g_ipl.iplSourceAdd(sky[k], simulator);
     }
+    IPLSource roof[kRoomRoof] = {};  // kRoomRoofs
+    for (IPLSource& r : roof)
+        if (g_ipl.iplSourceCreate(simulator, &sky_settings, &r) == IPL_STATUS_SUCCESS) g_ipl.iplSourceAdd(r, simulator);
     g_ipl.iplSimulatorCommit(simulator);
     IPLScene scene = nullptr;
     bool said = false;
     int64_t fitted = 0;  // when the trace was last measured, 0: not for this level
     float open = 0;      // how open the place was then (kRoomSky)
+    float high = 0;      // and how high its roof (kRoomRoofs), 0 for none
     char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 20 degrees up | 70
     float fitted_at[3] = {};
     for (;;) {
@@ -1015,6 +1032,16 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 ray.source.origin.z += sky_dir[k][2] * kRoomSkyFar;
                 g_ipl.iplSourceSetInputs(sky[k], IPL_SIMULATIONFLAGS_DIRECT, &ray);
             }
+            for (int k = 0; k < kRoomRoof; k++) {
+                if (!roof[k]) continue;
+                IPLSimulationInputs ray{};
+                ray.flags = IPL_SIMULATIONFLAGS_DIRECT;
+                ray.directFlags = IPL_DIRECTSIMULATIONFLAGS_OCCLUSION;
+                ray.occlusionType = IPL_OCCLUSIONTYPE_RAYCAST;
+                ray.source = shared.listener;
+                ray.source.origin.y += kRoomRoofs[k];
+                g_ipl.iplSourceSetInputs(roof[k], IPL_SIMULATIONFLAGS_DIRECT, &ray);
+            }
             g_ipl.iplSimulatorRunDirect(simulator);
             open = 0;
             int steep = 0;
@@ -1033,6 +1060,19 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             // a roof straight over the listener halves it: high windows let the steep rays out of a cathedral's
             // gallery (22% open, its hall gone, 11 Nov 2026), where a yard under the open sky has the zenith free
             if (sky[0] && rays_seen[0] == '.') open *= 0.5f;
+            high = 0;
+            if (sky[0] && rays_seen[0] == '.') {
+                high = kRoomSkyFar;
+                for (int k = 0; k < kRoomRoof; k++) {
+                    IPLSimulationOutputs seen{};
+                    if (!roof[k]) continue;
+                    g_ipl.iplSourceGetOutputs(roof[k], IPL_SIMULATIONFLAGS_DIRECT, &seen);
+                    if (seen.direct.occlusion < 0.5f) {
+                        high = kRoomRoofs[k];
+                        break;
+                    }
+                }
+            }
         }
         shared.irradianceMinDistance = kRoomNear;
         in.hybridReverbTransitionTime = kRoomTraced;
@@ -1047,7 +1087,9 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         float took = float(NowMs() - began);
         g_room_ms = took;
         if (refit) {
-            Fitted fit = Fit(probe, probe_ears, twin, open);
+            float least = kRoomRingHigh * high;
+            Fitted fit = Fit(probe, probe_ears, twin, open, least);
+            g_room_least = least;
             g_room_fit = fit.gain;
             g_room_hall = fit.hall;
             {
@@ -1063,9 +1105,10 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 LOGR("acoustics: the room round the listener traced in %.0f ms, its reverb %.2f %.2f %.2f s", took,
                      out.reflections.reverbTimes[0], out.reflections.reverbTimes[1], out.reflections.reverbTimes[2]);
             if (!said || g_log)
-                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, %.0f%% open (%s); its echoes raised %.1f dB, "
-                     "its hall at %.1f dB, %d far echoes at %.1f dB (strongest %d ms) (reverb %.2f %.2f %.2f s, measured in %lld ms)",
-                     fit.answered, fit.late * 100, open * 100, rays_seen, fit.early_db, fit.hall_db, fit.echoes.n, fit.echo_db,
+                LOGR("acoustics: the room answers %.1f dB, %.0f%% of it late, %.0f%% open (%s), roof %.0f m; its echoes raised "
+                     "%.1f dB, its hall at %.1f dB, %d far echoes at %.1f dB (strongest %d ms) (reverb %.2f %.2f %.2f s, "
+                     "measured in %lld ms)",
+                     fit.answered, fit.late * 100, open * 100, rays_seen, high, fit.early_db, fit.hall_db, fit.echoes.n, fit.echo_db,
                      fit.echoes.n ? fit.echoes.delay[0] / 48 : 0,
                      out.reflections.reverbTimes[0],
                      out.reflections.reverbTimes[1], out.reflections.reverbTimes[2],
@@ -1583,7 +1626,7 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
         g_room_shelf[0].Run(ears[0], frames);
         g_room_shelf[1].Run(ears[1], frames);
     }
-    g_room_hall_mix.Set(params.reverbTimes);
+    g_room_hall_mix.Set(params.reverbTimes, g_room_least);
     g_room_hall_mix.Run(send, halls[0], halls[1], frames);
     // the open air's echoes: the sound into the bus, then each tap from where it comes, the last set faded out
     EchoBus& bus = g_room_echo_bus;
