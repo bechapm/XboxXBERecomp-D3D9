@@ -173,11 +173,11 @@ struct Voice {
     bool head = false;  // the last block's ears came from the head's filter (audio/acoustics.h, Ears)
     Detour way;         // its second hearing, by the way round the walls (audio/acoustics.h, Way)
     float send = 0;     // the last block's level to the room round the listener (audio/acoustics.h, Room)
-    // sound through the level (audio/acoustics.h): the last block's low, middle and high gains, and each channel's two
-    // low passes that split it into those bands
+    // sound through the level (audio/acoustics.h): the last block's low, middle and high gains, and each channel's
+    // low passes that split it into those bands and its deep part's level (Muffled)
     bool walls = false;
     float band[3] = {1, 1, 1};
-    float split[kMaxChannels][2] = {};
+    float split[kMaxChannels][4] = {};
     // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
     int64_t block[2] = {-1, -1};
     uint8_t last = 0;  // decoded[last] holds block[last]
@@ -617,6 +617,28 @@ float Through(float x, float* split, const float* gain) {
     return gain[0] * split[0] + gain[1] * (split[1] - split[0]) + gain[2] * (x - split[1]);
 }
 
+// The same for a sound heard through walls, with what is under 120 Hz apart: a wall stops less of a sound the deeper
+// it is (6 dB less an octave, the mass law), so the deep part keeps kDeep times what the low band keeps, and a sound
+// with much of it, an explosion, a shot, a giant's step, is a rumble behind a wall where it was a bang (Ben, 12 Nov
+// 2026: a mine behind a closed door was only quieter and a little duller). The more of the deep part there is (its
+// level followed, from kRumbleFrom to kRumbleFull of full scale), the more it is raised, up to kRumble, by as much as
+// the wall takes of the middle band: a person's step, with next to none, gains nothing. state: the two splits, the
+// deep part and its level
+constexpr float kDeepSplit = 0.0155858f;  // 120 Hz
+constexpr float kDeep = 6.0f;             // 2.7 octaves under the low band's middle
+constexpr float kRumble = 2.0f, kRumbleFrom = 0.03f, kRumbleFull = 0.2f;
+float Muffled(float x, float* state, const float* gain) {
+    state[0] += kLowSplit * (x - state[0]);
+    state[1] += kHighSplit * (x - state[1]);
+    state[2] += kDeepSplit * (state[0] - state[2]);
+    float deep = state[2], level = std::fabs(deep);
+    state[3] += (level > state[3] ? 0.01f : 0.0002f) * (level - state[3]);  // up in 2 ms, down in 100
+    float big = std::clamp((state[3] - kRumbleFrom) / (kRumbleFull - kRumbleFrom), 0.0f, 1.0f);
+    float taken = 1 - std::min(gain[1], 1.0f);
+    float keeps = std::min(1.0f, gain[0] * (1 + (kDeep - 1) * taken)) * (1 + (kRumble - 1) * big * taken);
+    return keeps * deep + gain[0] * (state[0] - deep) + gain[1] * (state[1] - state[0]) + gain[2] * (x - state[1]);
+}
+
 // What the mono 3D sounds send to the room round the listener this block (audio/acoustics.h, Room), and the last
 // detour's sound for it: the output thread alone renders
 std::vector<float> g_room_send;
@@ -762,7 +784,7 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
         if (filter) {
             for (int b = 0; b < 3; b++) band[b] += band_step[b];
             for (uint32_t c = 0; c < channels; c++)
-                if (read >> c & 1) row[c] = Through(row[c], v.split[c], band);
+                if (read >> c & 1) row[c] = Muffled(row[c], v.split[c], band);
         }
         if (ears) {
             v.itd += itd_step;
@@ -840,7 +862,7 @@ struct TestVoice {
     uint32_t n = 0;           // frames made
     uint32_t noise = 0x9E3779B9u;
     float phase = 0;
-    float split[2] = {};
+    float split[4] = {};
     float band[3] = {1, 1, 1};
     float left = 0, right = 0;
     float head = 0;  // how much of it the head's filter places (headphones), ramped as its levels are
@@ -881,7 +903,7 @@ void MixTest(float* bins, uint32_t frames) {
         float x = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
         for (int b = 0; b < 3; b++) g_test.band[b] += band_step[b];
         dry[i] = x;
-        mono[i] = Through(x, g_test.split, g_test.band);
+        mono[i] = Muffled(x, g_test.split, g_test.band);
     }
     // its way round the walls, as a voice's: made as two ears at the level of a sound that far off, added below
     float way_from[3] = {}, way_gain[3] = {0, 0, 0};
