@@ -100,6 +100,12 @@ bool Way(uint32_t sound, float pos[3], float gain[3]);
 // level
 void SetRoom(bool on, float level);
 bool Room();  // wanted and able: the mixer sends to it, and a title's own reverb stands down
+// A recording's own echo. Many of a title's sounds were recorded or mastered with a room's ring on them (a shot's
+// second of hall), which with the room above is two rooms at once. `kept` 0 to 1 is how much of that ring a 3D sound
+// keeps (the settings file's acoustics_tails; 1 leaves every sound as recorded): the mixer lets a sound's quiet end
+// die away sooner, the real room's answer takes its place. Only while the room is heard
+void SetTails(float kept);
+float Tails();  // 1 while the room is not heard
 // The mixer, every block: `send` (480 frames, mono) is what the 3D sounds send to the room, `front` and `top` the
 // listener's in the sounds' space. The room's answer is added to `left` and `right`. false: nothing was added
 bool RoomAnswer(const float* send, const float front[3], const float top[3], float* left, float* right, uint32_t frames);

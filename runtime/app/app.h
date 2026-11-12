@@ -46,6 +46,8 @@ struct Settings {
     // the level's own surfaces, and how much of that is heard, 0 to 100
     bool acoustics_reverb = true;
     uint32_t acoustics_reverb_level = 50;
+    // with the room: how much of the echo recorded into a sound itself is kept, 0 to 100 (100 is the sound as recorded)
+    uint32_t acoustics_tails = 50;
 };
 // the shapes aspect_ratio takes besides "screen", width over height
 struct Aspect {
