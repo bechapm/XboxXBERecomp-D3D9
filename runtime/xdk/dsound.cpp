@@ -13,6 +13,7 @@
 
 #include "audio/acoustics.h"
 #include "audio/audio.h"
+#include "audio/beds.h"
 #include "audio/sounds.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
@@ -1000,6 +1001,10 @@ void Render(float* out, uint32_t frames) {
         for (auto& [obj, v] : g_voices) s_voices += !v.paused && !v.sync && (v.stream || v.playing);
         peak(0, bins.data(), size_t(frames) * kBins, 1);  // every bin: 3D voices reach the speakers through the image
     }
+    // the place's background (audio/beds.h): its single sounds are answered by the room too
+    static std::vector<float> beds;
+    beds.assign(size_t(frames) * 2, 0.0f);
+    audio::beds::Mix(beds.data(), g_room_send.data(), frames);
     // the level's own rooms answer the 3D sounds in place of the title's reverb, added to the two speakers as heard
     dsp::StandDown(audio::acoustics::Room());
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
@@ -1016,6 +1021,7 @@ void Render(float* out, uint32_t frames) {
             out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
         }
     }
+    for (size_t i = 0; i < size_t(frames) * 2; i++) out[i] = std::clamp(out[i] + beds[i], -1.0f, 1.0f);
     if (s_trace) {
         peak(1, &bins[kFrontLeft], frames, kBins);
         peak(1, &bins[kFrontRight], frames, kBins);
