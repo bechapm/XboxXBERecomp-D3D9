@@ -110,6 +110,17 @@ float Tails();  // 1 while the room is not heard
 // listener's in the sounds' space. The room's answer is added to `left` and `right`. false: nothing was added
 bool RoomAnswer(const float* send, const float front[3], const float top[3], float* left, float* right, uint32_t frames);
 
+// A title's flat background placed in its level. Some titles play a place's far-off sounds (a distant battle) as one
+// mono stream with no position, the same in both ears wherever the listener stands. A game that knows where such a
+// sound belongs gives up to kFar points in the level; while there are any, the mixer plays every mono stream that has
+// no position from those points in place of flat: each point a later hearing of the stream, panned by its direction,
+// louder nearer (`reach`, the distance at which a point is as loud as its share of the flat sound, at most twice
+// that), through the walls as any 3D sound and answered by the room. n 0: such streams play as the title made them
+constexpr int kFar = 4;
+constexpr uint32_t kFarSound = 0xFFFFFFF0u;  // the points' ids among the sounds, kFarSound + k
+void SetFar(const float (*points)[3], int n, float reach);
+int Far(float pos[kFar][3], float& reach);  // the mixer: the points in the sounds' space; 0 with the acoustics off
+
 // Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
 // made by the mixer and heard through the walls as any 3D sound; placing it again moves it
 void PlaceTestSound();
