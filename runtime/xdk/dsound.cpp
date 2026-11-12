@@ -891,8 +891,9 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
         }
     }
     v.send = got ? send : 0.0f;
-    // a mono stream with no place, while the game has far points for one: kept for them (MixFar), not played flat
-    bool far_off = g_far_n > 0 && v.stream && v.channels == 1 && !at.on && !g_far_fed;
+    // a mono stream or loop with no place, while the game has far points for one: kept for them (MixFar), not played
+    // flat (Training Ground's distant battle is a looped buffer, not a stream: 12 Nov 2026)
+    bool far_off = g_far_n > 0 && (v.stream || v.looping) && v.channels == 1 && !at.on && !g_far_fed;
     if (far_off) {
         float own = OwnLevel(v);
         if (g_far_ring.size() != kFarRing) g_far_ring.assign(kFarRing, 0.0f);

@@ -121,7 +121,7 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
 
 // A title's flat background placed in its level. Some titles play a place's far-off sounds (a distant battle) as one
 // mono stream with no position, the same in both ears wherever the listener stands. A game that knows where such a
-// sound belongs gives up to kFar points in the level; while there are any, the mixer plays every mono stream that has
+// sound belongs gives up to kFar points in the level; while there are any, the mixer plays a mono stream or loop that has
 // no position from those points in place of flat: each point a later hearing of the stream, panned by its direction,
 // louder nearer (`reach`, the distance at which a point is as loud as its share of the flat sound, at most twice
 // that), through the walls as any 3D sound and answered by the room. n 0: such streams play as the title made them
