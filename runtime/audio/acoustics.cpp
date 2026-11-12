@@ -1525,6 +1525,20 @@ void SetRoom(bool on, float level) {
 
 bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
 
+std::vector<RecordedTail> g_recorded;  // under g_mutex
+
+void SetRecordedTails(const RecordedTail* list, size_t n) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_recorded.assign(list, list + (list ? n : 0));
+}
+
+float RecordedBody(uint32_t key) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (const RecordedTail& t : g_recorded)
+        if (t.key == key) return t.body;
+    return -1.0f;
+}
+
 void SetTails(float kept) { g_tails = std::clamp(kept, 0.0f, 1.0f); }
 float Tails() { return Room() ? g_tails.load() : 1.0f; }
 
