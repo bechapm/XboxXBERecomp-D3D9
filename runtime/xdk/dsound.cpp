@@ -177,6 +177,7 @@ struct Voice {
     bool walls = false;
     float band[3] = {1, 1, 1};
     float split[kMaxChannels][4] = {};
+    float tail[3] = {0, 0, 1};  // its level followed, that level's recent most, and the last gain (Shortened)
     // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
     int64_t block[2] = {-1, -1};
     uint8_t last = 0;  // decoded[last] holds block[last]
@@ -642,6 +643,25 @@ float Muffled(float x, float* state, const float* gain, float spare) {
     return keeps * deep + gain[0] * (state[0] - deep) + gain[1] * (state[1] - state[0]) + gain[2] * (x - state[1]);
 }
 
+// A recording's own echo let die sooner (audio/acoustics.h, SetTails): the sound's level is followed (up in a
+// millisecond, down in 30) beside the most it has lately been (falling 12 dB a second, slower than any room rings), and
+// once the level is under kTailFrom of that most the sound is turned down by as much again as it is under, times `more`
+// (0: as recorded, kTailMore: a ring dies in under half its time), never by more than kTailLeast. A steady sound and
+// a new hit are at their most and pass whole; only what dies away after a hit is shortened. state: Voice::tail
+constexpr float kTailUp = 0.02f, kTailDown = 0.0007f;
+constexpr float kTailHold = 0.99997122f;  // 12 dB a second at 48 kHz
+constexpr float kTailFrom = 0.5f;         // 6 dB under
+constexpr float kTailMore = 1.5f;
+constexpr float kTailLeast = 0.03f;
+float Shortened(float level, float* state, float more) {
+    state[0] += (level > state[0] ? kTailUp : kTailDown) * (level - state[0]);
+    state[1] = std::max(state[0], state[1] * kTailHold);
+    float under = state[1] > 1e-6f ? state[0] / (state[1] * kTailFrom) : 1.0f;
+    float gain = under < 1 ? std::max(std::pow(under, more), kTailLeast) : 1.0f;
+    state[2] += 0.005f * (gain - state[2]);  // no step in the gain itself
+    return state[2];
+}
+
 // What the mono 3D sounds send to the room round the listener this block (audio/acoustics.h, Room), and the last
 // detour's sound for it: the output thread alone renders
 std::vector<float> g_room_send;
@@ -772,6 +792,8 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     bool detour = way || v.way.band[0] != 0 || v.way.band[1] != 0 || v.way.band[2] != 0;
     static std::vector<float> dry;
     if (detour) dry.assign(frames, 0.0f);
+    // a placed sound that plays once loses some of the echo recorded into it while the room answers it (Shortened)
+    float more = at.on && !v.stream && !v.looping ? kTailMore * (1 - audio::acoustics::Tails()) : 0.0f;
     uint32_t got = 0;
     for (uint32_t i = 0; i < frames; i++) {
         std::optional<Cursor> cursor = v.stream ? StreamFrame(v) : BufferFrame(v);
@@ -782,6 +804,13 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
             if (!(read >> c & 1)) continue;
             float x = Sample(v, cursor->data, cursor->f, int(c));
             row[c] = x + (Sample(v, cursor->next_data, cursor->next_f, int(c)) - x) * t;
+        }
+        if (more > 0 || v.tail[2] < 0.999f) {
+            float level = 0;
+            for (uint32_t c = 0; c < channels; c++)
+                if (read >> c & 1) level = std::max(level, std::fabs(row[c]));
+            float gain = Shortened(level, v.tail, more);
+            for (uint32_t c = 0; c < channels; c++) row[c] *= gain;
         }
         if (detour) dry[i] = row[0];
         if (filter) {
@@ -1372,6 +1401,8 @@ BUFFER(SetBufferData, 3) {
 }
 BUFFER(Play, 4) {
     v.has_gain = false;  // a new sound does not ramp from the last one's levels
+    v.tail[0] = v.tail[1] = 0;  // nor is it the last one's dying end
+    v.tail[2] = 1;
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;

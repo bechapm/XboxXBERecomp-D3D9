@@ -70,6 +70,7 @@ void Load() {
     s.acoustics_paths = t["acoustics_paths"].value_or(s.acoustics_paths);
     s.acoustics_reverb = t["acoustics_reverb"].value_or(s.acoustics_reverb);
     s.acoustics_reverb_level = std::min(t["acoustics_reverb_level"].value_or(s.acoustics_reverb_level), 100u);
+    s.acoustics_tails = std::min(t["acoustics_tails"].value_or(s.acoustics_tails), 100u);
     input::LoadControls(t["controls"].as_table());
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
@@ -84,6 +85,7 @@ void ApplyAcoustics() {
     audio::acoustics::SetHeadphones(Get().acoustics_headphones);
     audio::acoustics::SetPaths(Get().acoustics_paths);
     audio::acoustics::SetRoom(Get().acoustics_reverb, Get().acoustics_reverb_level / 100.0f);
+    audio::acoustics::SetTails(Get().acoustics_tails / 100.0f);
 }
 
 namespace {
@@ -111,7 +113,8 @@ toml::table Table() {
                   {"acoustics_headphones", s.acoustics_headphones},
                   {"acoustics_paths", s.acoustics_paths},
                   {"acoustics_reverb", s.acoustics_reverb},
-                  {"acoustics_reverb_level", int64_t(s.acoustics_reverb_level)}};
+                  {"acoustics_reverb_level", int64_t(s.acoustics_reverb_level)},
+                  {"acoustics_tails", int64_t(s.acoustics_tails)}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
