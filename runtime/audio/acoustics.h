@@ -124,11 +124,14 @@ bool RoomAnswer(const float* send, const float front[3], const float top[3], flo
 // sound belongs gives up to kFar points in the level; while there are any, the mixer plays a mono stream or loop that has
 // no position from those points in place of flat: each point a later hearing of the stream, panned by its direction,
 // louder nearer (`reach`, the distance at which a point is as loud as its share of the flat sound, at most twice
-// that), through the walls as any 3D sound and answered by the room. n 0: such streams play as the title made them
+// that) and answered by the room. The points stand for sound from past the level's edge, so the level's own outer
+// walls and cliffs are not counted against them (traced through the level, two of four were behind walls almost
+// everywhere in the open, 12 Nov 2026): the game says how `open` the way toward each is from where the listener
+// stands, 1 clear to 0 under cover, and a covered point is heard as through a wall. n 0: such sounds play as the
+// title made them
 constexpr int kFar = 4;
-constexpr uint32_t kFarSound = 0xFFFFFFF0u;  // the points' ids among the sounds, kFarSound + k
-void SetFar(const float (*points)[3], int n, float reach);
-int Far(float pos[kFar][3], float& reach);  // the mixer: the points in the sounds' space; 0 with the acoustics off
+void SetFar(const float (*points)[3], const float* open, int n, float reach);
+int Far(float pos[kFar][3], float open[kFar], float& reach);  // the mixer: the points in the sounds' space; 0 with the acoustics off
 
 // Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
 // made by the mixer and heard through the walls as any 3D sound; placing it again moves it
