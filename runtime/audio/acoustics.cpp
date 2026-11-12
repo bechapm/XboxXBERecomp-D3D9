@@ -186,10 +186,12 @@ constexpr int64_t kRoomRestMs = 250;
 // stand in for a reverberation there is not, and how much of the answer comes late does not tell the open air from a
 // nave (11% to 25% outdoors, 27% to 90% in a nave, 13% in a crypt)
 constexpr float kRoomNear = 3.0f;    // metres
-constexpr float kRoomWet = -4.0f;    // dB at level 1
+// (-4 dB, all of the ring's length in the level and the echoes raised up to 12 dB was "way too overpowering" in a nave
+// with the music off, Ben, 12 Nov 2026: now -9, half the length's dB, and 6)
+constexpr float kRoomWet = -9.0f;    // dB at level 1
 constexpr float kRoomRing = 1.5f;    // seconds
 constexpr float kRoomEarly = -3.0f;  // dB at level 1
-constexpr float kRoomEarlyRaise = 12.0f;  // dB
+constexpr float kRoomEarlyRaise = 6.0f;  // dB
 constexpr float kRoomFitMin = -24.0f, kRoomFitMax = 30.0f;
 constexpr float kRoomRingMin = 0.3f, kRoomRingMax = 6.0f;  // seconds a room is taken to ring, for the fit
 // Steam Audio's first order binaural decode adds its virtual speakers' heads up alike at low frequencies: next to the
@@ -843,7 +845,7 @@ Fitted Fit(IPLReflectionEffect probe, IPLAmbisonicsDecodeEffect ears, IPLSource 
     for (int b = 0; b < 3; b++) rings += std::max(params.reverbTimes[b], b == 2 ? 0.8f * least : least) / 3;
     rings = std::isfinite(rings) ? std::clamp(rings, kRoomRingMin, kRoomRingMax) : kRoomRingMin;
     float echoes = float(10 * std::log10(std::max(first, 1e-12)));
-    float wet = kRoomWet + 10 * std::log10(rings / kRoomRing) - 60 * (kRoomFitEarly * 0.01f) / rings;
+    float wet = kRoomWet + 5 * std::log10(rings / kRoomRing) - 60 * (kRoomFitEarly * 0.01f) / rings;
     float early = std::min(kRoomEarly - echoes, kRoomEarlyRaise);
     // under the open sky not raised (cut, as a too loud room is, they still are)
     if (early > 0) early *= closed;
