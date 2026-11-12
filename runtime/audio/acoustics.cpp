@@ -1704,6 +1704,32 @@ void Forget(uint32_t id) {
     }
 }
 
+float g_far_at[kFar][3] = {};  // under g_mutex, in the level (SetFar)
+int g_far_n = 0;
+float g_far_reach = 1;
+
+void SetFar(const float (*points)[3], int n, float reach) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    n = points ? std::clamp(n, 0, kFar) : 0;
+    if (n != g_far_n) LOGR("acoustics: a flat background stream is heard from %d far points", n);
+    for (int k = 0; k < n; k++) std::memcpy(g_far_at[k], points[k], sizeof g_far_at[k]);
+    for (int k = n; k < g_far_n; k++) g_sounds.erase(kFarSound + uint32_t(k));
+    g_far_n = n;
+    g_far_reach = std::max(reach, 1.0f);
+}
+
+int Far(float pos[kFar][3], float& reach) {
+    if (!g_on) return 0;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int k = 0; k < g_far_n; k++) {
+        // the level's point taken back into the sounds' space, as TestSound does
+        float d[3] = {g_far_at[k][0] - g_origin[0], g_far_at[k][1] - g_origin[1], g_far_at[k][2] - g_origin[2]};
+        for (int i = 0; i < 3; i++) pos[k][i] = d[0] * g_axes[i * 3] + d[1] * g_axes[i * 3 + 1] + d[2] * g_axes[i * 3 + 2];
+    }
+    reach = g_far_reach;
+    return g_far_n;
+}
+
 void PlaceTestSound() {
     std::lock_guard<std::mutex> lock(g_mutex);
     for (int i = 0; i < 3; i++) g_test_at[i] = g_origin[i];
