@@ -678,7 +678,7 @@ float g_far_pos[audio::acoustics::kFar][3];
 float g_far_open[audio::acoustics::kFar];
 // what a covered point keeps, low, middle and high: one wall of the level's commonest (12 Nov 2026, Training Ground)
 constexpr float kFarCovered[3] = {0.19f, 0.08f, 0.06f};
-constexpr float kFarFollow = 0.02f;  // a point's cover moves this much of the way a block: half a second
+constexpr float kFarFollow = 0.01f;  // a point's cover moves this much of the way a block: a second
 float g_far_reach = 1;
 int g_far_n = 0;  // this block's points
 std::vector<float> g_far_ring;
