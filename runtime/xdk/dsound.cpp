@@ -675,6 +675,10 @@ struct FarPoint {
 };
 FarPoint g_far[audio::acoustics::kFar];
 float g_far_pos[audio::acoustics::kFar][3];
+float g_far_open[audio::acoustics::kFar];
+// what a covered point keeps, low, middle and high: one wall of the level's commonest (12 Nov 2026, Training Ground)
+constexpr float kFarCovered[3] = {0.19f, 0.08f, 0.06f};
+constexpr float kFarFollow = 0.02f;  // a point's cover moves this much of the way a block: half a second
 float g_far_reach = 1;
 int g_far_n = 0;  // this block's points
 std::vector<float> g_far_ring;
@@ -1008,7 +1012,7 @@ void MixTest(float* bins, uint32_t frames) {
 }
 
 // The far points' hearings of the stream kept for them, after every voice: panned by direction, as loud as each is
-// near, through the walls and sent to the room as the test sound is
+// near, dulled by its cover as the game gives it and sent to the room
 void MixFar(float* bins, uint32_t frames) {
     if (g_far_ring.size() != kFarRing) return;
     if (!g_far_fed)  // no stream this block: what the later points have yet to hear plays out
@@ -1027,7 +1031,10 @@ void MixFar(float* bins, uint32_t frames) {
             left = att * std::cos((pan + 1) * 0.78539816f);
             rightg = att * std::sin((pan + 1) * 0.78539816f);
             send = room ? att * 0.70710678f : 0.0f;
-            audio::acoustics::Gains(audio::acoustics::kFarSound + uint32_t(k), pos, g_listener, walls);
+            for (int b = 0; b < 3; b++) {
+                float want = kFarCovered[b] + (1 - kFarCovered[b]) * g_far_open[k];
+                walls[b] = f.band[b] + kFarFollow * (want - f.band[b]);
+            }
         } else if (f.left == 0 && f.right == 0) {
             continue;
         }
@@ -1067,7 +1074,7 @@ void Render(float* out, uint32_t frames) {
         std::memcpy(g_front, g_ds_front, sizeof g_front);
         std::memcpy(g_top, g_ds_top, sizeof g_top);
     }
-    g_far_n = audio::acoustics::Far(g_far_pos, g_far_reach);
+    g_far_n = audio::acoustics::Far(g_far_pos, g_far_open, g_far_reach);
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);
