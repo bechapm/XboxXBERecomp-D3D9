@@ -248,6 +248,7 @@ constexpr float kRoomFitMove = 1.5f;
 constexpr float kRoomSpeakers = 0.47f;  // Steam Audio's speaker decode of a room is 6.6 dB over its head's (measured)
 std::atomic<bool> g_room{false};
 std::atomic<float> g_room_level{0.5f};
+std::atomic<float> g_tails{1.0f};  // how much of a recording's own echo is kept (SetTails)
 std::atomic<bool> g_room_traced{false};  // the level in use has a trace
 std::atomic<float> g_room_ms{0};
 std::atomic<float> g_room_fit{0};   // the gain that fits the last trace measured, at level 1: its early echoes
@@ -1523,6 +1524,9 @@ void SetRoom(bool on, float level) {
 }
 
 bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
+
+void SetTails(float kept) { g_tails = std::clamp(kept, 0.0f, 1.0f); }
+float Tails() { return Room() ? g_tails.load() : 1.0f; }
 
 Shelf g_room_shelf[2];  // the mixer's thread alone
 Hall g_room_hall_mix;   // the mixer's thread alone
