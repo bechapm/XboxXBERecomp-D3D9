@@ -190,7 +190,10 @@ struct Done {
 
 std::recursive_mutex g_lock;
 std::map<uint32_t, Voice> g_voices;
+// where the sounds are heard from: the title's listener (IDirectSound_SetPosition, SetOrientation), or where the game
+// moved the hearing (acoustics::SetHearing), taken as each block starts
 float g_listener[3] = {}, g_front[3] = {0, 0, 1}, g_top[3] = {0, 1, 0};
+float g_ds_listener[3] = {}, g_ds_front[3] = {0, 0, 1}, g_ds_top[3] = {0, 1, 0};
 // Completed packets' callbacks, run as the XDK runs them: in DirectSoundDoWork on the title's thread, so they never
 // overlap the title's own stream code. A stream flushed or released runs its own at once, before it is gone.
 std::deque<Done> g_done;
@@ -949,6 +952,11 @@ void Render(float* out, uint32_t frames) {
     answer[0].assign(frames, 0.0f);
     answer[1].assign(frames, 0.0f);
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (!audio::acoustics::Hearing(g_listener, g_front, g_top)) {
+        std::memcpy(g_listener, g_ds_listener, sizeof g_listener);
+        std::memcpy(g_front, g_ds_front, sizeof g_front);
+        std::memcpy(g_top, g_ds_top, sizeof g_top);
+    }
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);
@@ -1210,14 +1218,14 @@ HLE_STDCALL(IDirectSound_SetI3DL2Listener, 3) {
 }
 HLE_STDCALL(IDirectSound_SetPosition, 5) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    for (int i = 0; i < 3; i++) g_listener[i] = F32(a[1 + i]);
+    for (int i = 0; i < 3; i++) g_ds_listener[i] = F32(a[1 + i]);
     return 0;
 }
 HLE_STDCALL(IDirectSound_SetOrientation, 8) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     for (int i = 0; i < 3; i++) {
-        g_front[i] = F32(a[1 + i]);
-        g_top[i] = F32(a[4 + i]);
+        g_ds_front[i] = F32(a[1 + i]);
+        g_ds_top[i] = F32(a[4 + i]);
     }
     return 0;
 }

@@ -48,6 +48,13 @@ void SetScene(Scene scene);
 // changes and stays there while the space moves, as a game that sets a sound once means it to
 void SetSoundSpace(const float origin[3], const float axes[9]);
 
+// any thread, every frame it applies: where the sounds are heard from, in the sounds' space (as SetSoundSpace), in place
+// of the listener the game gave DirectSound: its place, the way it faces and its top. A game whose sounds follow its
+// player's head moves the hearing to the camera on the screen this way (a cutscene's, a security camera's); `on` false
+// gives it back to the game's listener. Hearing() is the mixer's: true, and the pose, while it is moved
+void SetHearing(bool on, const float pos[3], const float front[3], const float top[3]);
+bool Hearing(float pos[3], float front[3], float top[3]);
+
 // on, and how much of the blocking is heard, 0 to 1 (the settings file's acoustics and acoustics_strength; XBE_ACOUSTICS
 // 0 or 1 overrides on; XBE_ACOUSTICS_ALTERNATE=<seconds> switches it on and off that often, to hear the difference in one
 // test run)
