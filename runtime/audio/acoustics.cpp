@@ -119,6 +119,25 @@ struct Sound {
 
 std::mutex g_mutex;  // the members below
 std::condition_variable g_wake;
+std::vector<Door> g_doors;  // the closed ones, in the level (SetDoors)
+
+// whether the straight line from a to b passes through the box
+bool Crosses(const Door& d, const float a[3], const float b[3]) {
+    float t0 = 0, t1 = 1;
+    for (int k = 0; k < 3; k++) {
+        float step = b[k] - a[k];
+        if (std::fabs(step) < 1e-6f) {
+            if (a[k] < d.low[k] || a[k] > d.high[k]) return false;
+            continue;
+        }
+        float near_t = (d.low[k] - a[k]) / step, far_t = (d.high[k] - a[k]) / step;
+        if (near_t > far_t) std::swap(near_t, far_t);
+        t0 = std::max(t0, near_t);
+        t1 = std::min(t1, far_t);
+        if (t0 > t1) return false;
+    }
+    return true;
+}
 std::unordered_map<uint32_t, Sound> g_sounds;
 std::optional<Scene> g_pending;  // a level for the thread to build
 bool g_scene = false;            // a level is built and in use
@@ -1275,12 +1294,18 @@ void Run() {
             float open = std::clamp(out.direct.occlusion, 0.0f, 1.0f);
             for (int b = 0; b < 3; b++)
                 target[b] = open + (1 - open) * std::pow(std::clamp(out.direct.transmission[b], 0.0f, 1.0f), kThin);
+            // what the walls alone leave, for the way round: a closed door in the straight line takes its share too
+            float walls[3] = {target[0], target[1], target[2]};
+            for (const Door& d : g_doors) {
+                if (!Crosses(d, listener, j.pos)) continue;
+                for (int b = 0; b < 3; b++) target[b] *= std::clamp(d.through[b], 0.0f, 1.0f);
+            }
             // The way round arrives as first order Ambisonics (W, Y to the left, Z up, X ahead, N3D) of a sound
             // fallen off as 1 / metres along it: its length is in W, where it comes from in the other three. It
             // brings what the walls took from the sound, less what its bends take
             const float* sh = ways ? out.pathing.shCoeffs : nullptr;
             constexpr float kW = 0.2820948f;
-            if (!sh || !(sh[0] > 1e-4f * kW) || target[1] > 0.98f) continue;
+            if (!sh || !(sh[0] > 1e-4f * kW) || walls[1] > 0.98f) continue;
             float from[3] = {-sh[1], sh[2], -sh[3]};
             float length = std::sqrt(from[0] * from[0] + from[1] * from[1] + from[2] * from[2]);
             if (!(length > 0.2f * sh[0])) continue;  // from all round: no doorway to hear it from
@@ -1290,9 +1315,15 @@ void Run() {
             const float* eq = out.pathing.eqCoeffs;
             float most = std::max({eq[0], eq[1], eq[2], 1e-6f});
             Sound& so = sound->second;
+            float way_from[3];
+            for (int k = 0; k < 3; k++) way_from[k] = listener[k] + from[k] / length * along;
+            // a way that reaches the listener through a closed door is the doorway the door stands in: not heard
+            bool shut = false;
+            for (const Door& d : g_doors) shut = shut || Crosses(d, listener, way_from);
+            if (shut) continue;
             for (int k = 0; k < 3; k++) {
-                so.way_from[k] = listener[k] + from[k] / length * along;
-                so.way_gain[k] = (1 - target[k]) * std::clamp(eq[k] / most, 0.0f, 1.0f);  // what the walls took
+                so.way_from[k] = way_from[k];
+                so.way_gain[k] = (1 - walls[k]) * std::clamp(eq[k] / most, 0.0f, 1.0f);  // what the walls took
             }
             so.way = true;
         }
@@ -1524,6 +1555,12 @@ void SetRoom(bool on, float level) {
 }
 
 bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
+
+void SetDoors(const Door* doors, size_t n) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_log && n != g_doors.size()) LOGR("acoustics: %zu closed doors", n);
+    g_doors.assign(doors, doors + (doors ? n : 0));
+}
 
 std::vector<RecordedTail> g_recorded;  // under g_mutex
 
