@@ -618,7 +618,7 @@ float Through(float x, float* split, const float* gain) {
 
 // The same for a sound heard through walls, with what is under 120 Hz apart: a wall stops less of a sound the deeper
 // it is (6 dB less an octave, the mass law), so the deep part keeps kDeep times what the low band keeps, and a sound
-// with much of it, an explosion, a shot, a giant's step, is a rumble behind a wall where it was a bang (Ben, 12 Nov
+// with much of it, an explosion, a shot, a giant's step, is a rumble behind a wall where it was a bang (player report, 12 Nov
 // 2026: a mine behind a closed door was only quieter and a little duller). The more of the deep part there is (its
 // level followed, from kRumbleFrom to kRumbleFull of full scale), the more it is raised, up to kRumble, by as much as
 // the wall takes of the middle band: a person's step, with next to none, gains nothing. It never keeps more than

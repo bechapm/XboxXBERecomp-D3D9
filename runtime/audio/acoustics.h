@@ -56,7 +56,7 @@ void SetHearing(bool on, const float pos[3], const float front[3], const float t
 bool Hearing(float pos[3], float front[3], float top[3]);
 
 // Doors. A level's doors are a title's objects, not its walls, so the scene has a hole where each stands and a sound
-// behind a closed door came through whole, or by a way round that led through the door itself (Ben, 12 Nov 2026: a
+// behind a closed door came through whole, or by a way round that led through the door itself (player report, 12 Nov 2026: a
 // mine behind a closed door). A game gives the doors that are closed now, as often as the set changes: each the four
 // corners of the doorway it fills, in the level and in order round it, and what it is made of. They stand in the
 // scene as the walls do until the next list: a sound behind one is heard through it by its material, a way round that
