@@ -57,14 +57,16 @@ bool Hearing(float pos[3], float front[3], float top[3]);
 
 // Doors. A level's doors are a title's objects, not its walls, so the scene has a hole where each stands and a sound
 // behind a closed door came through whole, or by a way round that led through the door itself (Ben, 12 Nov 2026: a
-// mine behind a closed door). A game gives the doors that are closed now, as often as they change: each a box in the
-// level (its low and high corners) and what it lets through, low, middle and high, as a wall's material would (the
-// loss as heard, not Steam Audio's transmission). A sound whose straight line to the listener crosses a closed door
-// keeps only that much more of each band, and a way round that reaches the listener through a closed door is not
-// heard. An open door is not in the list. The room's echo does not know of doors
+// mine behind a closed door). A game gives the doors that are closed now, as often as the set changes: each the four
+// corners of the doorway it fills, in the level and in order round it, and what it is made of. They stand in the
+// scene as the walls do until the next list: a sound behind one is heard through it by its material, a way round that
+// led through it is found blocked (Steam Audio checks each way against the scene) and another looked for, and the
+// room's echo answers off it. An open door is not in the list. (A first version tested the straight line and the way's
+// last leg against the doors' boxes: a way arrives from a made-up point along its direction, not from the doorway, and
+// passed.) Held back while a level's ways are being worked out, which read the scene from another thread
 struct Door {
-    float low[3], high[3];
-    float through[3];
+    float corner[4][3];
+    Material made;
 };
 void SetDoors(const Door* doors, size_t n);
 
