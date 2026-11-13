@@ -4,12 +4,16 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <optional>
 #include <vector>
 
+#include "audio/acoustics.h"
 #include "audio/audio.h"
+#include "audio/beds.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
 #include "xdk/dsp_image.h"
@@ -125,6 +129,13 @@ struct Gains {
     float bin[kRows][kBins];
 };
 
+// A mono 3D sound's second hearing, by its way round the walls (audio/acoustics.h, Way): the last block's level in each
+// band, and the two low passes that split the sound into them
+struct Detour {
+    float band[3] = {0, 0, 0};
+    float split[2] = {};
+};
+
 struct Voice {
     uint32_t obj = 0;
     bool stream = false;
@@ -158,6 +169,15 @@ struct Voice {
     float itd = 0;
     float ear[kEarLength] = {};
     uint32_t ear_pos = 0;
+    bool head = false;  // the last block's ears came from the head's filter (audio/acoustics.h, Ears)
+    Detour way;         // its second hearing, by the way round the walls (audio/acoustics.h, Way)
+    float send = 0;     // the last block's level to the room round the listener (audio/acoustics.h, Room)
+    // sound through the level (audio/acoustics.h): the last block's low, middle and high gains, and each channel's
+    // low passes that split it into those bands and its deep part's level (Muffled)
+    bool walls = false;
+    float band[3] = {1, 1, 1};
+    float split[kMaxChannels][4] = {};
+    float body = -1;  // seconds of it before the echo recorded into it, none known under 0 (SetRecordedTails)
     // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
     int64_t block[2] = {-1, -1};
     uint8_t last = 0;  // decoded[last] holds block[last]
@@ -170,7 +190,10 @@ struct Done {
 
 std::recursive_mutex g_lock;
 std::map<uint32_t, Voice> g_voices;
+// where the sounds are heard from: the title's listener (IDirectSound_SetPosition, SetOrientation), or where the game
+// moved the hearing (acoustics::SetHearing), taken as each block starts
 float g_listener[3] = {}, g_front[3] = {0, 0, 1}, g_top[3] = {0, 1, 0};
+float g_ds_listener[3] = {}, g_ds_front[3] = {0, 0, 1}, g_ds_top[3] = {0, 1, 0};
 // Completed packets' callbacks, run as the XDK runs them: in DirectSoundDoWork on the title's thread, so they never
 // overlap the title's own stream code. A stream flushed or released runs its own at once, before it is gone.
 std::deque<Done> g_done;
@@ -333,6 +356,7 @@ struct Place {
     float centre = 1;   // centre bin
     float azimuth = 0;  // degrees, plus to the right
     float elevation = 0;
+    float d[3] = {0, 0, 0};  // from the listener, in the listener's own space: right, up, ahead
 };
 
 float Dot(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -420,6 +444,9 @@ Place Locate(const Voice& v) {
     const float* top = relative ? kUp : g_top;
     at.azimuth = Azimuth(d, front, side);
     at.elevation = Elevation(d, front, side, top);
+    at.d[0] = Dot(d, side);
+    at.d[1] = Dot(d, top);
+    at.d[2] = Dot(d, front);
     at.centre = at.front;
     if (v.nbins >= 5 && v.bin[4] == kCentre) ShareCentre(at);
     return at;
@@ -560,9 +587,206 @@ std::optional<Cursor> BufferFrame(Voice& v) {
     return at;
 }
 
+// a 3D voice's place in the listener's world: a head relative one turned and moved by the listener
+void WorldPosition(const Voice& v, float out[3]) {
+    if (v.mode != 1) {
+        std::memcpy(out, v.p, sizeof v.p);
+        return;
+    }
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    for (int i = 0; i < 3; i++) out[i] = g_listener[i] + right[i] * v.p[0] + g_top[i] * v.p[1] + g_front[i] * v.p[2];
+}
+
+// what the level lets through to a 3D voice, low, middle and high band (audio/acoustics.h); false: it plays as it is
+bool Walls(const Voice& v, const Place& at, float out[3]) {
+    if (!at.on) return false;
+    float pos[3];
+    WorldPosition(v, pos);
+    return audio::acoustics::Gains(v.obj, pos, g_listener, out);
+}
+
+// a channel split at 800 Hz and 8 kHz by two one pole low passes at the output rate, 1 - exp(-2 pi f / 48000), the bands
+// Steam Audio's materials are given in; the three bands add up to the sample again
+constexpr float kLowSplit = 0.0994231f;
+constexpr float kHighSplit = 0.6490802f;
+float Through(float x, float* split, const float* gain) {
+    split[0] += kLowSplit * (x - split[0]);
+    split[1] += kHighSplit * (x - split[1]);
+    return gain[0] * split[0] + gain[1] * (split[1] - split[0]) + gain[2] * (x - split[1]);
+}
+
+// The same for a sound heard through walls, with what is under 120 Hz apart: a wall stops less of a sound the deeper
+// it is (6 dB less an octave, the mass law), so the deep part keeps kDeep times what the low band keeps, and a sound
+// with much of it, an explosion, a shot, a giant's step, is a rumble behind a wall where it was a bang (Ben, 12 Nov
+// 2026: a mine behind a closed door was only quieter and a little duller). The more of the deep part there is (its
+// level followed, from kRumbleFrom to kRumbleFull of full scale), the more it is raised, up to kRumble, by as much as
+// the wall takes of the middle band: a person's step, with next to none, gains nothing. It never keeps more than
+// kDeepMost of what the sound had, and only as much over the low band's share as the sound's way round leaves (`spare`,
+// 1 with no way): with twice the deep part and a way through a doorway beside it, a mine behind a wall was 6 dB louder
+// under 120 Hz than with no wall (12 Nov 2026). state: the two splits, the deep part and its level
+constexpr float kDeepSplit = 0.0155858f;  // 120 Hz
+constexpr float kDeep = 6.0f;             // 2.7 octaves under the low band's middle
+constexpr float kRumble = 2.0f, kRumbleFrom = 0.03f, kRumbleFull = 0.2f;
+constexpr float kDeepMost = 0.8f;
+float Muffled(float x, float* state, const float* gain, float spare) {
+    state[0] += kLowSplit * (x - state[0]);
+    state[1] += kHighSplit * (x - state[1]);
+    state[2] += kDeepSplit * (state[0] - state[2]);
+    float deep = state[2], level = std::fabs(deep);
+    state[3] += (level > state[3] ? 0.01f : 0.0002f) * (level - state[3]);  // up in 2 ms, down in 100
+    float big = std::clamp((state[3] - kRumbleFrom) / (kRumbleFull - kRumbleFrom), 0.0f, 1.0f);
+    float taken = 1 - std::min(gain[1], 1.0f);
+    float most = std::max(kDeepMost, gain[0]);
+    float raised = std::min(most, gain[0] * (1 + (kDeep - 1) * taken) * (1 + (kRumble - 1) * big * taken));
+    float keeps = gain[0] + std::max(raised - gain[0], 0.0f) * std::clamp(spare, 0.0f, 1.0f);
+    return keeps * deep + gain[0] * (state[0] - deep) + gain[1] * (state[1] - state[0]) + gain[2] * (x - state[1]);
+}
+
+// A recording's own echo let die sooner (audio/acoustics.h, SetRecordedTails). A sound's key: FNV-1a over its buffer's
+// length in bytes, its rate, channels and format tag (32 bits each, low byte first), then the buffer's first 2048
+// bytes as the title gave them, 31 bits of it. And how much of a sound is heard `seconds` into it, when all after
+// `body` is the recording's echo: whole to there, then falling kTailFall dB a second with nothing kept, none with all
+constexpr float kTailFall = 60.0f;
+uint32_t SampleKey(const Voice& v) {
+    if (!v.data || !v.bytes) return 0;
+    uint32_t h = 2166136261u;
+    auto byte = [&](uint8_t x) { h = (h ^ x) * 16777619u; };
+    for (uint32_t field : {v.bytes, v.rate, uint32_t(v.channels), uint32_t(v.tag)})
+        for (int k = 0; k < 4; k++) byte(uint8_t(field >> (8 * k)));
+    const uint8_t* p = static_cast<const uint8_t*>(HostPtr(v.data));
+    for (uint32_t i = 0; i < std::min(v.bytes, 2048u); i++) byte(p[i]);
+    return h & 0x7FFFFFFFu;
+}
+float TailGain(float seconds, float body, float kept) {
+    if (seconds <= body) return 1.0f;
+    return std::pow(10.0f, -(seconds - body) * kTailFall * (1 - kept) / 20.0f);
+}
+
+// A flat background stream heard from far points in the level (audio/acoustics.h, SetFar): the stream's last two
+// seconds, and each point's hearing of it, a third of a second after the one before so the points are not one sound
+// in the middle of the head. The output thread alone renders
+constexpr uint32_t kFarRing = audio::kRate * 2;
+constexpr uint32_t kFarLater = audio::kRate * 33 / 100;
+struct FarPoint {
+    float split[4] = {};
+    float band[3] = {1, 1, 1};
+    float left = 0, right = 0, send = 0;
+};
+FarPoint g_far[audio::acoustics::kFar];
+float g_far_pos[audio::acoustics::kFar][3];
+float g_far_open[audio::acoustics::kFar];
+// what a covered point keeps, low, middle and high: one wall of the level's commonest (12 Nov 2026, Training Ground)
+constexpr float kFarCovered[3] = {0.19f, 0.08f, 0.06f};
+constexpr float kFarFollow = 0.01f;  // a point's cover moves this much of the way a block: a second
+float g_far_reach = 1;
+int g_far_n = 0;  // this block's points
+std::vector<float> g_far_ring;
+uint32_t g_far_at = 0;
+bool g_far_fed = false;
+
+// What the mono 3D sounds send to the room round the listener this block (audio/acoustics.h, Room), and the last
+// detour's sound for it: the output thread alone renders
+std::vector<float> g_room_send;
+std::vector<float> g_way_mono;
+
+// a voice's own level, apart from where it is: its volume on the loudest of its bins, as SlotGains has it
+float OwnLevel(const Voice& v) {
+    bool image = dsp::Loaded();
+    float most = 0;
+    if (!v.nbins) most = image ? std::ldexp(1.0f, -g_bin_headroom[kFrontLeft]) : 1.0f;
+    for (uint32_t s = 0; s < v.nbins; s++) {
+        float level = Db(v.bin_mb[v.bin[s]]);
+        if (image) level = std::ldexp(level, -g_bin_headroom[v.bin[s]]);
+        most = std::max(most, level);
+    }
+    float level = most * v.volume * v.headroom;
+    return std::isfinite(level) ? level : 0.0f;
+}
+
+// The room's answer never clips the mix: where the two speakers and the answer together would pass full scale, the
+// answer gives way within a millisecond and comes back over a fifth of a second
+struct Duck {
+    float gain = 1;
+};
+void AddAnswer(Duck& duck, const float* bins, const float* left, const float* right, float* out, uint32_t frames) {
+    constexpr float kTop = 0.98f;
+    float need = 1;
+    for (uint32_t i = 0; i < frames; i++) {
+        const float* b = bins + size_t(i) * kBins;
+        float dry[2] = {b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight])};
+        float wet[2] = {std::fabs(left[i]), std::fabs(right[i])};
+        for (int c = 0; c < 2; c++) {
+            float room = std::max(kTop - std::fabs(dry[c]), 0.0f);
+            if (wet[c] > room) need = std::min(need, room / wet[c]);
+        }
+    }
+    constexpr uint32_t kDown = 48;  // frames to give way in
+    float from = duck.gain, to = std::min(need, std::min(1.0f, duck.gain + float(frames) / (0.2f * audio::kRate)));
+    for (uint32_t i = 0; i < frames; i++) {
+        float t = to < from ? std::min(1.0f, float(i + 1) / kDown) : float(i + 1) / float(frames);
+        float gain = from + (to - from) * t;
+        const float* b = bins + size_t(i) * kBins;
+        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]) + left[i] * gain, -1.0f, 1.0f);
+        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]) + right[i] * gain, -1.0f, 1.0f);
+    }
+    duck.gain = to;
+}
+
+// A mono 3D sound heard a second time, by its way round the walls: `dry` (the sound before the walls dulled it) comes
+// from where the way reaches the listener, at `level` times the bands the way leaves, the level of a sound as far off as
+// the way is long next to the sound's own. Added to its two ears, which the head's filter makes on headphones and a pan
+// otherwise. `gain` is zero once the way is gone: the block fades it out
+void MixDetour(Detour& way, uint32_t sound, const float from[3], const float gain[3], float level, const float* dry,
+               float* rows, uint32_t frames) {
+    static std::vector<float> ear[2];  // the output thread alone renders
+    std::vector<float>& mono = g_way_mono;
+    mono.resize(frames);
+    float band[3], step[3];
+    for (int b = 0; b < 3; b++) {
+        band[b] = way.band[b];
+        float to = std::isfinite(level) ? gain[b] * level : 0.0f;
+        step[b] = (to - band[b]) / float(frames);
+        way.band[b] = to;
+    }
+    for (uint32_t i = 0; i < frames; i++) {
+        for (int b = 0; b < 3; b++) band[b] += step[b];
+        mono[i] = Through(dry[i], way.split, band);
+    }
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    float d[3] = {from[0] - g_listener[0], from[1] - g_listener[1], from[2] - g_listener[2]};
+    float local[3] = {Dot(d, right), Dot(d, g_top), Dot(d, g_front)};
+    ear[0].resize(frames);
+    ear[1].resize(frames);
+    if (!audio::acoustics::Headphones() ||
+        !audio::acoustics::Ears(sound, 1, local, mono.data(), ear[0].data(), ear[1].data(), frames)) {
+        // no head: by level, both ears whole straight ahead as a sound's own ears are
+        float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
+        float left = 1.41421356f * std::cos((pan + 1) * 0.78539816f), rightg = 1.41421356f * std::sin((pan + 1) * 0.78539816f);
+        for (uint32_t i = 0; i < frames; i++) {
+            ear[0][i] = mono[i] * left;
+            ear[1][i] = mono[i] * rightg;
+        }
+    }
+    for (uint32_t i = 0; i < frames; i++) {
+        rows[size_t(i) * kRows + kLeftEar] += ear[0][i];
+        rows[size_t(i) * kRows + kRightEar] += ear[1][i];
+    }
+}
+
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
     Place at = Locate(v);
+    // a voice the level stops filtering is ramped back to every band whole over one block, then left alone
+    float walls[3] = {1, 1, 1};
+    bool through = Walls(v, at, walls);
+    bool filter = through || v.walls;
+    float band[3], band_step[3];
+    for (int b = 0; b < 3; b++) {
+        band[b] = v.band[b];
+        band_step[b] = (walls[b] - v.band[b]) / float(frames);
+    }
     Gains target = Levels(v, at);
     float itd = Itd(at.azimuth);
     if (!v.has_gain) {
@@ -572,6 +796,8 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     v.has_gain = true;
     std::vector<Lane> lanes = AudibleLanes(v.gain, target, frames);
     bool ears = at.on && v.channels == 1;
+    // headphones: the two ears come from a head's filter for the sound's direction, in place of the delay between them
+    bool head = ears && audio::acoustics::Headphones();
     float itd_step = (itd - v.itd) / float(frames);
     uint32_t channels = std::min<uint32_t>(v.channels, kMaxChannels);
     uint32_t read = ears ? 1u : 0u;  // the channels a lane plays, a bit each
@@ -580,15 +806,37 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     }
     double rate = double(v.freq ? v.freq : v.rate) / audio::kRate;
     v.block[v.last ^ 1] = -1;  // the title may have rewritten that block's memory since the last mix
+    // the block's rows are read first and mixed after, the head's filter between: the output thread alone renders
+    static std::vector<float> rows;
+    rows.assign(size_t(frames) * kRows, 0.0f);
+    // its way round the walls, a second hearing of the sound as it was before they dulled it
+    float way_from[3] = {}, way_gain[3] = {0, 0, 0};
+    bool way = ears && through && audio::acoustics::Way(v.obj, way_from, way_gain);
+    bool detour = way || v.way.band[0] != 0 || v.way.band[1] != 0 || v.way.band[2] != 0;
+    static std::vector<float> dry;
+    if (detour) dry.assign(frames, 0.0f);
+    // a placed sound known to end in a recorded echo loses some of it while the room answers it (TailGain)
+    float kept = at.on && !v.stream && !v.looping && v.body >= 0 ? audio::acoustics::Tails() : 1.0f;
+    uint32_t got = 0;
     for (uint32_t i = 0; i < frames; i++) {
         std::optional<Cursor> cursor = v.stream ? StreamFrame(v) : BufferFrame(v);
         if (!cursor) break;
         float t = float(v.pos - cursor->f);
-        float row[kRows] = {};
+        float* row = &rows[size_t(i) * kRows];
         for (uint32_t c = 0; c < channels; c++) {
             if (!(read >> c & 1)) continue;
             float x = Sample(v, cursor->data, cursor->f, int(c));
             row[c] = x + (Sample(v, cursor->next_data, cursor->next_f, int(c)) - x) * t;
+        }
+        if (kept < 1) {
+            float gain = TailGain(float(cursor->f) / float(v.rate), v.body, kept);
+            for (uint32_t c = 0; c < channels; c++) row[c] *= gain;
+        }
+        if (detour) dry[i] = row[0];
+        if (filter) {
+            for (int b = 0; b < 3; b++) band[b] += band_step[b];
+            for (uint32_t c = 0; c < channels; c++)
+                if (read >> c & 1) row[c] = Muffled(row[c], v.split[c], band, 1 - v.way.band[0]);
         }
         if (ears) {
             v.itd += itd_step;
@@ -596,30 +844,295 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
             row[kLeftEar] = EarAt(v, v.itd);
             row[kRightEar] = EarAt(v, -v.itd);
         }
+        v.pos += rate;
+        got = i + 1;
+    }
+    if (got && (head || v.head)) {
+        static std::vector<float> mono, left, right;
+        mono.resize(frames);
+        left.resize(frames);
+        right.resize(frames);
+        for (uint32_t i = 0; i < frames; i++) mono[i] = rows[size_t(i) * kRows];
+        if (audio::acoustics::Ears(v.obj, 0, at.d, mono.data(), left.data(), right.data(), frames)) {
+            // a block that turns the head on or off fades from one pair of ears to the other
+            float mix = v.head ? 1.0f : 0.0f;
+            float mix_step = ((head ? 1.0f : 0.0f) - mix) / float(frames);
+            for (uint32_t i = 0; i < frames; i++) {
+                float* row = &rows[size_t(i) * kRows];
+                mix += mix_step;
+                row[kLeftEar] += (left[i] - row[kLeftEar]) * mix;
+                row[kRightEar] += (right[i] - row[kRightEar]) * mix;
+            }
+            got = frames;  // the filter rings on a little past a sound's last frame
+        } else {
+            head = false;
+        }
+    }
+    if (got && detour) {
+        // as loud as the sound would be that far off, next to how loud its levels already make it
+        float d[3] = {way_from[0] - g_listener[0], way_from[1] - g_listener[1], way_from[2] - g_listener[2]};
+        // (the ears' own level: its distance, and the share of it a sound ahead leaves to the centre speaker)
+        float own = at.att * at.front;
+        float level = way && own > 1e-6f ? Attenuation(v, std::sqrt(Dot(d, d))) / own : 0.0f;
+        MixDetour(v.way, v.obj, way_from, way_gain, level, dry.data(), rows.data(), frames);
+        got = frames;
+    } else if (detour) {
+        v.way = Detour{};  // the sound ended: its next play starts without the last one's way
+    }
+    // The room hears it too: what the walls left of it and what its way round brings, each as loud as it is heard.
+    // (Sent louder than heard, at the root of its distance's level as a real room's even reverberation would have
+    // it, a level's many far sounds raised the whole mix 8 dB, 10 Nov 2026)
+    float send = ears && audio::acoustics::Room() ? OwnLevel(v) : 0.0f;
+    if (got && (send != 0 || v.send != 0) && g_room_send.size() >= frames) {
+        float direct = std::max(at.att, 0.0f), round = got == frames && detour && way ? at.att * at.front : 0.0f;
+        float level = v.send, step = (send - v.send) / float(frames);
+        for (uint32_t i = 0; i < got; i++) {
+            level += step;
+            g_room_send[i] += (rows[size_t(i) * kRows] * direct + (round != 0 ? g_way_mono[i] * round : 0.0f)) * level;
+        }
+    }
+    v.send = got ? send : 0.0f;
+    // a mono stream or loop with no place, while the game has far points for one: kept for them (MixFar), not played
+    // flat (Training Ground's distant battle is a looped buffer, not a stream: 12 Nov 2026)
+    bool far_off = g_far_n > 0 && (v.stream || v.looping) && v.channels == 1 && !at.on && !g_far_fed;
+    if (far_off) {
+        float own = OwnLevel(v);
+        if (g_far_ring.size() != kFarRing) g_far_ring.assign(kFarRing, 0.0f);
+        for (uint32_t i = 0; i < frames; i++)
+            g_far_ring[(g_far_at + i) % kFarRing] = i < got ? rows[size_t(i) * kRows] * own : 0.0f;
+        g_far_fed = true;
+        got = 0;
+    }
+    for (uint32_t i = 0; i < got; i++) {
+        const float* row = &rows[size_t(i) * kRows];
         float* frame = bins + size_t(i) * kBins;
         for (Lane& lane : lanes) {
             lane.gain += lane.step;
             frame[lane.bin] += row[lane.row] * lane.gain;
         }
-        v.pos += rate;
     }
+    v.head = head;
     v.gain = target;
     v.itd = itd;
+    std::memcpy(v.band, walls, sizeof walls);
+    v.walls = through;
+}
+
+// The acoustics test sound (audio/acoustics.h, PlaceTestSound): made here, a low buzz under bursts of hiss, so a wall's
+// dulling is plain to hear. Panned by its direction, full within 3 m and halved with each doubling past, and heard
+// through the walls as any 3D voice
+struct TestVoice {
+    uint32_t n = 0;           // frames made
+    uint32_t noise = 0x9E3779B9u;
+    float phase = 0;
+    float split[4] = {};
+    float band[3] = {1, 1, 1};
+    float left = 0, right = 0;
+    float head = 0;  // how much of it the head's filter places (headphones), ramped as its levels are
+    Detour way;      // its way round the walls
+};
+TestVoice g_test;
+constexpr uint32_t kTestSound = 0xFFFFFFFEu;  // acoustics.cpp's id for it
+
+void MixTest(float* bins, uint32_t frames) {
+    float pos[3];
+    if (!audio::acoustics::TestSound(pos)) {
+        g_test.left = g_test.right = 0;
+        return;
+    }
+    float d[3] = {pos[0] - g_listener[0], pos[1] - g_listener[1], pos[2] - g_listener[2]};
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    float att = std::min(1.0f, 3.0f / std::max(std::sqrt(Dot(d, d)), 0.01f));
+    float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
+    float left = att * std::cos((pan + 1) * 0.78539816f), rightg = att * std::sin((pan + 1) * 0.78539816f);
+    float walls[3] = {1, 1, 1};
+    audio::acoustics::Gains(kTestSound, pos, g_listener, walls);
+    float band_step[3], left_step = (left - g_test.left) / float(frames), right_step = (rightg - g_test.right) / float(frames);
+    for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - g_test.band[b]) / float(frames);
+    constexpr uint32_t kPeriod = audio::kRate * 6 / 10, kBurst = audio::kRate * 35 / 100, kFade = audio::kRate / 200;
+    static std::vector<float> mono, ear[2], dry, both;
+    mono.resize(frames);
+    dry.resize(frames);
+    for (uint32_t i = 0; i < frames; i++, g_test.n++) {
+        uint32_t at = g_test.n % kPeriod;
+        float env = at >= kBurst ? 0.0f : std::min({1.0f, float(at) / kFade, float(kBurst - at) / kFade});
+        g_test.noise ^= g_test.noise << 13;
+        g_test.noise ^= g_test.noise >> 17;
+        g_test.noise ^= g_test.noise << 5;
+        float hiss = float(int32_t(g_test.noise)) / 2147483648.0f;
+        g_test.phase += 110.0f / audio::kRate;
+        if (g_test.phase >= 1) g_test.phase -= 1;
+        float x = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
+        for (int b = 0; b < 3; b++) g_test.band[b] += band_step[b];
+        dry[i] = x;
+        mono[i] = Muffled(x, g_test.split, g_test.band, 1 - g_test.way.band[0]);
+    }
+    // its way round the walls, as a voice's: made as two ears at the level of a sound that far off, added below
+    float way_from[3] = {}, way_gain[3] = {0, 0, 0};
+    bool way = audio::acoustics::Way(kTestSound, way_from, way_gain);
+    bool detour = way || g_test.way.band[0] != 0 || g_test.way.band[1] != 0 || g_test.way.band[2] != 0;
+    if (detour) {
+        float wd[3] = {way_from[0] - g_listener[0], way_from[1] - g_listener[1], way_from[2] - g_listener[2]};
+        float far = way ? 0.70710678f * std::min(1.0f, 3.0f / std::max(std::sqrt(Dot(wd, wd)), 0.01f)) : 0.0f;
+        both.assign(size_t(frames) * kRows, 0.0f);
+        MixDetour(g_test.way, kTestSound, way_from, way_gain, far, dry.data(), both.data(), frames);
+    }
+    bool room = audio::acoustics::Room() && g_room_send.size() >= frames;
+    // headphones: from its direction through the head's filter, at the level a sound straight ahead is panned to
+    bool head = audio::acoustics::Headphones() || g_test.head > 0;
+    if (head) {
+        ear[0].resize(frames);
+        ear[1].resize(frames);
+        float local[3] = {Dot(d, right), Dot(d, g_top), Dot(d, g_front)};
+        head = audio::acoustics::Ears(kTestSound, 0, local, mono.data(), ear[0].data(), ear[1].data(), frames);
+    }
+    float head_step = ((head && audio::acoustics::Headphones() ? 1.0f : 0.0f) - g_test.head) / float(frames);
+    float level = att * 0.70710678f;
+    for (uint32_t i = 0; i < frames; i++) {
+        g_test.left += left_step;
+        g_test.right += right_step;
+        g_test.head += head_step;
+        float l = mono[i] * g_test.left, r = mono[i] * g_test.right;
+        if (head) {
+            l += (ear[0][i] * level - l) * g_test.head;
+            r += (ear[1][i] * level - r) * g_test.head;
+        }
+        if (detour) {
+            l += both[size_t(i) * kRows + kLeftEar];
+            r += both[size_t(i) * kRows + kRightEar];
+        }
+        if (room) g_room_send[i] += mono[i] * level + (detour ? g_way_mono[i] : 0.0f);
+        float* frame = bins + size_t(i) * kBins;
+        frame[kFrontLeft] += l;
+        frame[kFrontRight] += r;
+    }
+    if (!head) g_test.head = 0;
+    std::memcpy(g_test.band, walls, sizeof walls);
+}
+
+// The far points' hearings of the stream kept for them, after every voice: panned by direction, as loud as each is
+// near, dulled by its cover as the game gives it and sent to the room
+void MixFar(float* bins, uint32_t frames) {
+    if (g_far_ring.size() != kFarRing) return;
+    if (!g_far_fed)  // no stream this block: what the later points have yet to hear plays out
+        for (uint32_t i = 0; i < frames; i++) g_far_ring[(g_far_at + i) % kFarRing] = 0;
+    float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
+                      g_top[0] * g_front[1] - g_top[1] * g_front[0]};
+    bool room = audio::acoustics::Room() && g_room_send.size() >= frames;
+    for (int k = 0; k < audio::acoustics::kFar; k++) {
+        FarPoint& f = g_far[k];
+        float left = 0, rightg = 0, send = 0, walls[3] = {1, 1, 1};
+        if (k < g_far_n) {
+            const float* pos = g_far_pos[k];
+            float d[3] = {pos[0] - g_listener[0], pos[1] - g_listener[1], pos[2] - g_listener[2]};
+            float att = std::min(2.0f, g_far_reach / std::max(std::sqrt(Dot(d, d)), 1.0f)) / std::sqrt(float(g_far_n));
+            float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
+            left = att * std::cos((pan + 1) * 0.78539816f);
+            rightg = att * std::sin((pan + 1) * 0.78539816f);
+            send = room ? att * 0.70710678f : 0.0f;
+            for (int b = 0; b < 3; b++) {
+                float want = kFarCovered[b] + (1 - kFarCovered[b]) * g_far_open[k];
+                walls[b] = f.band[b] + kFarFollow * (want - f.band[b]);
+            }
+        } else if (f.left == 0 && f.right == 0) {
+            continue;
+        }
+        float left_step = (left - f.left) / float(frames), right_step = (rightg - f.right) / float(frames);
+        float send_step = (send - f.send) / float(frames), band_step[3];
+        for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - f.band[b]) / float(frames);
+        uint32_t from = g_far_at + kFarRing - uint32_t(k) * kFarLater;
+        for (uint32_t i = 0; i < frames; i++) {
+            for (int b = 0; b < 3; b++) f.band[b] += band_step[b];
+            f.left += left_step;
+            f.right += right_step;
+            f.send += send_step;
+            float x = Muffled(g_far_ring[(from + i) % kFarRing], f.split, f.band, 1);
+            float* frame = bins + size_t(i) * kBins;
+            frame[kFrontLeft] += x * f.left;
+            frame[kFrontRight] += x * f.right;
+            if (room) g_room_send[i] += x * f.send;
+        }
+        f.left = left;
+        f.right = rightg;
+        f.send = send;
+        std::memcpy(f.band, walls, sizeof walls);
+    }
+    g_far_at = (g_far_at + frames) % kFarRing;
+    g_far_fed = false;
 }
 
 void Render(float* out, uint32_t frames) {
-    static std::vector<float> bins;  // the output thread alone renders
+    static std::vector<float> bins, answer[2];  // the output thread alone renders
     bins.assign(size_t(frames) * kBins, 0.0f);
+    g_room_send.assign(frames, 0.0f);
+    answer[0].assign(frames, 0.0f);
+    answer[1].assign(frames, 0.0f);
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (!audio::acoustics::Hearing(g_listener, g_front, g_top)) {
+        std::memcpy(g_listener, g_ds_listener, sizeof g_listener);
+        std::memcpy(g_front, g_ds_front, sizeof g_front);
+        std::memcpy(g_top, g_ds_top, sizeof g_top);
+    }
+    g_far_n = audio::acoustics::Far(g_far_pos, g_far_open, g_far_reach);
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);
     }
+    MixFar(bins.data(), frames);
+    MixTest(bins.data(), frames);
+    // XBE_ACOUSTICS_LOG: where in the chain the mix is, once a second (a nave fell silent with its room on, 11 Nov 2026)
+    static const bool s_trace = [] {
+        const char* v = std::getenv("XBE_ACOUSTICS_LOG");
+        return v && *v && std::strcmp(v, "0") != 0;
+    }();
+    static uint32_t s_blocks = 0;
+    static float s_peak[5] = {};  // voices, after the effects image, sent to the room, the room's answer, out
+    static uint32_t s_voices = 0;
+    auto peak = [&](int at, const float* x, size_t n, size_t stride) {
+        for (size_t i = 0; i < n; i++) s_peak[at] = std::max(s_peak[at], std::fabs(x[i * stride]));
+    };
+    if (s_trace) {
+        for (auto& [obj, v] : g_voices) s_voices += !v.paused && !v.sync && (v.stream || v.playing);
+        peak(0, bins.data(), size_t(frames) * kBins, 1);  // every bin: 3D voices reach the speakers through the image
+    }
+    // the place's background (audio/beds.h): its single sounds are answered by the room too
+    static std::vector<float> beds;
+    beds.assign(size_t(frames) * 2, 0.0f);
+    audio::beds::Mix(beds.data(), g_room_send.data(), frames);
+    // the level's own rooms answer the 3D sounds in place of the title's reverb, added to the two speakers as heard
+    dsp::StandDown(audio::acoustics::Room());
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
-    for (uint32_t i = 0; i < frames; i++) {
-        const float* b = &bins[size_t(i) * kBins];
-        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
-        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
+    static Duck duck;
+    bool answered =
+        audio::acoustics::RoomAnswer(g_room_send.data(), g_front, g_top, answer[0].data(), answer[1].data(), frames);
+    if (answered) {
+        AddAnswer(duck, bins.data(), answer[0].data(), answer[1].data(), out, frames);
+    } else {
+        duck = Duck{};
+        for (uint32_t i = 0; i < frames; i++) {
+            const float* b = &bins[size_t(i) * kBins];
+            out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
+            out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
+        }
+    }
+    for (size_t i = 0; i < size_t(frames) * 2; i++) out[i] = std::clamp(out[i] + beds[i], -1.0f, 1.0f);
+    if (s_trace) {
+        peak(1, &bins[kFrontLeft], frames, kBins);
+        peak(1, &bins[kFrontRight], frames, kBins);
+        peak(2, g_room_send.data(), frames, 1);
+        peak(3, answer[0].data(), frames, 1);
+        peak(3, answer[1].data(), frames, 1);
+        peak(4, out, size_t(frames) * 2, 1);
+        if (++s_blocks >= 100) {
+            auto db = [](float x) { return 20 * std::log10(std::max(x, 1e-10f)); };
+            LOGR("dsound: the last second's peaks: voices %.1f dB (%u voices a block), after the effects image %.1f, sent "
+                 "to the room %.1f, its answer %.1f (giving way to %.2f), out %.1f",
+                 db(s_peak[0]), s_voices / s_blocks, db(s_peak[1]), db(s_peak[2]), db(s_peak[3]), duck.gain,
+                 db(s_peak[4]));
+            s_blocks = s_voices = 0;
+            std::fill(std::begin(s_peak), std::end(s_peak), 0.0f);
+        }
     }
 }
 
@@ -828,14 +1341,14 @@ HLE_STDCALL(IDirectSound_SetI3DL2Listener, 3) {
 }
 HLE_STDCALL(IDirectSound_SetPosition, 5) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    for (int i = 0; i < 3; i++) g_listener[i] = F32(a[1 + i]);
+    for (int i = 0; i < 3; i++) g_ds_listener[i] = F32(a[1 + i]);
     return 0;
 }
 HLE_STDCALL(IDirectSound_SetOrientation, 8) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     for (int i = 0; i < 3; i++) {
-        g_front[i] = F32(a[1 + i]);
-        g_top[i] = F32(a[4 + i]);
+        g_ds_front[i] = F32(a[1 + i]);
+        g_ds_top[i] = F32(a[4 + i]);
     }
     return 0;
 }
@@ -950,6 +1463,7 @@ BUFFER(Release, 1) {
     if (v.owned) mem::FreeContiguous(v.owned);
     uint32_t obj = v.obj;
     g_voices.erase(obj);
+    audio::acoustics::Forget(obj);
     mem::FreeSystem(obj);
     return 0;
 }
@@ -971,6 +1485,7 @@ BUFFER(SetBufferData, 3) {
 }
 BUFFER(Play, 4) {
     v.has_gain = false;  // a new sound does not ramp from the last one's levels
+    v.body = audio::acoustics::RecordedBody(SampleKey(v));
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
@@ -1165,6 +1680,7 @@ STREAM(Release, 1) {
     FlushStream(v);
     uint32_t obj = v.obj;
     g_voices.erase(obj);
+    audio::acoustics::Forget(obj);
     mem::FreeSystem(obj);
     return 0;
 }
