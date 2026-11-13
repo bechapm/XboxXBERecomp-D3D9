@@ -71,7 +71,7 @@ constexpr int kSurfaces = 3;                           // walls between counted 
 // A blocked sound keeps only what its walls pass: one thin wall (a face of concrete, wood or glass) leaves a dull sound,
 // a thick wall (two faces) or two walls next to nothing, and a sound with an opening near it is heard through the
 // opening (Way). There was a floor under it, the least of each band any blocked sound kept (-6, -10.5 and -16.5 dB),
-// and with it a person was heard walking outside a closed brick building (Ben, 11 Nov 2026). Under kSilent, nothing
+// and with it a person was heard walking outside a closed brick building (player report, 11 Nov 2026). Under kSilent, nothing
 constexpr float kSilent = 0.003f;  // -50 dB
 constexpr float kFollow = 0.3f;  // each mix block moves this much of the way to the latest result, about 30 ms
 // Steam Audio's transmission is a wall's own (a wood wall passes 1.4% of the middle band, concrete 0.2%), and all of
@@ -191,7 +191,7 @@ constexpr int64_t kRoomRestMs = 250;
 // nave (11% to 25% outdoors, 27% to 90% in a nave, 13% in a crypt)
 constexpr float kRoomNear = 3.0f;    // metres
 // (-4 dB, all of the ring's length in the level and the echoes raised up to 12 dB was "way too overpowering" in a nave
-// with the music off, Ben, 12 Nov 2026: now -9, half the length's dB, and 6)
+// with the music off, player report, 12 Nov 2026: now -9, half the length's dB, and 6)
 constexpr float kRoomWet = -9.0f;    // dB at level 1
 constexpr float kRoomRing = 1.5f;    // seconds
 constexpr float kRoomEarly = -3.0f;  // dB at level 1
@@ -225,7 +225,7 @@ float Closed(float open) {
     return c * c * (3 - 2 * c);
 }
 // Under the open sky there is no reverberation, but there are echoes: a shot heard off cliffs and a dam a second or two
-// later (Ben, 11 Nov 2026: a sniper shot in Siberia's valley sounded as it did indoors). The trace measured (Fit) is
+// later (player report, 11 Nov 2026: a sniper shot in Siberia's valley sounded as it did indoors). The trace measured (Fit) is
 // kept for two seconds, and its strongest moments later than kRoomTraced, up to kEchoTaps of them (10 ms each) within kEchoRange
 // of the strongest, become echoes of their own: the sound again, at that delay, from that direction, duller (kEchoDull).
 // Physically a cliff 100 m off answers 30 dB or more under the shot, unheard in a game's mix, so they are brought to
@@ -722,7 +722,7 @@ struct Shelf {
     }
 };
 
-// A hall's reverberation, after the traced part, in place of Steam Audio's own, which Ben heard as a spring reverb in
+// A hall's reverberation, after the traced part, in place of Steam Audio's own, which a player heard as a spring reverb in
 // a nave (11 Nov 2026). Sixteen delay lines of 23 to 64 ms fed back through a Hadamard matrix, each with a short
 // all-pass of its own, each losing 60 dB in the time the trace says the room rings, in Steam Audio's three bands (under
 // 800 Hz, to 8 kHz, over: a shelf each side), their lengths swayed a few samples so no line rings at a pitch, behind
