@@ -404,8 +404,11 @@ void MakeHead(Simulation& s) {
 // material. The room's thread traces the same scene, so not while it does
 void Doors(Simulation& s, const std::vector<Door>& doors, uint64_t list, float meters) {
     std::lock_guard<std::mutex> use(g_scene_use);
+    // the last list's taken out and committed before the new is made, and only then let go: removed, released and
+    // replaced under one commit, the new doors blocked nothing from the first change on (13 Nov 2026, Embree)
     if (s.doors) {
         g_ipl.iplStaticMeshRemove(s.doors, s.scene);
+        g_ipl.iplSceneCommit(s.scene);
         g_ipl.iplStaticMeshRelease(&s.doors);
     }
     if (!doors.empty()) {
