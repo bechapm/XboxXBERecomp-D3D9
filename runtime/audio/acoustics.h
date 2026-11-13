@@ -63,7 +63,8 @@ bool Hearing(float pos[3], float front[3], float top[3]);
 // led through it is found blocked (Steam Audio checks each way against the scene) and another looked for, and the
 // room's echo answers off it. An open door is not in the list. (A first version tested the straight line and the way's
 // last leg against the doors' boxes: a way arrives from a made-up point along its direction, not from the doorway, and
-// passed.) Held back while a level's ways are being worked out, which read the scene from another thread
+// passed; and a door mesh swapped in and out of the scene blocked nothing.) Each change builds the level again with the
+// doors in it, on the rays' thread: tens of milliseconds there, nothing on the game's or the mixer's
 struct Door {
     float corner[4][3];
     Material made;
