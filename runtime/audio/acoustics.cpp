@@ -122,10 +122,7 @@ std::mutex g_mutex;  // the members below
 std::condition_variable g_wake;
 std::vector<Door> g_doors;    // the closed ones, in the level (SetDoors)
 uint64_t g_doors_list = 1;    // counts the lists given
-std::atomic<int> g_baking{0};  // levels whose ways are being worked out, on threads that read the scene
-// the scene changed (the doors) or traced by the room's thread: one at a time
-std::mutex g_scene_use;
-std::atomic<bool> g_room_recommit{false};  // the room's simulator takes the changed scene before its next trace
+
 std::unordered_map<uint32_t, Sound> g_sounds;
 std::optional<Scene> g_pending;  // a level for the thread to build
 bool g_scene = false;            // a level is built and in use
@@ -268,6 +265,7 @@ std::atomic<IPLReflectionEffect> g_room_effect{nullptr};
 std::atomic<IPLAmbisonicsDecodeEffect> g_room_decode{nullptr};
 std::condition_variable g_room_wake;
 std::optional<IPLScene> g_room_scene;  // under g_mutex: a level for the room's thread, its own hold on it; null, none
+std::optional<IPLScene> g_room_doors;  // under g_mutex: the same level built again with its closed doors (Doors)
 
 std::atomic<bool> g_paths{[] {
     const char* v = std::getenv("XBE_ACOUSTICS_PATHS");
@@ -332,8 +330,12 @@ struct Simulation {
     IPLSimulator simulator = nullptr;
     IPLScene scene = nullptr;
     IPLStaticMesh mesh = nullptr;
-    IPLStaticMesh doors = nullptr;  // the closed doors, in the scene beside the level (SetDoors)
-    uint64_t doors_built = 0;       // the list they were made from (g_doors_list), 0: none for this scene
+    // the level as built (Build), kept to build it again with the closed doors in it (Doors)
+    std::vector<IPLVector3> base_vertices;
+    std::vector<IPLTriangle> base_triangles;
+    std::vector<IPLint32> base_material;
+    std::vector<IPLMaterial> base_materials;
+    uint64_t doors_built = 0;  // the list the scene was made with (g_doors_list), 0: none
     std::unordered_map<uint32_t, IPLSource> sources;
     bool head_tried = false;
     IPLProbeBatch batch = nullptr;  // the level's ways, once worked out
@@ -400,48 +402,69 @@ void MakeHead(Simulation& s) {
     LOGR("acoustics: Steam Audio's head is ready, for headphones and the room");
 }
 
-// The closed doors put in the scene in place of the last list's (SetDoors): two triangles a door, each of its own
-// material. The room's thread traces the same scene, so not while it does
+// The level built again with the closed doors in it (SetDoors), two triangles a door of its own material, and handed to
+// the simulator and the room's thread in place of the last. A whole scene a change: a door mesh removed from the scene
+// and another added, by one commit or two, left no door blocking anything (13 Nov 2026, Embree). The level's ways stay
+// as worked out, and are checked against the new scene. A door with a corner that is not a number is left out
 void Doors(Simulation& s, const std::vector<Door>& doors, uint64_t list, float meters) {
-    std::lock_guard<std::mutex> use(g_scene_use);
-    // the last list's taken out and committed before the new is made, and only then let go: removed, released and
-    // replaced under one commit, the new doors blocked nothing from the first change on (13 Nov 2026, Embree)
-    if (s.doors) {
-        g_ipl.iplStaticMeshRemove(s.doors, s.scene);
-        g_ipl.iplSceneCommit(s.scene);
-        g_ipl.iplStaticMeshRelease(&s.doors);
+    std::vector<IPLVector3> vertices = s.base_vertices;
+    std::vector<IPLTriangle> triangles = s.base_triangles;
+    std::vector<IPLint32> material = s.base_material;
+    std::vector<IPLMaterial> materials = s.base_materials;
+    size_t in = 0;
+    for (const Door& d : doors) {
+        bool fine = true;
+        for (const auto& c : d.corner) fine = fine && std::isfinite(c[0] + c[1] + c[2]);
+        if (!fine) continue;
+        IPLint32 v = IPLint32(vertices.size()), m = IPLint32(materials.size());
+        for (const auto& c : d.corner) vertices.push_back({c[0] * meters, c[1] * meters, c[2] * meters});
+        triangles.push_back({{v, v + 1, v + 2}});
+        triangles.push_back({{v, v + 2, v + 3}});
+        material.push_back(m);
+        material.push_back(m);
+        IPLMaterial made;
+        std::memcpy(&made, &d.made, sizeof made);
+        materials.push_back(made);
+        in++;
     }
-    if (!doors.empty()) {
-        std::vector<IPLVector3> vertices(doors.size() * 4);
-        std::vector<IPLTriangle> triangles(doors.size() * 2);
-        std::vector<IPLint32> material(doors.size() * 2);
-        std::vector<IPLMaterial> materials(doors.size());
-        for (size_t d = 0; d < doors.size(); d++) {
-            for (size_t k = 0; k < 4; k++)
-                vertices[d * 4 + k] = {doors[d].corner[k][0] * meters, doors[d].corner[k][1] * meters,
-                                       doors[d].corner[k][2] * meters};
-            IPLint32 v = IPLint32(d * 4);
-            triangles[d * 2] = {{v, v + 1, v + 2}};
-            triangles[d * 2 + 1] = {{v, v + 2, v + 3}};
-            material[d * 2] = material[d * 2 + 1] = IPLint32(d);
-            std::memcpy(&materials[d], &doors[d].made, sizeof(IPLMaterial));
-        }
-        IPLStaticMeshSettings ms{};
-        ms.numVertices = IPLint32(vertices.size());
-        ms.numTriangles = IPLint32(triangles.size());
-        ms.numMaterials = IPLint32(materials.size());
-        ms.vertices = vertices.data();
-        ms.triangles = triangles.data();
-        ms.materialIndices = material.data();
-        ms.materials = materials.data();
-        if (g_ipl.iplStaticMeshCreate(s.scene, &ms, &s.doors) == IPL_STATUS_SUCCESS) g_ipl.iplStaticMeshAdd(s.doors, s.scene);
-        else s.doors = nullptr;
+    IPLSceneSettings ss{};
+    ss.type = s.type;
+    ss.embreeDevice = s.embree;
+    IPLStaticMeshSettings ms{};
+    ms.numVertices = IPLint32(vertices.size());
+    ms.numTriangles = IPLint32(triangles.size());
+    ms.numMaterials = IPLint32(materials.size());
+    ms.vertices = vertices.data();
+    ms.triangles = triangles.data();
+    ms.materialIndices = material.data();
+    ms.materials = materials.data();
+    IPLScene scene = nullptr;
+    IPLStaticMesh mesh = nullptr;
+    int64_t began = NowMs();
+    if (g_ipl.iplSceneCreate(s.context, &ss, &scene) != IPL_STATUS_SUCCESS ||
+        g_ipl.iplStaticMeshCreate(scene, &ms, &mesh) != IPL_STATUS_SUCCESS) {
+        if (scene) g_ipl.iplSceneRelease(&scene);
+        s.doors_built = list;  // not tried again until the list changes
+        LOGR("acoustics: the level could not be built with its doors, they block nothing");
+        return;
     }
-    g_ipl.iplSceneCommit(s.scene);
+    g_ipl.iplStaticMeshAdd(mesh, scene);
+    g_ipl.iplSceneCommit(scene);
+    g_ipl.iplSimulatorSetScene(s.simulator, scene);
     g_ipl.iplSimulatorCommit(s.simulator);
-    g_room_recommit = true;
+    if (s.mesh) g_ipl.iplStaticMeshRelease(&s.mesh);
+    if (s.scene) g_ipl.iplSceneRelease(&s.scene);
+    s.mesh = mesh;
+    s.scene = scene;
     s.doors_built = list;
-    if (g_log) LOGR("acoustics: %zu closed doors in the scene", doors.size());
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_room_doors && *g_room_doors) g_ipl.iplSceneRelease(&*g_room_doors);
+        g_room_doors = g_ipl.iplSceneRetain(scene);
+    }
+    if (g_log)
+        LOGR("acoustics: %zu closed doors in the scene (%zu given), built in %lld ms", in, doors.size(),
+             static_cast<long long>(NowMs() - began));
 }
 
 // the level built and handed to the simulator, the one before let go; false for an empty level
@@ -493,6 +516,10 @@ bool Build(Simulation& s, const Scene& level) {
         } else {
             g_ipl.iplStaticMeshAdd(mesh, scene);
             g_ipl.iplSceneCommit(scene);
+            s.base_vertices = std::move(vertices);
+            s.base_triangles = std::move(triangles);
+            s.base_material = std::move(material);
+            s.base_materials = std::move(materials);
         }
     }
     if (s.batch) {  // the last level's ways go with it
@@ -503,8 +530,13 @@ bool Build(Simulation& s, const Scene& level) {
     g_ipl.iplSimulatorSetScene(s.simulator, scene);
     g_ipl.iplSimulatorCommit(s.simulator);
     if (s.mesh) g_ipl.iplStaticMeshRelease(&s.mesh);
-    if (s.doors) g_ipl.iplStaticMeshRelease(&s.doors);  // the last level's go with its scene
     s.doors_built = 0;
+    if (!scene) {
+        s.base_vertices.clear();
+        s.base_triangles.clear();
+        s.base_material.clear();
+        s.base_materials.clear();
+    }
     if (s.scene) g_ipl.iplSceneRelease(&s.scene);
     s.mesh = mesh;
     s.scene = scene;
@@ -1015,12 +1047,13 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 20 degrees up | 70
     float fitted_at[3] = {};
     for (;;) {
-        std::optional<IPLScene> next;
+        std::optional<IPLScene> next, doors;
         float listener[3], meters;
         {
             std::unique_lock<std::mutex> lock(g_mutex);
             g_room_wake.wait_for(lock, std::chrono::milliseconds(kRoomRestMs));
             next.swap(g_room_scene);
+            doors.swap(g_room_doors);  // always of the level last given (Build lets go of the one before's)
             std::memcpy(listener, g_listener, sizeof listener);
             meters = g_meters;
         }
@@ -1034,6 +1067,16 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             scene = *next;
             said = false;
             fitted = 0;
+        }
+        if (doors) {  // the same level with its closed doors: traced from now on, the fit kept
+            if (*doors && scene) {
+                g_ipl.iplSimulatorSetScene(simulator, *doors);
+                g_ipl.iplSimulatorCommit(simulator);
+                g_ipl.iplSceneRelease(&scene);
+                scene = *doors;
+            } else if (*doors) {
+                g_ipl.iplSceneRelease(&*doors);
+            }
         }
         if (!scene || !g_room || !g_on) continue;
         // no listener yet: for its first seconds a level has it at the world's origin, often outside the level, and a
@@ -1100,11 +1143,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 ray.source.origin.y += kRoomRoofs[k];
                 g_ipl.iplSourceSetInputs(roof[k], IPL_SIMULATIONFLAGS_DIRECT, &ray);
             }
-            {
-                std::lock_guard<std::mutex> use(g_scene_use);
-                if (g_room_recommit.exchange(false)) g_ipl.iplSimulatorCommit(simulator);  // the scene's doors changed
-                g_ipl.iplSimulatorRunDirect(simulator);
-            }
+            g_ipl.iplSimulatorRunDirect(simulator);
             open = 0;
             int steep = 0;
             std::memset(rays_seen, 0, sizeof rays_seen);
@@ -1145,11 +1184,7 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         g_ipl.iplSimulatorSetSharedInputs(simulator, IPL_SIMULATIONFLAGS_REFLECTIONS, &shared);
         g_ipl.iplSourceSetInputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &in);
         g_ipl.iplSourceSetInputs(twin, IPL_SIMULATIONFLAGS_REFLECTIONS, &whole);
-        {
-            std::lock_guard<std::mutex> use(g_scene_use);  // the doors are not changed under a trace
-            if (g_room_recommit.exchange(false)) g_ipl.iplSimulatorCommit(simulator);
-            g_ipl.iplSimulatorRunReflections(simulator);
-        }
+        g_ipl.iplSimulatorRunReflections(simulator);
         float took = float(NowMs() - began);
         g_room_ms = took;
         if (refit) {
@@ -1240,6 +1275,8 @@ void Run() {
                 // the room's thread takes the level too, with a hold of its own (one it never took is let go)
                 if (g_room_scene && *g_room_scene) g_ipl.iplSceneRelease(&*g_room_scene);
                 g_room_scene = built ? g_ipl.iplSceneRetain(s.scene) : nullptr;
+                if (g_room_doors && *g_room_doors) g_ipl.iplSceneRelease(&*g_room_doors);  // the last level's
+                g_room_doors.reset();
                 g_room_wake.notify_one();
                 for (auto& [id, sound] : g_sounds) {
                     std::fill(sound.target, sound.target + 3, 1.0f);
@@ -1247,14 +1284,7 @@ void Run() {
                 }
             }
             if (built)  // whether or not the ways are switched on now: they can be while the level is played
-            {
-                ++g_baking;
-                std::thread([context = s.context, scene = g_ipl.iplSceneRetain(s.scene), level = std::move(*level),
-                             number = s.level]() mutable {
-                    Bake(context, scene, std::move(level), number);
-                    --g_baking;
-                }).detach();
-            }
+                std::thread(Bake, s.context, g_ipl.iplSceneRetain(s.scene), std::move(*level), s.level).detach();
         }
         if (taken) {  // the ways are in: for this level, or one since replaced
             if (taken->level == s.level && s.scene && !s.batch) {
@@ -1267,8 +1297,8 @@ void Run() {
                 g_ipl.iplProbeBatchRelease(&taken->batch);
             }
         }
-        // the closed doors follow the game's list, once no thread is working a level's ways out of the scene
-        if (s.scene && g_baking == 0) {
+        // the closed doors follow the game's list: the level built again with them (Doors)
+        if (s.scene) {
             std::vector<Door> doors;
             uint64_t list = 0;
             {
