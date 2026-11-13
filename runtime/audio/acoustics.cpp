@@ -38,6 +38,7 @@ namespace {
 #define IPL_FUNCS(X)                                                                                              \
     X(iplContextCreate) X(iplContextRelease) X(iplEmbreeDeviceCreate) X(iplSceneCreate) X(iplSceneRelease)      \
     X(iplSceneCommit) X(iplStaticMeshCreate) X(iplStaticMeshRelease) X(iplStaticMeshAdd) X(iplSimulatorCreate)    \
+    X(iplStaticMeshRemove)                                                                                        \
     X(iplSimulatorSetScene) X(iplSimulatorCommit) X(iplSimulatorSetSharedInputs) X(iplSimulatorRunDirect)        \
     X(iplSourceCreate) X(iplSourceRelease) X(iplSourceAdd) X(iplSourceRemove) X(iplSourceSetInputs)               \
     X(iplSourceGetOutputs) X(iplHRTFCreate) X(iplBinauralEffectCreate) X(iplBinauralEffectRelease)                \
@@ -119,25 +120,12 @@ struct Sound {
 
 std::mutex g_mutex;  // the members below
 std::condition_variable g_wake;
-std::vector<Door> g_doors;  // the closed ones, in the level (SetDoors)
-
-// whether the straight line from a to b passes through the box
-bool Crosses(const Door& d, const float a[3], const float b[3]) {
-    float t0 = 0, t1 = 1;
-    for (int k = 0; k < 3; k++) {
-        float step = b[k] - a[k];
-        if (std::fabs(step) < 1e-6f) {
-            if (a[k] < d.low[k] || a[k] > d.high[k]) return false;
-            continue;
-        }
-        float near_t = (d.low[k] - a[k]) / step, far_t = (d.high[k] - a[k]) / step;
-        if (near_t > far_t) std::swap(near_t, far_t);
-        t0 = std::max(t0, near_t);
-        t1 = std::min(t1, far_t);
-        if (t0 > t1) return false;
-    }
-    return true;
-}
+std::vector<Door> g_doors;    // the closed ones, in the level (SetDoors)
+uint64_t g_doors_list = 1;    // counts the lists given
+std::atomic<int> g_baking{0};  // levels whose ways are being worked out, on threads that read the scene
+// the scene changed (the doors) or traced by the room's thread: one at a time
+std::mutex g_scene_use;
+std::atomic<bool> g_room_recommit{false};  // the room's simulator takes the changed scene before its next trace
 std::unordered_map<uint32_t, Sound> g_sounds;
 std::optional<Scene> g_pending;  // a level for the thread to build
 bool g_scene = false;            // a level is built and in use
@@ -344,6 +332,8 @@ struct Simulation {
     IPLSimulator simulator = nullptr;
     IPLScene scene = nullptr;
     IPLStaticMesh mesh = nullptr;
+    IPLStaticMesh doors = nullptr;  // the closed doors, in the scene beside the level (SetDoors)
+    uint64_t doors_built = 0;       // the list they were made from (g_doors_list), 0: none for this scene
     std::unordered_map<uint32_t, IPLSource> sources;
     bool head_tried = false;
     IPLProbeBatch batch = nullptr;  // the level's ways, once worked out
@@ -410,6 +400,47 @@ void MakeHead(Simulation& s) {
     LOGR("acoustics: Steam Audio's head is ready, for headphones and the room");
 }
 
+// The closed doors put in the scene in place of the last list's (SetDoors): two triangles a door, each of its own
+// material. The room's thread traces the same scene, so not while it does
+void Doors(Simulation& s, const std::vector<Door>& doors, uint64_t list, float meters) {
+    std::lock_guard<std::mutex> use(g_scene_use);
+    if (s.doors) {
+        g_ipl.iplStaticMeshRemove(s.doors, s.scene);
+        g_ipl.iplStaticMeshRelease(&s.doors);
+    }
+    if (!doors.empty()) {
+        std::vector<IPLVector3> vertices(doors.size() * 4);
+        std::vector<IPLTriangle> triangles(doors.size() * 2);
+        std::vector<IPLint32> material(doors.size() * 2);
+        std::vector<IPLMaterial> materials(doors.size());
+        for (size_t d = 0; d < doors.size(); d++) {
+            for (size_t k = 0; k < 4; k++)
+                vertices[d * 4 + k] = {doors[d].corner[k][0] * meters, doors[d].corner[k][1] * meters,
+                                       doors[d].corner[k][2] * meters};
+            IPLint32 v = IPLint32(d * 4);
+            triangles[d * 2] = {{v, v + 1, v + 2}};
+            triangles[d * 2 + 1] = {{v, v + 2, v + 3}};
+            material[d * 2] = material[d * 2 + 1] = IPLint32(d);
+            std::memcpy(&materials[d], &doors[d].made, sizeof(IPLMaterial));
+        }
+        IPLStaticMeshSettings ms{};
+        ms.numVertices = IPLint32(vertices.size());
+        ms.numTriangles = IPLint32(triangles.size());
+        ms.numMaterials = IPLint32(materials.size());
+        ms.vertices = vertices.data();
+        ms.triangles = triangles.data();
+        ms.materialIndices = material.data();
+        ms.materials = materials.data();
+        if (g_ipl.iplStaticMeshCreate(s.scene, &ms, &s.doors) == IPL_STATUS_SUCCESS) g_ipl.iplStaticMeshAdd(s.doors, s.scene);
+        else s.doors = nullptr;
+    }
+    g_ipl.iplSceneCommit(s.scene);
+    g_ipl.iplSimulatorCommit(s.simulator);
+    g_room_recommit = true;
+    s.doors_built = list;
+    if (g_log) LOGR("acoustics: %zu closed doors in the scene", doors.size());
+}
+
 // the level built and handed to the simulator, the one before let go; false for an empty level
 bool Build(Simulation& s, const Scene& level) {
     IPLScene scene = nullptr;
@@ -469,6 +500,8 @@ bool Build(Simulation& s, const Scene& level) {
     g_ipl.iplSimulatorSetScene(s.simulator, scene);
     g_ipl.iplSimulatorCommit(s.simulator);
     if (s.mesh) g_ipl.iplStaticMeshRelease(&s.mesh);
+    if (s.doors) g_ipl.iplStaticMeshRelease(&s.doors);  // the last level's go with its scene
+    s.doors_built = 0;
     if (s.scene) g_ipl.iplSceneRelease(&s.scene);
     s.mesh = mesh;
     s.scene = scene;
@@ -1064,7 +1097,11 @@ void RunRoom(IPLContext context, IPLSceneType type) {
                 ray.source.origin.y += kRoomRoofs[k];
                 g_ipl.iplSourceSetInputs(roof[k], IPL_SIMULATIONFLAGS_DIRECT, &ray);
             }
-            g_ipl.iplSimulatorRunDirect(simulator);
+            {
+                std::lock_guard<std::mutex> use(g_scene_use);
+                if (g_room_recommit.exchange(false)) g_ipl.iplSimulatorCommit(simulator);  // the scene's doors changed
+                g_ipl.iplSimulatorRunDirect(simulator);
+            }
             open = 0;
             int steep = 0;
             std::memset(rays_seen, 0, sizeof rays_seen);
@@ -1105,7 +1142,11 @@ void RunRoom(IPLContext context, IPLSceneType type) {
         g_ipl.iplSimulatorSetSharedInputs(simulator, IPL_SIMULATIONFLAGS_REFLECTIONS, &shared);
         g_ipl.iplSourceSetInputs(source, IPL_SIMULATIONFLAGS_REFLECTIONS, &in);
         g_ipl.iplSourceSetInputs(twin, IPL_SIMULATIONFLAGS_REFLECTIONS, &whole);
-        g_ipl.iplSimulatorRunReflections(simulator);
+        {
+            std::lock_guard<std::mutex> use(g_scene_use);  // the doors are not changed under a trace
+            if (g_room_recommit.exchange(false)) g_ipl.iplSimulatorCommit(simulator);
+            g_ipl.iplSimulatorRunReflections(simulator);
+        }
         float took = float(NowMs() - began);
         g_room_ms = took;
         if (refit) {
@@ -1203,7 +1244,14 @@ void Run() {
                 }
             }
             if (built)  // whether or not the ways are switched on now: they can be while the level is played
-                std::thread(Bake, s.context, g_ipl.iplSceneRetain(s.scene), std::move(*level), s.level).detach();
+            {
+                ++g_baking;
+                std::thread([context = s.context, scene = g_ipl.iplSceneRetain(s.scene), level = std::move(*level),
+                             number = s.level]() mutable {
+                    Bake(context, scene, std::move(level), number);
+                    --g_baking;
+                }).detach();
+            }
         }
         if (taken) {  // the ways are in: for this level, or one since replaced
             if (taken->level == s.level && s.scene && !s.batch) {
@@ -1215,6 +1263,19 @@ void Run() {
             } else {
                 g_ipl.iplProbeBatchRelease(&taken->batch);
             }
+        }
+        // the closed doors follow the game's list, once no thread is working a level's ways out of the scene
+        if (s.scene && g_baking == 0) {
+            std::vector<Door> doors;
+            uint64_t list = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (g_doors_list != s.doors_built) {
+                    doors = g_doors;
+                    list = g_doors_list;
+                }
+            }
+            if (list) Doors(s, doors, list, meters);
         }
         // sources follow the sounds playing
         bool changed = false;
@@ -1294,18 +1355,12 @@ void Run() {
             float open = std::clamp(out.direct.occlusion, 0.0f, 1.0f);
             for (int b = 0; b < 3; b++)
                 target[b] = open + (1 - open) * std::pow(std::clamp(out.direct.transmission[b], 0.0f, 1.0f), kThin);
-            // what the walls alone leave, for the way round: a closed door in the straight line takes its share too
-            float walls[3] = {target[0], target[1], target[2]};
-            for (const Door& d : g_doors) {
-                if (!Crosses(d, listener, j.pos)) continue;
-                for (int b = 0; b < 3; b++) target[b] *= std::clamp(d.through[b], 0.0f, 1.0f);
-            }
             // The way round arrives as first order Ambisonics (W, Y to the left, Z up, X ahead, N3D) of a sound
             // fallen off as 1 / metres along it: its length is in W, where it comes from in the other three. It
             // brings what the walls took from the sound, less what its bends take
             const float* sh = ways ? out.pathing.shCoeffs : nullptr;
             constexpr float kW = 0.2820948f;
-            if (!sh || !(sh[0] > 1e-4f * kW) || walls[1] > 0.98f) continue;
+            if (!sh || !(sh[0] > 1e-4f * kW) || target[1] > 0.98f) continue;
             float from[3] = {-sh[1], sh[2], -sh[3]};
             float length = std::sqrt(from[0] * from[0] + from[1] * from[1] + from[2] * from[2]);
             if (!(length > 0.2f * sh[0])) continue;  // from all round: no doorway to hear it from
@@ -1315,15 +1370,9 @@ void Run() {
             const float* eq = out.pathing.eqCoeffs;
             float most = std::max({eq[0], eq[1], eq[2], 1e-6f});
             Sound& so = sound->second;
-            float way_from[3];
-            for (int k = 0; k < 3; k++) way_from[k] = listener[k] + from[k] / length * along;
-            // a way that reaches the listener through a closed door is the doorway the door stands in: not heard
-            bool shut = false;
-            for (const Door& d : g_doors) shut = shut || Crosses(d, listener, way_from);
-            if (shut) continue;
             for (int k = 0; k < 3; k++) {
-                so.way_from[k] = way_from[k];
-                so.way_gain[k] = (1 - walls[k]) * std::clamp(eq[k] / most, 0.0f, 1.0f);  // what the walls took
+                so.way_from[k] = listener[k] + from[k] / length * along;
+                so.way_gain[k] = (1 - target[k]) * std::clamp(eq[k] / most, 0.0f, 1.0f);  // what the walls took
             }
             so.way = true;
         }
@@ -1558,8 +1607,9 @@ bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
 
 void SetDoors(const Door* doors, size_t n) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_log && n != g_doors.size()) LOGR("acoustics: %zu closed doors", n);
     g_doors.assign(doors, doors + (doors ? n : 0));
+    ++g_doors_list;
+    g_wake.notify_one();
 }
 
 std::vector<RecordedTail> g_recorded;  // under g_mutex
