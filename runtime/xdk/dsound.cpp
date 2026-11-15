@@ -1067,9 +1067,10 @@ Placed g_speaker[audio::acoustics::kSpeakers];
 // Measured 15 Nov 2026 (Siberia's tannoy): panned as other placed sounds a speaker in plain sight was 4.7 dB under the
 // same line played flat, so a speaker is as loud straight ahead within its range as the line was flat (the pan's 0.707
 // made up); and through the walls alone the valve room 20 m off had it 43 dB down, under everything else, where the
-// report wants it heard, muffled. So behind walls a speaker keeps this much of each band: -10, -16 and -24 dB
-constexpr float kSpeakerGain = 1.41421356f;
-constexpr float kSpeakerCarry[3] = {0.32f, 0.16f, 0.06f};
+// report wants it heard, muffled. So behind walls a speaker keeps this much of each band: -8, -12 and -20 dB.
+// Second measurement, with 1.414 and {0.32, 0.16, 0.06}: 2.2 dB short in plain sight, the valve room 21.9 dB down
+constexpr float kSpeakerGain = 1.7f;
+constexpr float kSpeakerCarry[3] = {0.40f, 0.25f, 0.10f};
 
 void MixSpeakers(float* bins, uint32_t frames) {
     float pos[audio::acoustics::kSpeakers][3];
