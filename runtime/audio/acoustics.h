@@ -149,6 +149,19 @@ constexpr int kFar = 4;
 void SetFar(const float (*points)[3], const float* open, int n, float reach);
 int Far(float pos[kFar][3], float open[kFar], float& reach);  // the mixer: the points in the sounds' space; 0 with the acoustics off
 
+// A title's announcements heard from its speakers. Some titles play a public address voice (an alarm, a tannoy) flat
+// in both ears, the same everywhere in the level, where the place it is heard from is a speaker on a wall (a player's
+// report, 14 Nov 2026: the announcer over a door heard from anywhere). A game gives the sounds that are announcements,
+// by their keys (xdk/dsound.cpp, SampleKey), and the level's speakers, points in the level; while it has both, such a
+// sound played with no place is heard from the kSpeakers speakers nearest the listener instead, each as a 3D sound:
+// full within `within` (the sounds' units), halved with each doubling past, through the walls and by the way round,
+// answered by the room. n 0: they play as the title made them
+constexpr int kSpeakers = 4;
+constexpr uint32_t kSpeakerSound = 0xFFFFFFE0u;  // the speakers' ids among the sounds, kSpeakerSound + k
+void SetSpeakers(const uint32_t* keys, size_t keys_n, const float (*points)[3], size_t n, float within);
+bool Announced(uint32_t key);                        // the mixer: one of the keys, with speakers to hear it from
+int Speakers(float pos[kSpeakers][3], float& within);  // the mixer: the nearest, in the sounds' space; 0 with none
+
 // Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
 // made by the mixer and heard through the walls as any 3D sound; placing it again moves it
 void PlaceTestSound();

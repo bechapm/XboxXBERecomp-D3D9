@@ -16,6 +16,7 @@
 #include "audio/acoustics.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -1866,6 +1867,51 @@ int Far(float pos[kFar][3], float open[kFar], float& reach) {
     }
     reach = g_far_reach;
     return g_far_n;
+}
+
+std::vector<uint32_t> g_announced;           // under g_mutex (SetSpeakers)
+std::vector<std::array<float, 3>> g_speakers;  // under g_mutex, in the level
+float g_speaker_near = 1;
+
+void SetSpeakers(const uint32_t* keys, size_t keys_n, const float (*points)[3], size_t n, float within) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!keys || !points) keys_n = n = 0;
+    if (n != g_speakers.size()) LOGR("acoustics: announcements heard from %zu speakers", n);
+    g_announced.assign(keys, keys + keys_n);
+    g_speakers.clear();
+    for (size_t k = 0; k < n; k++) g_speakers.push_back({points[k][0], points[k][1], points[k][2]});
+    g_speaker_near = std::max(within, 0.1f);
+    for (int k = int(std::min<size_t>(n, kSpeakers)); k < kSpeakers; k++) g_sounds.erase(kSpeakerSound + uint32_t(k));
+}
+
+bool Announced(uint32_t key) {
+    if (!g_on || !key) return false;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return !g_speakers.empty() && std::find(g_announced.begin(), g_announced.end(), key) != g_announced.end();
+}
+
+int Speakers(float pos[kSpeakers][3], float& within) {
+    if (!g_on) return 0;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    // the nearest to the listener, by straight distance in the level, kept in a steady order
+    std::vector<std::pair<float, size_t>> by;
+    for (size_t k = 0; k < g_speakers.size(); k++) {
+        float d[3] = {g_speakers[k][0] - g_listener[0], g_speakers[k][1] - g_listener[1], g_speakers[k][2] - g_listener[2]};
+        by.push_back({d[0] * d[0] + d[1] * d[1] + d[2] * d[2], k});
+    }
+    std::sort(by.begin(), by.end());
+    int n = int(std::min<size_t>(by.size(), kSpeakers));
+    std::vector<size_t> chosen;
+    for (int k = 0; k < n; k++) chosen.push_back(by[size_t(k)].second);
+    std::sort(chosen.begin(), chosen.end());
+    for (int k = 0; k < n; k++) {
+        const float* at = g_speakers[chosen[size_t(k)]].data();
+        // the level's point taken back into the sounds' space, as TestSound does
+        float d[3] = {at[0] - g_origin[0], at[1] - g_origin[1], at[2] - g_origin[2]};
+        for (int i = 0; i < 3; i++) pos[k][i] = d[0] * g_axes[i * 3] + d[1] * g_axes[i * 3 + 1] + d[2] * g_axes[i * 3 + 2];
+    }
+    within = g_speaker_near;
+    return n;
 }
 
 void PlaceTestSound() {

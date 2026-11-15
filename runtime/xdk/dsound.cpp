@@ -180,6 +180,7 @@ struct Voice {
     float band[3] = {1, 1, 1};
     float split[kMaxChannels][4] = {};
     float body = -1;  // seconds of it before the echo recorded into it, none known under 0 (SetRecordedTails)
+    uint32_t key = 0;  // SampleKey, at its last Play
     // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
     int64_t block[2] = {-1, -1};
     uint8_t last = 0;  // decoded[last] holds block[last]
@@ -778,6 +779,10 @@ void MixDetour(Detour& way, uint32_t sound, const float from[3], const float gai
     }
 }
 
+// an announcement's sound this block, kept by MixVoice for MixSpeakers (one at a time; the output thread alone)
+std::vector<float> g_speaker_dry;
+bool g_speaker_fed = false;
+
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
     Place at = Locate(v);
@@ -895,6 +900,16 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
         }
     }
     v.send = got ? send : 0.0f;
+    // an announcement with no place, while the game has speakers for it: kept for them (MixSpeakers), not played flat.
+    // Its channels as one, at the voice's own level
+    if (!at.on && !v.stream && !g_speaker_fed && audio::acoustics::Announced(v.key)) {
+        float own = OwnLevel(v) / float(std::max<uint32_t>(channels, 1));
+        g_speaker_dry.assign(frames, 0.0f);
+        for (uint32_t i = 0; i < got; i++)
+            for (uint32_t c = 0; c < channels; c++) g_speaker_dry[i] += rows[size_t(i) * kRows + c] * own;
+        g_speaker_fed = true;
+        got = 0;
+    }
     // a mono stream or loop with no place, while the game has far points for one: kept for them (MixFar), not played
     // flat (Training Ground's distant battle is a looped buffer, not a stream: 12 Nov 2026)
     bool far_off = g_far_n > 0 && (v.stream || v.looping) && v.channels == 1 && !at.on && !g_far_fed;
@@ -924,82 +939,64 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
 // The acoustics test sound (audio/acoustics.h, PlaceTestSound): made here, a low buzz under bursts of hiss, so a wall's
 // dulling is plain to hear. Panned by its direction, full within 3 m and halved with each doubling past, and heard
 // through the walls as any 3D voice
-struct TestVoice {
-    uint32_t n = 0;           // frames made
-    uint32_t noise = 0x9E3779B9u;
-    float phase = 0;
+// A mono sound the mixer itself places at a point in the level (the test sound, a title's announcement from its
+// speakers): panned by its direction, full within `within` and halved with each doubling past, heard through the walls
+// and by its way round as any 3D voice, sent to the room, and through the head's filter on headphones. Its state
+struct Placed {
     float split[4] = {};
     float band[3] = {1, 1, 1};
     float left = 0, right = 0;
     float head = 0;  // how much of it the head's filter places (headphones), ramped as its levels are
     Detour way;      // its way round the walls
 };
-TestVoice g_test;
-constexpr uint32_t kTestSound = 0xFFFFFFFEu;  // acoustics.cpp's id for it
 
-void MixTest(float* bins, uint32_t frames) {
-    float pos[3];
-    if (!audio::acoustics::TestSound(pos)) {
-        g_test.left = g_test.right = 0;
-        return;
-    }
+// `dry`, frames of mono, from `pos` (the sounds' space) as the sound `id` among the acoustics' sounds
+void MixPlaced(Placed& st, uint32_t id, const float pos[3], float within, const float* dry, float* bins, uint32_t frames) {
     float d[3] = {pos[0] - g_listener[0], pos[1] - g_listener[1], pos[2] - g_listener[2]};
     float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
                       g_top[0] * g_front[1] - g_top[1] * g_front[0]};
-    float att = std::min(1.0f, 3.0f / std::max(std::sqrt(Dot(d, d)), 0.01f));
+    float att = std::min(1.0f, within / std::max(std::sqrt(Dot(d, d)), 0.01f));
     float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
     float left = att * std::cos((pan + 1) * 0.78539816f), rightg = att * std::sin((pan + 1) * 0.78539816f);
     float walls[3] = {1, 1, 1};
-    audio::acoustics::Gains(kTestSound, pos, g_listener, walls);
-    float band_step[3], left_step = (left - g_test.left) / float(frames), right_step = (rightg - g_test.right) / float(frames);
-    for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - g_test.band[b]) / float(frames);
-    constexpr uint32_t kPeriod = audio::kRate * 6 / 10, kBurst = audio::kRate * 35 / 100, kFade = audio::kRate / 200;
-    static std::vector<float> mono, ear[2], dry, both;
+    audio::acoustics::Gains(id, pos, g_listener, walls);
+    float band_step[3], left_step = (left - st.left) / float(frames), right_step = (rightg - st.right) / float(frames);
+    for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - st.band[b]) / float(frames);
+    static std::vector<float> mono, ear[2], both;
     mono.resize(frames);
-    dry.resize(frames);
-    for (uint32_t i = 0; i < frames; i++, g_test.n++) {
-        uint32_t at = g_test.n % kPeriod;
-        float env = at >= kBurst ? 0.0f : std::min({1.0f, float(at) / kFade, float(kBurst - at) / kFade});
-        g_test.noise ^= g_test.noise << 13;
-        g_test.noise ^= g_test.noise >> 17;
-        g_test.noise ^= g_test.noise << 5;
-        float hiss = float(int32_t(g_test.noise)) / 2147483648.0f;
-        g_test.phase += 110.0f / audio::kRate;
-        if (g_test.phase >= 1) g_test.phase -= 1;
-        float x = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
-        for (int b = 0; b < 3; b++) g_test.band[b] += band_step[b];
-        dry[i] = x;
-        mono[i] = Muffled(x, g_test.split, g_test.band, 1 - g_test.way.band[0]);
+    for (uint32_t i = 0; i < frames; i++) {
+        for (int b = 0; b < 3; b++) st.band[b] += band_step[b];
+        mono[i] = Muffled(dry[i], st.split, st.band, 1 - st.way.band[0]);
     }
     // its way round the walls, as a voice's: made as two ears at the level of a sound that far off, added below
     float way_from[3] = {}, way_gain[3] = {0, 0, 0};
-    bool way = audio::acoustics::Way(kTestSound, way_from, way_gain);
-    bool detour = way || g_test.way.band[0] != 0 || g_test.way.band[1] != 0 || g_test.way.band[2] != 0;
+    bool way = audio::acoustics::Way(id, way_from, way_gain);
+    bool detour = way || st.way.band[0] != 0 || st.way.band[1] != 0 || st.way.band[2] != 0;
     if (detour) {
         float wd[3] = {way_from[0] - g_listener[0], way_from[1] - g_listener[1], way_from[2] - g_listener[2]};
-        float far = way ? 0.70710678f * std::min(1.0f, 3.0f / std::max(std::sqrt(Dot(wd, wd)), 0.01f)) : 0.0f;
+        float distant = way ? 0.70710678f * std::min(1.0f, within / std::max(std::sqrt(Dot(wd, wd)), 0.01f)) : 0.0f;
         both.assign(size_t(frames) * kRows, 0.0f);
-        MixDetour(g_test.way, kTestSound, way_from, way_gain, far, dry.data(), both.data(), frames);
+        MixDetour(st.way, id, way_from, way_gain, distant, dry, both.data(), frames);
     }
     bool room = audio::acoustics::Room() && g_room_send.size() >= frames;
     // headphones: from its direction through the head's filter, at the level a sound straight ahead is panned to
-    bool head = audio::acoustics::Headphones() || g_test.head > 0;
+    bool head = audio::acoustics::Headphones() || st.head > 0;
     if (head) {
         ear[0].resize(frames);
         ear[1].resize(frames);
         float local[3] = {Dot(d, right), Dot(d, g_top), Dot(d, g_front)};
-        head = audio::acoustics::Ears(kTestSound, 0, local, mono.data(), ear[0].data(), ear[1].data(), frames);
+        head = audio::acoustics::Ears(id, 0, local, mono.data(), ear[0].data(), ear[1].data(), frames);
     }
-    float head_step = ((head && audio::acoustics::Headphones() ? 1.0f : 0.0f) - g_test.head) / float(frames);
+    float head_step = ((head && audio::acoustics::Headphones() ? 1.0f : 0.0f) - st.head) / float(frames);
     float level = att * 0.70710678f;
     for (uint32_t i = 0; i < frames; i++) {
-        g_test.left += left_step;
-        g_test.right += right_step;
-        g_test.head += head_step;
-        float l = mono[i] * g_test.left, r = mono[i] * g_test.right;
+        st.left += left_step;
+        st.right += right_step;
+        st.head += head_step;
+        float l = mono[i] * st.left, r = mono[i] * st.right;
         if (head) {
-            l += (ear[0][i] * level - l) * g_test.head;
-            r += (ear[1][i] * level - r) * g_test.head;
+            l += (ear[0][i] * level - l) * st.head;
+            r += (ear[1][i] * level - r) * st.head;
         }
         if (detour) {
             l += both[size_t(i) * kRows + kLeftEar];
@@ -1010,8 +1007,64 @@ void MixTest(float* bins, uint32_t frames) {
         frame[kFrontLeft] += l;
         frame[kFrontRight] += r;
     }
-    if (!head) g_test.head = 0;
-    std::memcpy(g_test.band, walls, sizeof walls);
+    if (!head) st.head = 0;
+    std::memcpy(st.band, walls, sizeof walls);
+}
+
+// The acoustics test sound (audio/acoustics.h, PlaceTestSound): made here, a low buzz under bursts of hiss, so a wall's
+// dulling is plain to hear, full within 3 m
+struct TestVoice {
+    uint32_t n = 0;  // frames made
+    uint32_t noise = 0x9E3779B9u;
+    float phase = 0;
+    Placed placed;
+};
+TestVoice g_test;
+constexpr uint32_t kTestSound = 0xFFFFFFFEu;  // acoustics.cpp's id for it
+
+void MixTest(float* bins, uint32_t frames) {
+    float pos[3];
+    if (!audio::acoustics::TestSound(pos)) {
+        g_test.placed.left = g_test.placed.right = 0;
+        return;
+    }
+    constexpr uint32_t kPeriod = audio::kRate * 6 / 10, kBurst = audio::kRate * 35 / 100, kFade = audio::kRate / 200;
+    static std::vector<float> dry;
+    dry.resize(frames);
+    for (uint32_t i = 0; i < frames; i++, g_test.n++) {
+        uint32_t at = g_test.n % kPeriod;
+        float env = at >= kBurst ? 0.0f : std::min({1.0f, float(at) / kFade, float(kBurst - at) / kFade});
+        g_test.noise ^= g_test.noise << 13;
+        g_test.noise ^= g_test.noise >> 17;
+        g_test.noise ^= g_test.noise << 5;
+        float hiss = float(int32_t(g_test.noise)) / 2147483648.0f;
+        g_test.phase += 110.0f / audio::kRate;
+        if (g_test.phase >= 1) g_test.phase -= 1;
+        dry[i] = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
+    }
+    MixPlaced(g_test.placed, kTestSound, pos, 3.0f, dry.data(), bins, frames);
+}
+
+// A title's announcement heard from its speakers (audio/acoustics.h, SetSpeakers): the voice's sound kept here in
+// place of being played flat, then each speaker's hearing of it placed there. The output thread alone renders
+Placed g_speaker[audio::acoustics::kSpeakers];
+
+void MixSpeakers(float* bins, uint32_t frames) {
+    float pos[audio::acoustics::kSpeakers][3];
+    float within = 1;
+    int n = audio::acoustics::Speakers(pos, within);
+    for (int k = 0; k < audio::acoustics::kSpeakers; k++) {
+        Placed& st = g_speaker[k];
+        if (k >= n || !g_speaker_fed) {
+            if (st.left != 0 || st.right != 0) {  // a speaker no longer heard: ramped out, its way and room with it
+                st.left = st.right = 0;
+                st.way = Detour{};
+            }
+            continue;
+        }
+        MixPlaced(st, audio::acoustics::kSpeakerSound + uint32_t(k), pos[k], within, g_speaker_dry.data(), bins, frames);
+    }
+    g_speaker_fed = false;
 }
 
 // A game's own sounds (audio/sounds.h) are voices like the title's, under ids no guest object has. One that has played
@@ -1103,6 +1156,7 @@ void Render(float* out, uint32_t frames) {
     }
     EndHostVoices();
     MixFar(bins.data(), frames);
+    MixSpeakers(bins.data(), frames);
     MixTest(bins.data(), frames);
     // XBE_ACOUSTICS_LOG: where in the chain the mix is, once a second (a nave fell silent with its room on, 11 Nov 2026)
     static const bool s_trace = [] {
@@ -1508,7 +1562,8 @@ BUFFER(SetBufferData, 3) {
 }
 BUFFER(Play, 4) {
     v.has_gain = false;  // a new sound does not ramp from the last one's levels
-    v.body = audio::acoustics::RecordedBody(SampleKey(v));
+    v.key = SampleKey(v);
+    v.body = audio::acoustics::RecordedBody(v.key);
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
