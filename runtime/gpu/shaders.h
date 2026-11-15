@@ -43,6 +43,16 @@ uint64_t Hash(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 PixelKey MakePixelKey(const State& s, const TexInfo tex[4]);
 
+// What a draw's pixel stage makes of texture 0 and the vertex colour, as one fixed function stage would say it, for a
+// tool that reads texture stage states instead of running shaders (RTX Remix). Combiners are run on sample colours
+// with the draw's constants (pc, as DrawConstants has them), so a sum holds for those constants only. kSumNone: no one
+// stage says it (another texture or a texture shader changes it, or no operation below gives it)
+enum StageSumOp : uint8_t { kSumNone, kSumTexture, kSumDiffuse, kSumModulate, kSumModulate2x, kSumModulate4x, kSumAdd };
+struct StageSum {
+    uint8_t color = kSumNone, alpha = kSumNone;
+};
+StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular);
+
 // Shader Model 3, for the Direct3D 9 renderer: constants in registers, Direct3D 9's names for what passes between
 // the stages, inputs named by what they hold. The layouts are the kSm3 registers below.
 inline bool g_shader_model3 = false;
@@ -75,10 +85,24 @@ void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, Inp
 // usages: Shader Model 3's input names, the habit's without them
 std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0,
                               const InputUsages* usages = nullptr);
+// A vertex program that is only a plain transform: position through a model-view then a projection or one matrix, the
+// XDK's two screen lines, a colour and coordinates moved or scaled, nothing else. Registers in hardware order, -1 none.
+struct PlainProgram {
+    int position = -1, modelview = -1, projection = -1;
+    int screen_scale = -1, screen_offset = -1;
+    int colour = -1;              // what reaches oD0
+    bool colour_swapped = false;  // as .zyxw: red and blue change places
+    int tex[4] = {-1, -1, -1, -1};        // what reaches oTn
+    int tex_scale[4] = {-1, -1, -1, -1};  // the constant oTn is multiplied by
+};
+bool PlainTransform(const std::vector<uint32_t>& program, PlainProgram& out);
 // the program reads constant register reg (hardware order: c-96 is 0) by its number, not through a0
 bool ReadsConstant(const std::vector<uint32_t>& program, uint32_t reg);
 // the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
 bool ReadsViewportOffset(const std::vector<uint32_t>& program);
+// the XDK's screen lines, in hardware order (c-96 is 0): a program takes clip space to scale * p / w + offset
+constexpr uint32_t kViewportScaleConstant = 58;   // c-38
+constexpr uint32_t kViewportOffsetConstant = 59;  // c-37
 // the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
 // names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
 inline int g_projection_register = -1;

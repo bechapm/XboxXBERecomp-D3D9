@@ -25,6 +25,10 @@ struct ClearHook {
     RecompModClearFn fn;
     void* user;
 };
+struct ResizeHook {
+    RecompModResizeFn fn;
+    void* user;
+};
 struct CopyHook {
     RecompModCopyFn fn;
     void* user;
@@ -34,7 +38,11 @@ struct D3d9Hooks {
     std::vector<DeviceHook> device, present;
     std::vector<ClearHook> clear;
     std::vector<CopyHook> copy;
+    std::vector<ResizeHook> resize;
     bool remake_written = false;   // d3d9_remake_written_textures
+    bool fixed_transform = false;  // d3d9_fixed_transform
+    RecompModFixedFn fixed_keep = nullptr;
+    void* fixed_keep_user = nullptr;
 };
 const D3d9Hooks& D3d9();
 // a mod hears of draws and may read guest memory there: the renderer stays on the game's thread, where memory is

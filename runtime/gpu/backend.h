@@ -14,6 +14,37 @@ enum : uint32_t {
     kClearStencil = 0x02,
 };
 
+// A mesh a game's hook built and has skinned by fixed function: one matrix per vertex, by index (D3D9's indexed vertex
+// blending, up to 256 matrices), each run a triangle list with one texture. Drawn in place of one of the title's vertex
+// program draws, on the screen as that program puts it (its two screen lines, kViewportScaleConstant and
+// kViewportOffsetConstant). Devices offer only matrices 0 to 8 to fixed function (MaxVertexBlendMatrixIndex 8 on
+// D3D9 and on RTX Remix, measured), so this is for a tool that skins whole meshes itself (Remix: up to 256 bones). For a model the title draws in many pieces
+// of a few matrices each (a vertex program's registers hold no more), so that a tool reading fixed function draws
+// (RTX Remix) sees it whole
+struct SkinnedVertex {
+    float pos[3];     // in its matrix's space
+    float normal[3];
+    float uv[2];
+    uint32_t matrix;  // 0..255
+    // never read by fixed function (D3DVBF_0WEIGHTS: the one matrix, wholly), but RTX Remix skins a draw only when its
+    // declaration has a BLENDWEIGHT, and otherwise places the vertices as they are, in their matrices' spaces
+    float weight = 1.0f;
+};
+struct SkinnedRun {
+    uint32_t texture;  // the guest D3D texture header, or 0
+    uint32_t first;    // in indices
+    uint32_t count;    // indices, a multiple of 3
+};
+struct SkinnedMesh {
+    const SkinnedVertex* vertices = nullptr;
+    uint32_t vertex_count = 0;
+    const uint16_t* indices = nullptr;  // triangle lists
+    const SkinnedRun* runs = nullptr;
+    uint32_t run_count = 0;
+    const float* matrices = nullptr;    // row vector, model (the vertex's matrix space) to view, 16 floats each
+    uint32_t matrix_count = 0;
+};
+
 class Backend {
 public:
     virtual ~Backend() = default;
@@ -27,6 +58,9 @@ public:
     virtual void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects_va,
                       uint32_t dst_points_va) = 0;
     virtual void Present(const Surface& front) = 0;
+    // through the title's projection (g_projection_register) and its current targets and viewport; only the D3D9
+    // backend draws it, and only when a mod asked (d3d::SkinnedMeshes)
+    virtual void DrawSkinned(const State&, const SkinnedMesh&) {}
     // the CPU is about to touch this resource's memory: write GPU results back first
     virtual void Sync(uint32_t data_va, uint32_t size) = 0;
     // a lock that does not wait for the GPU (NOOVERWRITE): a result a frame or two old is what the console gives too

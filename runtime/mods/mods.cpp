@@ -1,6 +1,7 @@
 #include "mods/mods.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -21,8 +22,10 @@
 #endif
 
 #include "app/app.h"
+#include "core/input.h"
 #include "core/log.h"
 #include "gpu/shaders.h"
+#include "xdk/d3d8.h"
 #include "kernel/kernel.h"
 
 namespace mods {
@@ -142,6 +145,10 @@ int CaptureOnDraw(void (*fn)(void*), void*) { return fn ? 1 : 0; }
 void CaptureNote(uint32_t, const void*, uint32_t) {}
 int ReplayOnNote(void (*fn)(uint32_t, const void*, uint32_t, void*), void*) { return fn ? 1 : 0; }
 
+int D3d9OnResize(RecompModResizeFn fn, void* user) {
+    return fn ? Add(g_d3d9.resize, kMaxHooks, ResizeHook{fn, user}) : 0;
+}
+
 int D3d9OnCopy(RecompModCopyFn fn, void* user) { return fn ? Add(g_d3d9.copy, kMaxHooks, CopyHook{fn, user}) : 0; }
 
 uint32_t DrawVertexBuffer(uint32_t* data, uint32_t* stride, uint32_t* first) {
@@ -152,8 +159,42 @@ uint32_t DrawVertexBuffer(uint32_t* data, uint32_t* stride, uint32_t* first) {
     return vb;
 }
 
-// plain transforms are drawn as programs here: no draw comes with fixed_transform set
-void D3d9FixedTransform(int, RecompModFixedFn, void*) {}
+void D3d9FixedTransform(int on, RecompModFixedFn keep, void* user) {
+    g_d3d9.fixed_transform = on != 0;
+    g_d3d9.fixed_keep = keep;
+    g_d3d9.fixed_keep_user = user;
+}
+
+// counted across mods: the pointer is wanted while any of them has an overlay up, as input's own wants are
+void PointerElsewhere(int on) {
+    static std::atomic<int> n{0};
+    if (on) {
+        input::PointerWant(true);
+        if (++n == 1) {
+            input::CursorElsewhere(true);
+            input::KeysElsewhere(true);
+            LOGR("[MOD] an overlay has the mouse and keys");
+        }
+        return;
+    }
+    int had = n.load();
+    while (had > 0 && !n.compare_exchange_weak(had, had - 1)) {
+    }
+    if (had <= 0) return;  // an off with no on before it
+    if (had == 1) {
+        input::KeysElsewhere(false);
+        input::CursorElsewhere(false);
+        LOGR("[MOD] the game has the mouse and keys again");
+    }
+    input::PointerWant(false);
+}
+
+// logged the first time only: a mod may switch it within each frame (off once its tool rasterises the rest)
+void D3d9SkinnedMeshes(int on) {
+    d3d::g_skinned_meshes = on != 0;
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true)) LOGR("mods: skinned meshes %s", on ? "on" : "off");
+}
 
 RecompModApi MakeApi() {
     RecompModApi a{};
@@ -181,6 +222,9 @@ RecompModApi MakeApi() {
     a.d3d9_on_copy = D3d9OnCopy;
     a.draw_vertex_buffer = DrawVertexBuffer;
     a.d3d9_fixed_transform = D3d9FixedTransform;
+    a.pointer_elsewhere = PointerElsewhere;
+    a.d3d9_skinned_meshes = D3d9SkinnedMeshes;
+    a.d3d9_on_resize = D3d9OnResize;
     return a;
 }
 const RecompModApi g_api = MakeApi();

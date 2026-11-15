@@ -117,6 +117,7 @@ constexpr uint32_t kStageStates = XDK_TextureState_Stage, kStreamSize = XDK_Stre
 
 gpu::State g_state;
 std::unique_ptr<gpu::Backend> g_backend;
+bool g_d3d9_direct = false;  // the D3D9 renderer, drawing on the title's thread (what DrawSkinned needs)
 std::recursive_mutex g_lock;
 
 // every write to g_state.simple goes through here or marks it
@@ -302,6 +303,7 @@ void SetFrameBuffers(const char* caller, uint32_t pp) {
         // a mod reading guest memory at the draws needs them made while the game is at them
         if (kRenderThread && !(d3d9 && mods::HooksDraws())) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
         else if (kRenderThread) LOGI("d3d: a mod hooks draws, the renderer runs on the game's thread");
+        g_d3d9_direct = d3d9 && (!kRenderThread || mods::HooksDraws());
     }
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
     SetDev(kDevRenderTarget, g_buffers[1]);
@@ -363,6 +365,13 @@ void VerticalBlank(X86Context& ctx) {
 
 gpu::State& State() { return g_state; }
 std::recursive_mutex& Lock() { return g_lock; }
+
+bool SkinnedMeshes() { return g_skinned_meshes && g_d3d9_direct && g_backend; }
+
+void DrawSkinned(const gpu::SkinnedMesh& m) {
+    std::lock_guard lock(g_lock);
+    if (SkinnedMeshes()) g_backend->DrawSkinned(g_state, m);
+}
 
 }  // namespace d3d
 
