@@ -962,16 +962,20 @@ struct Placed {
     Detour way;      // its way round the walls
 };
 
-// `dry`, frames of mono, from `pos` (the sounds' space) as the sound `id` among the acoustics' sounds
-void MixPlaced(Placed& st, uint32_t id, const float pos[3], float within, const float* dry, float* bins, uint32_t frames) {
+// `dry`, frames of mono, from `pos` (the sounds' space) as the sound `id` among the acoustics' sounds, `gain` times as
+// loud. `carry`, when given, is the least of it each band keeps behind walls (deep, middle, high): a sound loud
+// enough to fill its place is heard, dull, in the rooms round it
+void MixPlaced(Placed& st, uint32_t id, const float pos[3], float within, float gain, const float* carry, const float* dry,
+               float* bins, uint32_t frames) {
     float d[3] = {pos[0] - g_listener[0], pos[1] - g_listener[1], pos[2] - g_listener[2]};
     float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
                       g_top[0] * g_front[1] - g_top[1] * g_front[0]};
-    float att = std::min(1.0f, within / std::max(std::sqrt(Dot(d, d)), 0.01f));
+    float att = gain * std::min(1.0f, within / std::max(std::sqrt(Dot(d, d)), 0.01f));
     float pan = std::sin(Azimuth(d, g_front, right) * 3.14159265f / 180);  // -1 left, 1 right
     float left = att * std::cos((pan + 1) * 0.78539816f), rightg = att * std::sin((pan + 1) * 0.78539816f);
     float walls[3] = {1, 1, 1};
     audio::acoustics::Gains(id, pos, g_listener, walls);
+    for (int b = 0; carry && b < 3; b++) walls[b] = std::max(walls[b], carry[b]);
     float band_step[3], left_step = (left - st.left) / float(frames), right_step = (rightg - st.right) / float(frames);
     for (int b = 0; b < 3; b++) band_step[b] = (walls[b] - st.band[b]) / float(frames);
     static std::vector<float> mono, ear[2], both;
@@ -986,7 +990,7 @@ void MixPlaced(Placed& st, uint32_t id, const float pos[3], float within, const 
     bool detour = way || st.way.band[0] != 0 || st.way.band[1] != 0 || st.way.band[2] != 0;
     if (detour) {
         float wd[3] = {way_from[0] - g_listener[0], way_from[1] - g_listener[1], way_from[2] - g_listener[2]};
-        float distant = way ? 0.70710678f * std::min(1.0f, within / std::max(std::sqrt(Dot(wd, wd)), 0.01f)) : 0.0f;
+        float distant = way ? 0.70710678f * gain * std::min(1.0f, within / std::max(std::sqrt(Dot(wd, wd)), 0.01f)) : 0.0f;
         both.assign(size_t(frames) * kRows, 0.0f);
         MixDetour(st.way, id, way_from, way_gain, distant, dry, both.data(), frames);
     }
@@ -1054,12 +1058,18 @@ void MixTest(float* bins, uint32_t frames) {
         if (g_test.phase >= 1) g_test.phase -= 1;
         dry[i] = 0.2f * hiss * env + 0.1f * (2 * g_test.phase - 1);
     }
-    MixPlaced(g_test.placed, kTestSound, pos, 3.0f, dry.data(), bins, frames);
+    MixPlaced(g_test.placed, kTestSound, pos, 3.0f, 1.0f, nullptr, dry.data(), bins, frames);
 }
 
 // A title's announcement heard from its speakers (audio/acoustics.h, SetSpeakers): the voice's sound kept here in
 // place of being played flat, then each speaker's hearing of it placed there. The output thread alone renders
 Placed g_speaker[audio::acoustics::kSpeakers];
+// Measured 15 Nov 2026 (Siberia's tannoy): panned as other placed sounds a speaker in plain sight was 4.7 dB under the
+// same line played flat, so a speaker is as loud straight ahead within its range as the line was flat (the pan's 0.707
+// made up); and through the walls alone the valve room 20 m off had it 43 dB down, under everything else, where the
+// report wants it heard, muffled. So behind walls a speaker keeps this much of each band: -10, -16 and -24 dB
+constexpr float kSpeakerGain = 1.41421356f;
+constexpr float kSpeakerCarry[3] = {0.32f, 0.16f, 0.06f};
 
 void MixSpeakers(float* bins, uint32_t frames) {
     float pos[audio::acoustics::kSpeakers][3];
@@ -1074,7 +1084,8 @@ void MixSpeakers(float* bins, uint32_t frames) {
             }
             continue;
         }
-        MixPlaced(st, audio::acoustics::kSpeakerSound + uint32_t(k), pos[k], within, g_speaker_dry.data(), bins, frames);
+        MixPlaced(st, audio::acoustics::kSpeakerSound + uint32_t(k), pos[k], within, kSpeakerGain, kSpeakerCarry,
+                  g_speaker_dry.data(), bins, frames);
     }
     g_speaker_fed = false;
 }
