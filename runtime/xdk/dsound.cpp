@@ -662,6 +662,18 @@ uint32_t SampleKey(const Voice& v) {
     for (uint32_t i = 0; i < std::min(v.bytes, 2048u); i++) byte(p[i]);
     return h & 0x7FFFFFFFu;
 }
+// A stream has no length to name it by: its key is the same sum over its rate, channels and format tag and the first
+// 2048 bytes of the first packet after it was quiet, with bit 31 set so it is no buffer's key
+uint32_t StreamKey(const Voice& v, uint32_t data, uint32_t size) {
+    if (!data || !size) return 0;
+    uint32_t h = 2166136261u;
+    auto byte = [&](uint8_t x) { h = (h ^ x) * 16777619u; };
+    for (uint32_t field : {v.rate, uint32_t(v.channels), uint32_t(v.tag)})
+        for (int k = 0; k < 4; k++) byte(uint8_t(field >> (8 * k)));
+    const uint8_t* p = static_cast<const uint8_t*>(HostPtr(data));
+    for (uint32_t i = 0; i < std::min(size, 2048u); i++) byte(p[i]);
+    return h | 0x80000000u;
+}
 float TailGain(float seconds, float body, float kept) {
     if (seconds <= body) return 1.0f;
     return std::pow(10.0f, -(seconds - body) * kTailFall * (1 - kept) / 20.0f);
@@ -902,7 +914,7 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     v.send = got ? send : 0.0f;
     // an announcement with no place, while the game has speakers for it: kept for them (MixSpeakers), not played flat.
     // Its channels as one, at the voice's own level
-    if (!at.on && !v.stream && !g_speaker_fed && audio::acoustics::Announced(v.key)) {
+    if (!at.on && !g_speaker_fed && audio::acoustics::Announced(v.key)) {
         float own = OwnLevel(v) / float(std::max<uint32_t>(channels, 1));
         g_speaker_dry.assign(frames, 0.0f);
         for (uint32_t i = 0; i < got; i++)
@@ -1792,7 +1804,16 @@ STREAM(Process, 3) {
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
     v.packets.push_back(pk);
-    if (!v.active) v.has_gain = false;  // after going quiet a stream starts its levels fresh
+    if (!v.active) {
+        v.has_gain = false;  // after going quiet a stream starts its levels fresh
+        v.key = StreamKey(v, pk.data, pk.size);
+        static const bool s_keys = [] {
+            const char* e = std::getenv("XBE_SOUND_KEYS");
+            return e && *e && std::strcmp(e, "0") != 0;
+        }();
+        if (s_keys) LOGR("dsound: stream s%08X, first packet %u bytes, %u Hz, %u channels, tag %X", v.key, pk.size, v.rate,
+                         uint32_t(v.channels), uint32_t(v.tag));
+    }
     v.active = true;
     v.ending = false;
     return 0;
