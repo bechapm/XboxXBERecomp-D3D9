@@ -1564,6 +1564,12 @@ BUFFER(Play, 4) {
     v.has_gain = false;  // a new sound does not ramp from the last one's levels
     v.key = SampleKey(v);
     v.body = audio::acoustics::RecordedBody(v.key);
+    // XBE_SOUND_KEYS: each sound as it starts, by the key a title's tables name it by (SetSpeakers, SetRecordedTails)
+    static const bool s_keys = [] {
+        const char* e = std::getenv("XBE_SOUND_KEYS");
+        return e && *e && std::strcmp(e, "0") != 0;
+    }();
+    if (s_keys) LOGR("dsound: play s%08X, %u bytes%s", v.key, v.bytes, a[3] & 1 ? ", looped" : "");
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
