@@ -25,6 +25,12 @@ void Set(uint32_t id, float level, float dull);
 constexpr uint32_t kShots = 8;
 void Shot(std::shared_ptr<const Sample> sample, float level, float pan, float dull, float room);
 void Clear();  // every bed and shot let go
+// the game's thread, each frame its place is heard (in play, not paused, not loading): the beds keep playing only while
+// it says so. Once a game has said it, a gap of kBeat ms (a pause menu, a loading screen, a stall) fades them out in
+// kHoldFade ms and drops the shots under way; the next Beat brings the beds back over about a second. A game that
+// never calls it is never held
+constexpr uint32_t kBeat = 150, kHoldFade = 60;
+void Beat();
 
 // the mixer's thread: this block of them added to `stereo` (frames of left, right) and to what the room hears (frames)
 void Mix(float* stereo, float* room, uint32_t frames);

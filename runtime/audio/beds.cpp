@@ -2,6 +2,8 @@
 #include "audio/beds.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 
@@ -58,8 +60,16 @@ std::mutex g_mutex;
 Bed g_beds[kBeds];
 uint32_t g_made = 0;
 Once g_shots[kShots];
+std::atomic<int64_t> g_beat{-1};  // ms of the last Beat, -1 none yet: never held
+float g_hold = 1;                 // the mixer's thread: how much of the beds and shots is heard (1 all)
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 }  // namespace
+
+void Beat() { g_beat.store(NowMs(), std::memory_order_relaxed); }
 
 uint32_t Add(std::shared_ptr<const Sample> sample) {
     if (!sample || sample->pcm.size() < 2 || !sample->rate) return 0;
@@ -102,6 +112,18 @@ void Clear() {
 
 void Mix(float* stereo, float* room, uint32_t frames) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    int64_t beat = g_beat.load(std::memory_order_relaxed);
+    bool held = beat >= 0 && NowMs() - beat > int64_t(kBeat);
+    // held: out in kHoldFade ms; let go: back at once, the beds' own follow bringing them up from where they were
+    float from = g_hold, to = held ? std::max(0.0f, g_hold - float(frames) / (kOut * kHoldFade / 1000.0f)) : 1.0f;
+    g_hold = to;
+    if (held && from <= 0) {
+        // silent and held: nothing moves on, the shots under way are dropped, and the beds come back from nothing
+        for (Once& o : g_shots) o = Once{};
+        for (uint32_t k = 0; k < g_made; k++) g_beds[k].level = 0;
+        return;
+    }
+    float hold_step = (to - from) / float(std::max<uint32_t>(frames, 1));
     for (uint32_t k = 0; k < g_made; k++) {
         Bed& b = g_beds[k];
         if (!b.sample || (b.want <= 0 && b.level < 1e-5f)) {
@@ -110,13 +132,14 @@ void Mix(float* stereo, float* room, uint32_t frames) {
         }
         const Sample& s = *b.sample;
         double step = double(s.rate) / kOut, n = double(s.pcm.size());
-        float held = Dull::Pole(b.dull);  // the corner moves a block at a time
+        float pole = Dull::Pole(b.dull);  // the corner moves a block at a time
         b.dull += (b.want_dull - b.dull) * std::min(1.0f, kFollow * float(frames));
         for (uint32_t i = 0; i < frames; i++) {
             b.level += (b.want - b.level) * kFollow;
             // the right ear half a loop on: the same recording, heard all round
-            stereo[i * 2] += b.filter.Run(0, Read(s, b.at, true), held) * b.level;
-            stereo[i * 2 + 1] += b.filter.Run(1, Read(s, b.at + n / 2, true), held) * b.level;
+            float h = from + hold_step * float(i);
+            stereo[i * 2] += b.filter.Run(0, Read(s, b.at, true), pole) * b.level * h;
+            stereo[i * 2 + 1] += b.filter.Run(1, Read(s, b.at + n / 2, true), pole) * b.level * h;
             b.at += step;
             if (b.at >= n) b.at -= n;
         }
@@ -127,7 +150,7 @@ void Mix(float* stereo, float* room, uint32_t frames) {
         double step = double(s.rate) / kOut, n = double(s.pcm.size());
         float left = std::sqrt(0.5f * (1 - o.pan)), right = std::sqrt(0.5f * (1 + o.pan));
         for (uint32_t i = 0; i < frames && o.at < n - 1; i++) {
-            float x = o.filter.Run(0, Read(s, o.at, false), o.pole) * o.level;
+            float x = o.filter.Run(0, Read(s, o.at, false), o.pole) * o.level * (from + hold_step * float(i));
             stereo[i * 2] += x * left;
             stereo[i * 2 + 1] += x * right;
             if (room) room[i] += x * o.room;
