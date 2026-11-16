@@ -117,6 +117,9 @@ struct Sound {
     bool way_placed = false;
     float way_at[3] = {};
     float way_heard[3] = {};
+    // the pathing's last answer and where the listener and the sound were when it last changed (a stale answer)
+    float way_sh[4] = {};
+    float way_ear[3] = {}, way_src[3] = {};
 };
 
 std::mutex g_mutex;  // the members below
@@ -1395,6 +1398,24 @@ void Run() {
             const float* sh = ways ? out.pathing.shCoeffs : nullptr;
             constexpr float kW = 0.2820948f;
             if (!sh || !(sh[0] > 1e-4f * kW) || target[1] > 0.98f) continue;
+            // Steam Audio leaves a sound's last way in its outputs when it finds none (out of the probes' reach, or
+            // every way thrown out by the validation): an answer the same to the last bit after the listener or the
+            // sound has moved half a metre is that one left over, not a way (measured 16 Nov 2026: a gate's winding
+            // 16 m and 40 m off behind walls came by the way found beside it, 6 m long)
+            {
+                Sound& so = sound->second;
+                bool same = std::memcmp(so.way_sh, sh, sizeof so.way_sh) == 0;
+                if (!same) {
+                    std::memcpy(so.way_sh, sh, sizeof so.way_sh);
+                    std::memcpy(so.way_ear, listener, sizeof so.way_ear);
+                    std::memcpy(so.way_src, j.pos, sizeof so.way_src);
+                } else {
+                    float moved = 0;
+                    for (int k = 0; k < 3; k++)
+                        moved = std::max({moved, std::fabs(listener[k] - so.way_ear[k]), std::fabs(j.pos[k] - so.way_src[k])});
+                    if (moved * meters > 0.5f) continue;
+                }
+            }
             float from[3] = {-sh[1], sh[2], -sh[3]};
             float length = std::sqrt(from[0] * from[0] + from[1] * from[1] + from[2] * from[2]);
             if (!(length > 0.2f * sh[0])) continue;  // from all round: no doorway to hear it from
