@@ -157,10 +157,16 @@ int Far(float pos[kFar][3], float open[kFar], float& reach);  // the mixer: the 
 // full within `within` (the sounds' units), halved with each doubling past, through the walls and by the way round,
 // answered by the room. n 0: they play as the title made them
 constexpr int kSpeakers = 4;
-constexpr uint32_t kSpeakerSound = 0xFFFFFFE0u;  // the speakers' ids among the sounds, kSpeakerSound + k
+constexpr uint32_t kSpeakerSound = 0xFFFFFFE0u;  // the places' ids among the sounds, kSpeakerSound + group * kSpeakers + k
 void SetSpeakers(const uint32_t* keys, size_t keys_n, const float (*points)[3], size_t n, float within);
-bool Announced(uint32_t key);                        // the mixer: one of the keys, with speakers to hear it from
-int Speakers(float pos[kSpeakers][3], float& within);  // the mixer: the nearest, in the sounds' space; 0 with none
+// The same for any sound a title plays flat that has a place in the level (a player's report, 15 Nov 2026: a gate's
+// winding heard as loud through walls as beside it): kRelays groups, each its own sounds and places. Group 0 is the
+// speakers', which `carries` (heard, dull, behind walls: a public address fills its place); a group that does not is
+// heard through the walls and round them as any sound made there
+constexpr int kRelays = 4;
+void SetRelay(int group, const uint32_t* keys, size_t keys_n, const float (*points)[3], size_t n, float within, bool carries);
+int Announced(uint32_t key);  // the mixer: the key's group + 1 while it has places to be heard from, else 0
+int Speakers(int group, float pos[kSpeakers][3], float& within, bool& carries);  // the mixer: the nearest, in the sounds' space
 
 // Hearing it work (a game's developer tools). A test sound left where the listener's space is now (the game's eye),
 // made by the mixer and heard through the walls as any 3D sound; placing it again moves it

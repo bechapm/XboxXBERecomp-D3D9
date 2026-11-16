@@ -792,8 +792,8 @@ void MixDetour(Detour& way, uint32_t sound, const float from[3], const float gai
 }
 
 // an announcement's sound this block, kept by MixVoice for MixSpeakers (one at a time; the output thread alone)
-std::vector<float> g_speaker_dry;
-bool g_speaker_fed = false;
+std::vector<float> g_speaker_dry[audio::acoustics::kRelays];
+bool g_speaker_fed[audio::acoustics::kRelays] = {};
 
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
@@ -914,12 +914,13 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     v.send = got ? send : 0.0f;
     // an announcement with no place, while the game has speakers for it: kept for them (MixSpeakers), not played flat.
     // Its channels as one, at the voice's own level
-    if (!at.on && !g_speaker_fed && audio::acoustics::Announced(v.key)) {
+    if (int group = at.on ? 0 : audio::acoustics::Announced(v.key); group && !g_speaker_fed[group - 1]) {
+        std::vector<float>& kept = g_speaker_dry[group - 1];
         float own = OwnLevel(v) / float(std::max<uint32_t>(channels, 1));
-        g_speaker_dry.assign(frames, 0.0f);
+        kept.assign(frames, 0.0f);
         for (uint32_t i = 0; i < got; i++)
-            for (uint32_t c = 0; c < channels; c++) g_speaker_dry[i] += rows[size_t(i) * kRows + c] * own;
-        g_speaker_fed = true;
+            for (uint32_t c = 0; c < channels; c++) kept[i] += rows[size_t(i) * kRows + c] * own;
+        g_speaker_fed[group - 1] = true;
         got = 0;
     }
     // a mono stream or loop with no place, while the game has far points for one: kept for them (MixFar), not played
@@ -1063,7 +1064,7 @@ void MixTest(float* bins, uint32_t frames) {
 
 // A title's announcement heard from its speakers (audio/acoustics.h, SetSpeakers): the voice's sound kept here in
 // place of being played flat, then each speaker's hearing of it placed there. The output thread alone renders
-Placed g_speaker[audio::acoustics::kSpeakers];
+Placed g_speaker[audio::acoustics::kRelays][audio::acoustics::kSpeakers];
 // Measured 15 Nov 2026 (Siberia's tannoy): panned as other placed sounds a speaker in plain sight was 4.7 dB under the
 // same line played flat, so a speaker is as loud straight ahead within its range as the line was flat (the pan's 0.707
 // made up); and through the walls alone the valve room 20 m off had it 43 dB down, under everything else, where the
@@ -1073,22 +1074,25 @@ constexpr float kSpeakerGain = 1.7f;
 constexpr float kSpeakerCarry[3] = {0.40f, 0.25f, 0.10f};
 
 void MixSpeakers(float* bins, uint32_t frames) {
-    float pos[audio::acoustics::kSpeakers][3];
-    float within = 1;
-    int n = audio::acoustics::Speakers(pos, within);
-    for (int k = 0; k < audio::acoustics::kSpeakers; k++) {
-        Placed& st = g_speaker[k];
-        if (k >= n || !g_speaker_fed) {
-            if (st.left != 0 || st.right != 0) {  // a speaker no longer heard: ramped out, its way and room with it
-                st.left = st.right = 0;
-                st.way = Detour{};
+    for (int g = 0; g < audio::acoustics::kRelays; g++) {
+        float pos[audio::acoustics::kSpeakers][3];
+        float within = 1;
+        bool carries = false;
+        int n = audio::acoustics::Speakers(g, pos, within, carries);
+        for (int k = 0; k < audio::acoustics::kSpeakers; k++) {
+            Placed& st = g_speaker[g][k];
+            if (k >= n || !g_speaker_fed[g]) {
+                if (st.left != 0 || st.right != 0) {  // a place no longer heard: ramped out, its way and room with it
+                    st.left = st.right = 0;
+                    st.way = Detour{};
+                }
+                continue;
             }
-            continue;
+            MixPlaced(st, audio::acoustics::kSpeakerSound + uint32_t(g * audio::acoustics::kSpeakers + k), pos[k], within,
+                      kSpeakerGain, carries ? kSpeakerCarry : nullptr, g_speaker_dry[g].data(), bins, frames);
         }
-        MixPlaced(st, audio::acoustics::kSpeakerSound + uint32_t(k), pos[k], within, kSpeakerGain, kSpeakerCarry,
-                  g_speaker_dry.data(), bins, frames);
+        g_speaker_fed[g] = false;
     }
-    g_speaker_fed = false;
 }
 
 // A game's own sounds (audio/sounds.h) are voices like the title's, under ids no guest object has. One that has played

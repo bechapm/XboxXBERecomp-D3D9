@@ -1869,34 +1869,54 @@ int Far(float pos[kFar][3], float open[kFar], float& reach) {
     return g_far_n;
 }
 
-std::vector<uint32_t> g_announced;           // under g_mutex (SetSpeakers)
-std::vector<std::array<float, 3>> g_speakers;  // under g_mutex, in the level
-float g_speaker_near = 1;
+struct Relay {
+    std::vector<uint32_t> keys;
+    std::vector<std::array<float, 3>> points;  // in the level
+    float within = 1;
+    bool carries = false;
+};
+Relay g_relay[kRelays];  // under g_mutex (SetRelay)
+
+void SetRelay(int group, const uint32_t* keys, size_t keys_n, const float (*points)[3], size_t n, float within, bool carries) {
+    if (group < 0 || group >= kRelays) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Relay& r = g_relay[group];
+    if (!keys || !points) keys_n = n = 0;
+    if ((n == 0) != r.points.empty()) LOGR("acoustics: relay %d heard from %zu places", group, n);
+    r.keys.assign(keys, keys + keys_n);
+    r.points.clear();
+    for (size_t k = 0; k < n; k++) r.points.push_back({points[k][0], points[k][1], points[k][2]});
+    r.within = std::max(within, 0.1f);
+    r.carries = carries;
+    for (int k = int(std::min<size_t>(n, kSpeakers)); k < kSpeakers; k++)
+        g_sounds.erase(kSpeakerSound + uint32_t(group * kSpeakers + k));
+}
 
 void SetSpeakers(const uint32_t* keys, size_t keys_n, const float (*points)[3], size_t n, float within) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (!keys || !points) keys_n = n = 0;
-    if (n != g_speakers.size()) LOGR("acoustics: announcements heard from %zu speakers", n);
-    g_announced.assign(keys, keys + keys_n);
-    g_speakers.clear();
-    for (size_t k = 0; k < n; k++) g_speakers.push_back({points[k][0], points[k][1], points[k][2]});
-    g_speaker_near = std::max(within, 0.1f);
-    for (int k = int(std::min<size_t>(n, kSpeakers)); k < kSpeakers; k++) g_sounds.erase(kSpeakerSound + uint32_t(k));
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (n != g_relay[0].points.size()) LOGR("acoustics: announcements heard from %zu speakers", keys && points ? n : 0);
+    }
+    SetRelay(0, keys, keys_n, points, n, within, true);
 }
 
-bool Announced(uint32_t key) {
-    if (!g_on || !key) return false;
+int Announced(uint32_t key) {
+    if (!g_on || !key) return 0;
     std::lock_guard<std::mutex> lock(g_mutex);
-    return !g_speakers.empty() && std::find(g_announced.begin(), g_announced.end(), key) != g_announced.end();
+    for (int g = 0; g < kRelays; g++)
+        if (!g_relay[g].points.empty() && std::find(g_relay[g].keys.begin(), g_relay[g].keys.end(), key) != g_relay[g].keys.end())
+            return g + 1;
+    return 0;
 }
 
-int Speakers(float pos[kSpeakers][3], float& within) {
-    if (!g_on) return 0;
+int Speakers(int group, float pos[kSpeakers][3], float& within, bool& carries) {
+    if (!g_on || group < 0 || group >= kRelays) return 0;
     std::lock_guard<std::mutex> lock(g_mutex);
+    const Relay& r = g_relay[group];
     // the nearest to the listener, by straight distance in the level, kept in a steady order
     std::vector<std::pair<float, size_t>> by;
-    for (size_t k = 0; k < g_speakers.size(); k++) {
-        float d[3] = {g_speakers[k][0] - g_listener[0], g_speakers[k][1] - g_listener[1], g_speakers[k][2] - g_listener[2]};
+    for (size_t k = 0; k < r.points.size(); k++) {
+        float d[3] = {r.points[k][0] - g_listener[0], r.points[k][1] - g_listener[1], r.points[k][2] - g_listener[2]};
         by.push_back({d[0] * d[0] + d[1] * d[1] + d[2] * d[2], k});
     }
     std::sort(by.begin(), by.end());
@@ -1905,12 +1925,13 @@ int Speakers(float pos[kSpeakers][3], float& within) {
     for (int k = 0; k < n; k++) chosen.push_back(by[size_t(k)].second);
     std::sort(chosen.begin(), chosen.end());
     for (int k = 0; k < n; k++) {
-        const float* at = g_speakers[chosen[size_t(k)]].data();
+        const float* at = r.points[chosen[size_t(k)]].data();
         // the level's point taken back into the sounds' space, as TestSound does
         float d[3] = {at[0] - g_origin[0], at[1] - g_origin[1], at[2] - g_origin[2]};
         for (int i = 0; i < 3; i++) pos[k][i] = d[0] * g_axes[i * 3] + d[1] * g_axes[i * 3 + 1] + d[2] * g_axes[i * 3 + 2];
     }
-    within = g_speaker_near;
+    within = r.within;
+    carries = r.carries;
     return n;
 }
 
