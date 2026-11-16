@@ -2400,6 +2400,17 @@ void D3D9Backend::SetSamplers(const State& s, const Assembled& a, const DrawText
     }
 }
 
+// a plain program's coordinates for stage n as a texture transform: its scale on the diagonal and, from a mad, its
+// offset in the third row, where a two-part coordinate's translation is (TS2's wall atlases: without the offset RTX Remix
+// read the whole texture, and its white parts, where the game shows a dark corner of it)
+static void PlainTexMatrix(const State& s, const PlainProgram& p, int n, float m[16]) {
+    const auto& c = s.vsc[size_t(p.tex_scale[n])];
+    float ox = 0, oy = 0;
+    if (p.tex_offset[n] >= 0) ox = s.vsc[size_t(p.tex_offset[n])][0], oy = s.vsc[size_t(p.tex_offset[n])][1];
+    const float t[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, ox, oy, 1, 0, 0, 0, 0, 1};
+    std::memcpy(m, t, sizeof(t));
+}
+
 // Direct3D 9's fixed function pipeline set up as the title set the console's: its transforms (with the guest viewport
 // and Direct3D 9's pixel centres folded into the projection, the host viewport being the whole target), lights,
 // material, texture stages and fog
@@ -2460,8 +2471,8 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
             Tss(n, D3DTSS_TEXCOORDINDEX, in >= 0 ? sh.usages[size_t(in)].index : 0);
             Tss(n, D3DTSS_TEXTURETRANSFORMFLAGS, scale >= 0 ? D3DTTFF_COUNT2 : 0);
             if (scale >= 0) {
-                const auto& c = s.vsc[size_t(scale)];
-                const float m[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                float m[16];
+                PlainTexMatrix(s, *sh.plain, n, m);
                 dev_->SetTransform(D3DTRANSFORMSTATETYPE(D3DTS_TEXTURE0 + n), reinterpret_cast<const D3DMATRIX*>(m));
             }
             SetTexture(n, stages.res[n]);
@@ -2508,11 +2519,7 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
             int in = sh.plain->tex[i], scale = sh.plain->tex_scale[i];
             tci = in >= 0 ? sh.usages[size_t(in)].index : 0;
             ttff = scale >= 0 ? D3DTTFF_COUNT2 : 0;
-            if (scale >= 0) {
-                const auto& c = s.vsc[size_t(scale)];
-                const float m[16] = {c[0], 0, 0, 0, 0, c[1], 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-                std::memcpy(tm, m, sizeof(tm));
-            }
+            if (scale >= 0) PlainTexMatrix(s, *sh.plain, int(i), tm);
         }
         TextureDesc d;
         if (stages.info[i].rect && s.textures[i] && Describe(s.textures[i], d)) {

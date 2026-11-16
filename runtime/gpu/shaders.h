@@ -94,6 +94,7 @@ struct PlainProgram {
     bool colour_swapped = false;  // as .zyxw: red and blue change places
     int tex[4] = {-1, -1, -1, -1};        // what reaches oTn
     int tex_scale[4] = {-1, -1, -1, -1};  // the constant oTn is multiplied by
+    int tex_offset[4] = {-1, -1, -1, -1};  // the constant then added (a mad: an atlas's sub-rectangle)
 };
 bool PlainTransform(const std::vector<uint32_t>& program, PlainProgram& out);
 // the program reads constant register reg (hardware order: c-96 is 0) by its number, not through a0

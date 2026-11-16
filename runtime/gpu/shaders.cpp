@@ -1261,7 +1261,17 @@ bool PlainTransform(const std::vector<uint32_t>& prog, PlainProgram& out) {
                     return false;
                 }
                 break;
-            case kMacMad:  // the second screen line
+            case kMacMad:  // coordinates scaled and moved (TS2's wall atlases), or the second screen line
+                if (target >= kOutT0 && target <= kOutT3) {
+                    int s = target - kOutT0;
+                    if (mask != 0xF || t.tex[s] >= 0 || !Whole(a, kMuxInput) || !Whole(b, kMuxConst) ||
+                        !Whole(c, kMuxConst))
+                        return false;
+                    t.tex[s] = int(a.reg);
+                    t.tex_scale[s] = int(b.reg);
+                    t.tex_offset[s] = int(c.reg);
+                    break;
+                }
                 if (target != kOutPos || mask != 0xE || t.screen_scale < 0 || t.screen_offset >= 0 || !Whole(a, kMuxTemp) ||
                     a.reg != kTempPos || !Is(b, kMuxTemp) || b.reg != 1 || !Swizzled(b, 0, 0, 0, 0) || !Whole(c, kMuxConst))
                     return false;
