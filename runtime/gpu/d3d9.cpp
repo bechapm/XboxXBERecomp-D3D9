@@ -2127,6 +2127,20 @@ InputUsage FixedUsage(int reg) {
     return {0xFF, 0};
 }
 
+// XBE_D3D9_LOG_VS=<program hash, hex>: a diagnostic. For that program's first draws, what each input register is, how
+// the declaration takes it (in place or converted), its first vertex, and the plain transform found; and in
+// SetFixedFunction the coordinate set and transform each stage is given (TS2's white wall atlases under RTX Remix)
+static uint64_t LogVsHash() {
+    static uint64_t h = [] {
+        const char* e = std::getenv("XBE_D3D9_LOG_VS");
+        return e ? std::strtoull(e, nullptr, 16) : 0ull;
+    }();
+    return h;
+}
+static bool LogVsNow(const State& s, int& said) {
+    return LogVsHash() && s.vs && s.vs->hash == LogVsHash() && said < 24;
+}
+
 // Each input register as a vertex element: read in place where Direct3D 9 has its type, else converted on the CPU into
 // one more stream. Fixed function takes positions and normals as three floats, colours as D3DCOLOR (the only colour a
 // tool such as RTX Remix reads) and coordinates as the floats the title gave; a pretransformed position is read as x
@@ -2189,6 +2203,39 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
     std::sort(el.begin(), el.end(), [](const DeclElement& x, const DeclElement& y) {
         return x.stream != y.stream ? x.stream < y.stream : x.offset < y.offset;
     });
+    static int said = 0;
+    if (LogVsNow(s, said)) {
+        said++;
+        const char* road = sh.plain ? "plain (fixed function)" : sh.ffp ? "fixed" : sh.prog ? "program" : "habit";
+        LOGI("vslog %016llX: %s, %u vertices, regs %04X, buffers %u", static_cast<unsigned long long>(s.vs->hash), road,
+             a.vertex_count, unsigned(a.regs), a.buffer_count);
+        if (sh.plain) {
+            const PlainProgram& p = *sh.plain;
+            LOGI("vslog   plain: position v%d mv c%d proj c%d colour v%d tex v%d v%d v%d v%d scale c%d c%d c%d c%d offset "
+                 "c%d c%d c%d c%d", p.position, p.modelview, p.projection, p.colour, p.tex[0], p.tex[1], p.tex[2],
+                 p.tex[3], p.tex_scale[0], p.tex_scale[1], p.tex_scale[2], p.tex_scale[3], p.tex_offset[0],
+                 p.tex_offset[1], p.tex_offset[2], p.tex_offset[3]);
+            for (int t = 0; t < 4; t++)
+                if (p.tex_scale[t] >= 0) {
+                    const auto& c = s.vsc[size_t(p.tex_scale[t])];
+                    LOGI("vslog   oT%d scale c%d = %g %g %g %g", t, p.tex_scale[t], c[0], c[1], c[2], c[3]);
+                }
+        }
+        for (int r = 0; r < 16; r++) {
+            if (!((a.regs >> r) & 1)) continue;
+            const VertexElement& e = a.elements[size_t(r)];
+            const VertexBuffer& b = a.buffers[e.buffer];
+            uint32_t dec = uint32_t(a.decode >> (r * 4)) & 15;
+            float f[4] = {};
+            if (b.src && e.offset + 16u <= b.bytes) ReadElement(e.format, dec, b.src + e.offset, f);
+            LOGI("vslog   v%d: program usage %u/%u, format %u decode %u buffer %u offset %u stride %u, vertex 0 = %g %g %g %g",
+                 r, sh.usages[size_t(r)].usage, sh.usages[size_t(r)].index, unsigned(e.format), dec, unsigned(e.buffer),
+                 unsigned(e.offset), b.stride, f[0], f[1], f[2], f[3]);
+        }
+        for (const DeclElement& d : el)
+            LOGI("vslog   element: stream %u offset %u type %u usage %u index %u, %s v%d decode %u", d.stream, d.offset,
+                 d.type, d.usage, d.index, d.reg >= 0 ? "converted from" : "in place", d.reg, d.decode);
+    }
 }
 
 IDirect3DVertexDeclaration9* D3D9Backend::EnsureDeclaration(const std::vector<DeclElement>& el) {
@@ -2531,6 +2578,12 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
         }
         Tss(i, D3DTSS_TEXTURETRANSFORMFLAGS, ttff);
         if (ttff) dev_->SetTransform(D3DTRANSFORMSTATETYPE(D3DTS_TEXTURE0 + i), reinterpret_cast<const D3DMATRIX*>(tm));
+        static int said = 0;
+        if (LogVsNow(s, said)) {
+            said++;
+            LOGI("vslog   stage %u: texcoord index %u, flags %u, matrix %g %g / %g %g / %g %g", unsigned(i), tci, ttff,
+                 tm[0], tm[1], tm[4], tm[5], tm[8], tm[9]);
+        }
         // a stage reading no texture reads white, as the console does
         SetTexture(i, stages.res[i] ? stages.res[i] : white_.Get());
     }
