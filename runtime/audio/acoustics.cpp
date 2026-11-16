@@ -1399,6 +1399,10 @@ void Run() {
             float length = std::sqrt(from[0] * from[0] + from[1] * from[1] + from[2] * from[2]);
             if (!(length > 0.2f * sh[0])) continue;  // from all round: no doorway to hear it from
             float along = kW / sh[0] / meters;  // the way's length in the level's units
+            // and no way is shorter than the straight line: one came out 6 m long for a sound 16 m off behind walls,
+            // and another 41 m off, and brought each back whole (measured 16 Nov 2026, a gate's winding in a sewer)
+            float apart[3] = {j.pos[0] - listener[0], j.pos[1] - listener[1], j.pos[2] - listener[2]};
+            along = std::max(along, std::sqrt(apart[0] * apart[0] + apart[1] * apart[1] + apart[2] * apart[2]));
             // what the bends leave of each band, next to the band they leave most of: the way's length already makes
             // it quieter, and Steam Audio's own loss at a bend on top of that was more than a doorway sounds like
             const float* eq = out.pathing.eqCoeffs;

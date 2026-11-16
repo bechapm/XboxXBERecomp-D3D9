@@ -914,10 +914,10 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
     v.send = got ? send : 0.0f;
     // an announcement with no place, while the game has speakers for it: kept for them (MixSpeakers), not played flat.
     // Its channels as one, at the voice's own level
-    if (int group = at.on ? 0 : audio::acoustics::Announced(v.key); group && !g_speaker_fed[group - 1]) {
+    if (int group = at.on ? 0 : audio::acoustics::Announced(v.key); group) {
         std::vector<float>& kept = g_speaker_dry[group - 1];
         float own = OwnLevel(v) / float(std::max<uint32_t>(channels, 1));
-        kept.assign(frames, 0.0f);
+        if (!g_speaker_fed[group - 1]) kept.assign(frames, 0.0f);  // the block's first; a second is added to it
         for (uint32_t i = 0; i < got; i++)
             for (uint32_t c = 0; c < channels; c++) kept[i] += rows[size_t(i) * kRows + c] * own;
         g_speaker_fed[group - 1] = true;
