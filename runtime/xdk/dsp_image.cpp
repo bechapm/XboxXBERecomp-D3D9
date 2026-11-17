@@ -303,6 +303,7 @@ std::vector<Effect> g_effects;
 std::map<uint32_t, Buffer> g_x;  // X memory buffers by address, as the effects name them
 Reverb g_reverb;                 // the image's I3DL2 reverb, driven by SetI3DL2Listener
 int32_t g_reverb_index = -1;
+bool g_reverb_off = false;        // StandDown: the reverb adds to its outputs, so leaving it out leaves them as they were
 
 uint32_t Word(const Effect& e, uint32_t i) { return R32(e.state + i * 4) & 0xFFFFFF; }
 
@@ -383,7 +384,7 @@ void RunEffect(Effect& e, uint32_t index, uint32_t n) {
         case Kind::Mixer: RunMixer(e, n); break;
         case Kind::Filter: RunFilter(e, n); break;
         case Kind::Reverb:
-            if (int32_t(index) == g_reverb_index) RunReverb(e, n);
+            if (int32_t(index) == g_reverb_index && !g_reverb_off) RunReverb(e, n);
             break;
         case Kind::Crosstalk: RunCrosstalk(e, n); break;
         case Kind::None: break;
@@ -442,6 +443,8 @@ void Load(const std::vector<uint8_t>& img, size_t table, const std::vector<uint3
 bool Loaded() { return !g_effects.empty(); }
 
 void SetListener(const float* p) { g_reverb.Set(p); }
+
+void StandDown(bool reverb_off) { g_reverb_off = reverb_off; }
 
 void Run(float* bins, uint32_t frames) {
     for (uint32_t start = 0; start < frames; start += kFrame) {

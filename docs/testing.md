@@ -44,3 +44,20 @@ the same bytes: random numbers, threads and anything seeded from the time at boo
 `testdrive::SnapAs(name)` saves the next presented frame as `<name>.bmp` in `XBE_TEST_DIR`, top down from the back
 buffer as it is about to be shown, under Direct3D 9 and Direct3D 12 alike. A game's own test route calls it. The file
 `snap` does the same with a running number.
+
+## Comparing two runs
+
+Two runs of one build do not match byte for byte, even in lockstep: a held weapon sways, guards walk and effects
+animate. On one title 8 to 15% of pixels differed between two runs of the same build under Direct3D 9, so "identical"
+is not a test a change can pass or fail. Run the build twice as a control, and for a before and after compare where
+the differences are as well as how many. The static world should be exactly equal in both pairs, and the before and
+after should differ in nothing the control does not. Open any frame that stands out: on that title the largest was a
+screen of animated noise.
+
+A difference alone proves little. Keep a count of what the change should do (draws made, draws of each kind), and ask
+of a count of 0 whether that check can fire at all.
+
+## Reports
+
+`XBE_REPORT_LOG=from-to,from-to` writes what visibility tests answered in those presents to `reports.log` in
+`XBE_TEST_DIR`.

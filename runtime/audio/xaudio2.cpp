@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <xaudio2.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <thread>
 #include <vector>
@@ -16,6 +17,50 @@
 #include "core/log.h"
 
 namespace audio {
+
+namespace {
+
+// XBE_AUDIO_CAPTURE=<file.wav>: everything the mixer sends out, as 32 bit float stereo, so a test run can be listened to
+// afterwards (it is written whether or not XBE_MUTE silences the speakers). The header is brought up to date every
+// second, so a run that is stopped still leaves a file that plays
+struct Capture {
+    FILE* f = nullptr;
+    uint32_t frames = 0;
+    void Header() {
+        uint32_t data = frames * 8, fmt[4] = {0x00020003u, kRate, kRate * 8, 0x00200008u};
+        uint32_t head[5] = {0x46464952u, 36 + data, 0x45564157u, 0x20746D66u, 16};  // RIFF, WAVE, "fmt "
+        uint32_t tail[2] = {0x61746164u, data};                                        // "data"
+        std::fseek(f, 0, SEEK_SET);
+        std::fwrite(head, 4, 5, f);
+        std::fwrite(fmt, 4, 4, f);
+        std::fwrite(tail, 4, 2, f);
+        std::fseek(f, 0, SEEK_END);
+    }
+    void Open() {
+        const char* path = std::getenv("XBE_AUDIO_CAPTURE");
+        if (!path || !*path) return;
+        f = std::fopen(path, "wb");
+        if (!f) {
+            LOGE("audio: %s could not be written", path);
+            return;
+        }
+        Header();
+        LOGI("audio: the mix goes to %s", path);
+    }
+    void Write(const float* b, uint32_t n) {
+        if (!f) return;
+        std::fwrite(b, 8, n, f);
+        if ((frames + n) / kRate != frames / kRate) {
+            frames += n;
+            Header();
+            std::fflush(f);
+        } else {
+            frames += n;
+        }
+    }
+};
+
+}  // namespace
 
 void StartOutput(std::function<void(float*, uint32_t)> render) {
     std::thread([render] {
@@ -39,6 +84,8 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         }
         if (std::getenv("XBE_MUTE")) master->SetVolume(0.0f);  // test runs: everything runs, nothing is heard
         voice->Start();
+        Capture capture;
+        capture.Open();
         constexpr uint32_t kFrames = kRate / 100;
         constexpr uint32_t kMinQueued = 3;
         constexpr uint32_t kMaxQueued = 10;
@@ -60,6 +107,7 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
             }
             float* b = &bufs[(n % kSlots) * kFrames * 2];
             render(b, kFrames);
+            capture.Write(b, kFrames);
             XAUDIO2_BUFFER xb{};
             xb.AudioBytes = kFrames * 8;
             xb.pAudioData = reinterpret_cast<const BYTE*>(b);

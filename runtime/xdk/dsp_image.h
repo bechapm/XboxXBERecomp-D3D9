@@ -14,6 +14,9 @@ void Load(const std::vector<uint8_t>& img, size_t table, const std::vector<uint3
 bool Loaded();
 // DSI3DL2LISTENER as 12 floats
 void SetListener(const float* p);
+// the image's reverb left out of Run or run again: the host answers the sounds with the level's own rooms instead
+// (audio/acoustics.h, Room)
+void StandDown(bool reverb_off);
 // frames of kBins interleaved: the voice processor's mix in, the speaker bins 0..5 out
 void Run(float* bins, uint32_t frames);
 
