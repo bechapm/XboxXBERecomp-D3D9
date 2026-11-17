@@ -3020,7 +3020,18 @@ bool D3D9Backend::PlainTakeOver(const State& s, const Assembled& a, DrawShaders&
     }
     dev_->SetVertexShader(sh.vs);
     SetShaderConstants(s, sh, stages, size);
-    for (DWORD i = 0; i < 4; i++) SetTexture(i, stages.res[i]);
+    for (DWORD i = 0; i < 4; i++) {
+        // a texture a mod bound in its hook in place of the title's stays: a tool such as RTX Remix reads its picture
+        // from it (TS2-RTX bakes a dark layer's colour into a copy of its texture, which Remix cannot take from the
+        // vertices). The fixed function preparation bound the title's or white_
+        ComPtr<IDirect3DBaseTexture9> now;
+        dev_->GetTexture(i, &now);
+        if (now && now.Get() != stages.res[i] && now.Get() != static_cast<IDirect3DBaseTexture9*>(white_.Get())) {
+            bound_tex_[i] = now.Get();
+            continue;
+        }
+        SetTexture(i, stages.res[i]);
+    }
     dev_->SetVertexDeclaration(decl);
     SetOutputState(s, a, false);
     return true;
