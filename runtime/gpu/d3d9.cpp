@@ -2097,8 +2097,8 @@ bool D3D9Backend::FixedFunctionDraws(const State& s, const Assembled& a, const D
 }
 
 // What of a draw's state fixed function cannot draw, and on which stage. Under a pixel shader the stages are the textures
-// bound, ColorOp being unread. A rect texture's coordinates are in texels: with no shader SetFixedFunction scales them,
-// the branch for a program under one does not, and the program's own pixel shader did, so there it is not drawn fixed
+// bound, ColorOp being unread. A rect texture's coordinates are in texels: SetFixedFunction scales them, under a pixel
+// shader too, but not after a projection
 D3D9Backend::StageLackAt D3D9Backend::Lacking(const State& s, const Assembled& a, const DrawTextures& stages) const {
     if (s.rs[kRsLighting] && s.rs[kRsTwoSidedLighting] && !a.pretransformed) return {StageLack::two_sided, -1};
     for (int i = 0; i < 4; i++) {
@@ -2109,7 +2109,7 @@ D3D9Backend::StageLackAt D3D9Backend::Lacking(const State& s, const Assembled& a
         if (t[kTssAlphaKill] == kAlphaKillEnable) return {StageLack::alpha_kill, i};
         if (info.shadow) return {StageLack::shadow, i};
         if (info.flags & kTexWide) return {StageLack::wide, i};
-        if (info.rect && (s.ps || (t[kTssTextureTransformFlags] & kTtffProjected))) return {StageLack::rect, i};
+        if (info.rect && (t[kTssTextureTransformFlags] & kTtffProjected)) return {StageLack::rect, i};
     }
     return {StageLack::none, -1};
 }
@@ -2207,18 +2207,18 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
     if (LogVsNow(s, said)) {
         said++;
         const char* road = sh.plain ? "plain (fixed function)" : sh.ffp ? "fixed" : sh.prog ? "program" : "habit";
-        LOGI("vslog %016llX: %s, %u vertices, regs %04X, buffers %u", static_cast<unsigned long long>(s.vs->hash), road,
+        LOGR("vslog %016llX: %s, %u vertices, regs %04X, buffers %u", static_cast<unsigned long long>(s.vs->hash), road,
              a.vertex_count, unsigned(a.regs), a.buffer_count);
         if (sh.plain) {
             const PlainProgram& p = *sh.plain;
-            LOGI("vslog   plain: position v%d mv c%d proj c%d colour v%d tex v%d v%d v%d v%d scale c%d c%d c%d c%d offset "
+            LOGR("vslog   plain: position v%d mv c%d proj c%d colour v%d tex v%d v%d v%d v%d scale c%d c%d c%d c%d offset "
                  "c%d c%d c%d c%d", p.position, p.modelview, p.projection, p.colour, p.tex[0], p.tex[1], p.tex[2],
                  p.tex[3], p.tex_scale[0], p.tex_scale[1], p.tex_scale[2], p.tex_scale[3], p.tex_offset[0],
                  p.tex_offset[1], p.tex_offset[2], p.tex_offset[3]);
             for (int t = 0; t < 4; t++)
                 if (p.tex_scale[t] >= 0) {
                     const auto& c = s.vsc[size_t(p.tex_scale[t])];
-                    LOGI("vslog   oT%d scale c%d = %g %g %g %g", t, p.tex_scale[t], c[0], c[1], c[2], c[3]);
+                    LOGR("vslog   oT%d scale c%d = %g %g %g %g", t, p.tex_scale[t], c[0], c[1], c[2], c[3]);
                 }
         }
         for (int r = 0; r < 16; r++) {
@@ -2228,12 +2228,12 @@ void D3D9Backend::BuildDeclaration(const State& s, const Assembled& a, const Dra
             uint32_t dec = uint32_t(a.decode >> (r * 4)) & 15;
             float f[4] = {};
             if (b.src && e.offset + 16u <= b.bytes) ReadElement(e.format, dec, b.src + e.offset, f);
-            LOGI("vslog   v%d: program usage %u/%u, format %u decode %u buffer %u offset %u stride %u, vertex 0 = %g %g %g %g",
+            LOGR("vslog   v%d: program usage %u/%u, format %u decode %u buffer %u offset %u stride %u, vertex 0 = %g %g %g %g",
                  r, sh.usages[size_t(r)].usage, sh.usages[size_t(r)].index, unsigned(e.format), dec, unsigned(e.buffer),
                  unsigned(e.offset), b.stride, f[0], f[1], f[2], f[3]);
         }
         for (const DeclElement& d : el)
-            LOGI("vslog   element: stream %u offset %u type %u usage %u index %u, %s v%d decode %u", d.stream, d.offset,
+            LOGR("vslog   element: stream %u offset %u type %u usage %u index %u, %s v%d decode %u", d.stream, d.offset,
                  d.type, d.usage, d.index, d.reg >= 0 ? "converted from" : "in place", d.reg, d.decode);
     }
 }
@@ -2516,12 +2516,22 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
         for (DWORD n = 0; n < 4; n++) {
             int in = sh.plain->tex[n], scale = sh.plain->tex_scale[n];
             Tss(n, D3DTSS_TEXCOORDINDEX, in >= 0 ? sh.usages[size_t(in)].index : 0);
-            Tss(n, D3DTSS_TEXTURETRANSFORMFLAGS, scale >= 0 ? D3DTTFF_COUNT2 : 0);
-            if (scale >= 0) {
-                float m[16];
-                PlainTexMatrix(s, *sh.plain, n, m);
-                dev_->SetTransform(D3DTRANSFORMSTATETYPE(D3DTS_TEXTURE0 + n), reinterpret_cast<const D3DMATRIX*>(m));
+            float m[16];
+            std::memcpy(m, kIdentity, sizeof(m));
+            bool moved = scale >= 0;
+            if (moved) PlainTexMatrix(s, *sh.plain, int(n), m);
+            // a rect texture's coordinates are in texels, which the title's pixel shader scaled: here the transform does
+            // (TS2's wall atlases stayed programs for it, and RTX Remix read their coordinates raw: white walls)
+            TextureDesc d;
+            if (stages.info[n].rect && s.textures[n] && Describe(s.textures[n], d)) {
+                const float texels[16] = {1.0f / d.width, 0, 0, 0, 0, 1.0f / d.height, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                float scaled[16];
+                MatMul(m, texels, scaled);
+                std::memcpy(m, scaled, sizeof(m));
+                moved = true;
             }
+            Tss(n, D3DTSS_TEXTURETRANSFORMFLAGS, moved ? D3DTTFF_COUNT2 : 0);
+            if (moved) dev_->SetTransform(D3DTRANSFORMSTATETYPE(D3DTS_TEXTURE0 + n), reinterpret_cast<const D3DMATRIX*>(m));
             SetTexture(n, stages.res[n]);
         }
         return;
@@ -2581,7 +2591,7 @@ void D3D9Backend::SetFixedFunction(const State& s, const Assembled& a, const Dra
         static int said = 0;
         if (LogVsNow(s, said)) {
             said++;
-            LOGI("vslog   stage %u: texcoord index %u, flags %u, matrix %g %g / %g %g / %g %g", unsigned(i), tci, ttff,
+            LOGR("vslog   stage %u: texcoord index %u, flags %u, matrix %g %g / %g %g / %g %g", unsigned(i), tci, ttff,
                  tm[0], tm[1], tm[4], tm[5], tm[8], tm[9]);
         }
         // a stage reading no texture reads white, as the console does
