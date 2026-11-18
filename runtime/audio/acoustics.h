@@ -55,6 +55,22 @@ void SetSoundSpace(const float origin[3], const float axes[9]);
 void SetHearing(bool on, const float pos[3], const float front[3], const float top[3]);
 bool Hearing(float pos[3], float front[3], float top[3]);
 
+// Doors. A level's doors are a title's objects, not its walls, so the scene has a hole where each stands and a sound
+// behind a closed door came through whole, or by a way round that led through the door itself (player report, 12 Nov 2026: a
+// mine behind a closed door). A game gives the doors that are closed now, as often as the set changes: each the four
+// corners of the doorway it fills, in the level and in order round it, and what it is made of. They stand in the
+// scene as the walls do until the next list: a sound behind one is heard through it by its material, a way round that
+// led through it is found blocked (Steam Audio checks each way against the scene) and another looked for, and the
+// room's echo answers off it. An open door is not in the list. (A first version tested the straight line and the way's
+// last leg against the doors' boxes: a way arrives from a made-up point along its direction, not from the doorway, and
+// passed; and a door mesh swapped in and out of the scene blocked nothing.) Each change builds the level again with the
+// doors in it, on the rays' thread: tens of milliseconds there, nothing on the game's or the mixer's
+struct Door {
+    float corner[4][3];
+    Material made;
+};
+void SetDoors(const Door* doors, size_t n);
+
 // on, and how much of the blocking is heard, 0 to 1 (the settings file's acoustics and acoustics_strength; XBE_ACOUSTICS
 // 0 or 1 overrides on; XBE_ACOUSTICS_ALTERNATE=<seconds> switches it on and off that often, to hear the difference in one
 // test run)

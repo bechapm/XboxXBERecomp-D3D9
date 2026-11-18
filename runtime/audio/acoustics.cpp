@@ -38,6 +38,7 @@ namespace {
 #define IPL_FUNCS(X)                                                                                              \
     X(iplContextCreate) X(iplContextRelease) X(iplEmbreeDeviceCreate) X(iplSceneCreate) X(iplSceneRelease)      \
     X(iplSceneCommit) X(iplStaticMeshCreate) X(iplStaticMeshRelease) X(iplStaticMeshAdd) X(iplSimulatorCreate)    \
+    X(iplStaticMeshRemove)                                                                                        \
     X(iplSimulatorSetScene) X(iplSimulatorCommit) X(iplSimulatorSetSharedInputs) X(iplSimulatorRunDirect)        \
     X(iplSourceCreate) X(iplSourceRelease) X(iplSourceAdd) X(iplSourceRemove) X(iplSourceSetInputs)               \
     X(iplSourceGetOutputs) X(iplHRTFCreate) X(iplBinauralEffectCreate) X(iplBinauralEffectRelease)                \
@@ -70,7 +71,7 @@ constexpr int kSurfaces = 3;                           // walls between counted 
 // A blocked sound keeps only what its walls pass: one thin wall (a face of concrete, wood or glass) leaves a dull sound,
 // a thick wall (two faces) or two walls next to nothing, and a sound with an opening near it is heard through the
 // opening (Way). There was a floor under it, the least of each band any blocked sound kept (-6, -10.5 and -16.5 dB),
-// and with it a person was heard walking outside a closed brick building (Ben, 11 Nov 2026). Under kSilent, nothing
+// and with it a person was heard walking outside a closed brick building (player report, 11 Nov 2026). Under kSilent, nothing
 constexpr float kSilent = 0.003f;  // -50 dB
 constexpr float kFollow = 0.3f;  // each mix block moves this much of the way to the latest result, about 30 ms
 // Steam Audio's transmission is a wall's own (a wood wall passes 1.4% of the middle band, concrete 0.2%), and all of
@@ -119,6 +120,9 @@ struct Sound {
 
 std::mutex g_mutex;  // the members below
 std::condition_variable g_wake;
+std::vector<Door> g_doors;    // the closed ones, in the level (SetDoors)
+uint64_t g_doors_list = 1;    // counts the lists given
+
 std::unordered_map<uint32_t, Sound> g_sounds;
 std::optional<Scene> g_pending;  // a level for the thread to build
 bool g_scene = false;            // a level is built and in use
@@ -187,7 +191,7 @@ constexpr int64_t kRoomRestMs = 250;
 // nave (11% to 25% outdoors, 27% to 90% in a nave, 13% in a crypt)
 constexpr float kRoomNear = 3.0f;    // metres
 // (-4 dB, all of the ring's length in the level and the echoes raised up to 12 dB was "way too overpowering" in a nave
-// with the music off, Ben, 12 Nov 2026: now -9, half the length's dB, and 6)
+// with the music off, player report, 12 Nov 2026: now -9, half the length's dB, and 6)
 constexpr float kRoomWet = -9.0f;    // dB at level 1
 constexpr float kRoomRing = 1.5f;    // seconds
 constexpr float kRoomEarly = -3.0f;  // dB at level 1
@@ -221,7 +225,7 @@ float Closed(float open) {
     return c * c * (3 - 2 * c);
 }
 // Under the open sky there is no reverberation, but there are echoes: a shot heard off cliffs and a dam a second or two
-// later (Ben, 11 Nov 2026: a sniper shot in Siberia's valley sounded as it did indoors). The trace measured (Fit) is
+// later (player report, 11 Nov 2026: a sniper shot in Siberia's valley sounded as it did indoors). The trace measured (Fit) is
 // kept for two seconds, and its strongest moments later than kRoomTraced, up to kEchoTaps of them (10 ms each) within kEchoRange
 // of the strongest, become echoes of their own: the sound again, at that delay, from that direction, duller (kEchoDull).
 // Physically a cliff 100 m off answers 30 dB or more under the shot, unheard in a game's mix, so they are brought to
@@ -261,6 +265,7 @@ std::atomic<IPLReflectionEffect> g_room_effect{nullptr};
 std::atomic<IPLAmbisonicsDecodeEffect> g_room_decode{nullptr};
 std::condition_variable g_room_wake;
 std::optional<IPLScene> g_room_scene;  // under g_mutex: a level for the room's thread, its own hold on it; null, none
+std::optional<IPLScene> g_room_doors;  // under g_mutex: the same level built again with its closed doors (Doors)
 
 std::atomic<bool> g_paths{[] {
     const char* v = std::getenv("XBE_ACOUSTICS_PATHS");
@@ -325,6 +330,12 @@ struct Simulation {
     IPLSimulator simulator = nullptr;
     IPLScene scene = nullptr;
     IPLStaticMesh mesh = nullptr;
+    // the level as built (Build), kept to build it again with the closed doors in it (Doors)
+    std::vector<IPLVector3> base_vertices;
+    std::vector<IPLTriangle> base_triangles;
+    std::vector<IPLint32> base_material;
+    std::vector<IPLMaterial> base_materials;
+    uint64_t doors_built = 0;  // the list the scene was made with (g_doors_list), 0: none
     std::unordered_map<uint32_t, IPLSource> sources;
     bool head_tried = false;
     IPLProbeBatch batch = nullptr;  // the level's ways, once worked out
@@ -391,6 +402,71 @@ void MakeHead(Simulation& s) {
     LOGR("acoustics: Steam Audio's head is ready, for headphones and the room");
 }
 
+// The level built again with the closed doors in it (SetDoors), two triangles a door of its own material, and handed to
+// the simulator and the room's thread in place of the last. A whole scene a change: a door mesh removed from the scene
+// and another added, by one commit or two, left no door blocking anything (13 Nov 2026, Embree). The level's ways stay
+// as worked out, and are checked against the new scene. A door with a corner that is not a number is left out
+void Doors(Simulation& s, const std::vector<Door>& doors, uint64_t list, float meters) {
+    std::vector<IPLVector3> vertices = s.base_vertices;
+    std::vector<IPLTriangle> triangles = s.base_triangles;
+    std::vector<IPLint32> material = s.base_material;
+    std::vector<IPLMaterial> materials = s.base_materials;
+    size_t in = 0;
+    for (const Door& d : doors) {
+        bool fine = true;
+        for (const auto& c : d.corner) fine = fine && std::isfinite(c[0] + c[1] + c[2]);
+        if (!fine) continue;
+        IPLint32 v = IPLint32(vertices.size()), m = IPLint32(materials.size());
+        for (const auto& c : d.corner) vertices.push_back({c[0] * meters, c[1] * meters, c[2] * meters});
+        triangles.push_back({{v, v + 1, v + 2}});
+        triangles.push_back({{v, v + 2, v + 3}});
+        material.push_back(m);
+        material.push_back(m);
+        IPLMaterial made;
+        std::memcpy(&made, &d.made, sizeof made);
+        materials.push_back(made);
+        in++;
+    }
+    IPLSceneSettings ss{};
+    ss.type = s.type;
+    ss.embreeDevice = s.embree;
+    IPLStaticMeshSettings ms{};
+    ms.numVertices = IPLint32(vertices.size());
+    ms.numTriangles = IPLint32(triangles.size());
+    ms.numMaterials = IPLint32(materials.size());
+    ms.vertices = vertices.data();
+    ms.triangles = triangles.data();
+    ms.materialIndices = material.data();
+    ms.materials = materials.data();
+    IPLScene scene = nullptr;
+    IPLStaticMesh mesh = nullptr;
+    int64_t began = NowMs();
+    if (g_ipl.iplSceneCreate(s.context, &ss, &scene) != IPL_STATUS_SUCCESS ||
+        g_ipl.iplStaticMeshCreate(scene, &ms, &mesh) != IPL_STATUS_SUCCESS) {
+        if (scene) g_ipl.iplSceneRelease(&scene);
+        s.doors_built = list;  // not tried again until the list changes
+        LOGR("acoustics: the level could not be built with its doors, they block nothing");
+        return;
+    }
+    g_ipl.iplStaticMeshAdd(mesh, scene);
+    g_ipl.iplSceneCommit(scene);
+    g_ipl.iplSimulatorSetScene(s.simulator, scene);
+    g_ipl.iplSimulatorCommit(s.simulator);
+    if (s.mesh) g_ipl.iplStaticMeshRelease(&s.mesh);
+    if (s.scene) g_ipl.iplSceneRelease(&s.scene);
+    s.mesh = mesh;
+    s.scene = scene;
+    s.doors_built = list;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_room_doors && *g_room_doors) g_ipl.iplSceneRelease(&*g_room_doors);
+        g_room_doors = g_ipl.iplSceneRetain(scene);
+    }
+    if (g_log)
+        LOGR("acoustics: %zu closed doors in the scene (%zu given), built in %lld ms", in, doors.size(),
+             static_cast<long long>(NowMs() - began));
+}
+
 // the level built and handed to the simulator, the one before let go; false for an empty level
 bool Build(Simulation& s, const Scene& level) {
     IPLScene scene = nullptr;
@@ -440,6 +516,10 @@ bool Build(Simulation& s, const Scene& level) {
         } else {
             g_ipl.iplStaticMeshAdd(mesh, scene);
             g_ipl.iplSceneCommit(scene);
+            s.base_vertices = std::move(vertices);
+            s.base_triangles = std::move(triangles);
+            s.base_material = std::move(material);
+            s.base_materials = std::move(materials);
         }
     }
     if (s.batch) {  // the last level's ways go with it
@@ -450,6 +530,13 @@ bool Build(Simulation& s, const Scene& level) {
     g_ipl.iplSimulatorSetScene(s.simulator, scene);
     g_ipl.iplSimulatorCommit(s.simulator);
     if (s.mesh) g_ipl.iplStaticMeshRelease(&s.mesh);
+    s.doors_built = 0;
+    if (!scene) {
+        s.base_vertices.clear();
+        s.base_triangles.clear();
+        s.base_material.clear();
+        s.base_materials.clear();
+    }
     if (s.scene) g_ipl.iplSceneRelease(&s.scene);
     s.mesh = mesh;
     s.scene = scene;
@@ -635,7 +722,7 @@ struct Shelf {
     }
 };
 
-// A hall's reverberation, after the traced part, in place of Steam Audio's own, which Ben heard as a spring reverb in
+// A hall's reverberation, after the traced part, in place of Steam Audio's own, which a player heard as a spring reverb in
 // a nave (11 Nov 2026). Sixteen delay lines of 23 to 64 ms fed back through a Hadamard matrix, each with a short
 // all-pass of its own, each losing 60 dB in the time the trace says the room rings, in Steam Audio's three bands (under
 // 800 Hz, to 8 kHz, over: a shelf each side), their lengths swayed a few samples so no line rings at a pitch, behind
@@ -960,12 +1047,13 @@ void RunRoom(IPLContext context, IPLSceneType type) {
     char rays_seen[kRoomSky + 3] = {};  // for the log: which reach the sky, the zenith | 20 degrees up | 70
     float fitted_at[3] = {};
     for (;;) {
-        std::optional<IPLScene> next;
+        std::optional<IPLScene> next, doors;
         float listener[3], meters;
         {
             std::unique_lock<std::mutex> lock(g_mutex);
             g_room_wake.wait_for(lock, std::chrono::milliseconds(kRoomRestMs));
             next.swap(g_room_scene);
+            doors.swap(g_room_doors);  // always of the level last given (Build lets go of the one before's)
             std::memcpy(listener, g_listener, sizeof listener);
             meters = g_meters;
         }
@@ -979,6 +1067,16 @@ void RunRoom(IPLContext context, IPLSceneType type) {
             scene = *next;
             said = false;
             fitted = 0;
+        }
+        if (doors) {  // the same level with its closed doors: traced from now on, the fit kept
+            if (*doors && scene) {
+                g_ipl.iplSimulatorSetScene(simulator, *doors);
+                g_ipl.iplSimulatorCommit(simulator);
+                g_ipl.iplSceneRelease(&scene);
+                scene = *doors;
+            } else if (*doors) {
+                g_ipl.iplSceneRelease(&*doors);
+            }
         }
         if (!scene || !g_room || !g_on) continue;
         // no listener yet: for its first seconds a level has it at the world's origin, often outside the level, and a
@@ -1177,6 +1275,8 @@ void Run() {
                 // the room's thread takes the level too, with a hold of its own (one it never took is let go)
                 if (g_room_scene && *g_room_scene) g_ipl.iplSceneRelease(&*g_room_scene);
                 g_room_scene = built ? g_ipl.iplSceneRetain(s.scene) : nullptr;
+                if (g_room_doors && *g_room_doors) g_ipl.iplSceneRelease(&*g_room_doors);  // the last level's
+                g_room_doors.reset();
                 g_room_wake.notify_one();
                 for (auto& [id, sound] : g_sounds) {
                     std::fill(sound.target, sound.target + 3, 1.0f);
@@ -1196,6 +1296,19 @@ void Run() {
             } else {
                 g_ipl.iplProbeBatchRelease(&taken->batch);
             }
+        }
+        // the closed doors follow the game's list: the level built again with them (Doors)
+        if (s.scene) {
+            std::vector<Door> doors;
+            uint64_t list = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (g_doors_list != s.doors_built) {
+                    doors = g_doors;
+                    list = g_doors_list;
+                }
+            }
+            if (list) Doors(s, doors, list, meters);
         }
         // sources follow the sounds playing
         bool changed = false;
@@ -1524,6 +1637,13 @@ void SetRoom(bool on, float level) {
 }
 
 bool Room() { return g_room && g_on && g_room_effect.load() != nullptr; }
+
+void SetDoors(const Door* doors, size_t n) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_doors.assign(doors, doors + (doors ? n : 0));
+    ++g_doors_list;
+    g_wake.notify_one();
+}
 
 std::vector<RecordedTail> g_recorded;  // under g_mutex
 
