@@ -83,6 +83,15 @@ bool InCode(uint32_t va);  // cpu/dispatch.cpp
 #define SYM_D3D_BlockOnNonSurfaceResource FFFFFE0A
 #define HAS_D3D_BlockOnNonSurfaceResource 0
 #endif
+// the video overlay (XMV movies show on it): left to the console's code they write the overlay's GPU registers
+#ifndef SYM_D3DDevice_UpdateOverlay
+#define SYM_D3DDevice_UpdateOverlay FFFFFE0B
+#define HAS_D3DDevice_UpdateOverlay 0
+#endif
+#ifndef SYM_D3DDevice_GetOverlayUpdateStatus
+#define SYM_D3DDevice_GetOverlayUpdateStatus FFFFFE0C
+#define HAS_D3DDevice_GetOverlayUpdateStatus 0
+#endif
 
 namespace d3d {
 
@@ -535,6 +544,17 @@ HLE_STDCALL(D3DDevice_GetRasterStatus, 1) {
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
+// (surface, src rect, dst rect, colour key on, colour key): the overlay shows the surface from the next vertical blank.
+// Not drawn yet: the frame is only remembered, so a movie on the overlay plays on unseen
+namespace {
+std::atomic<uint32_t> g_overlay_surface{0};
+}  // namespace
+HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
+    g_overlay_surface = a[0];
+    return 0;
+}
+// TRUE once the last update has been shown, which the library counts in vertical blanks; here it is at once
+HLE_STDCALL(D3DDevice_GetOverlayUpdateStatus, 0) { return 1; }
 // the front buffer, read back at the guest size, is kept for the next instance after a quick reboot, which may
 // fade from it at its first frames
 HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
