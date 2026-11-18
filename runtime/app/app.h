@@ -26,6 +26,7 @@ struct Settings {
     bool custom_textures = true;     // images in textures\replacement\ beside the exe replace the game's
     bool dump_textures = false;      // each texture once into textures\dumps\ beside the exe
     uint32_t texture_dump_format = 0;  // 0 PNG, 1 DDS
+    uint32_t audio_output = 0;         // audio::kOutputAuto, Stereo, Surround or Mono
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
     std::string renderer = "d3d12";        // "d3d9" draws with Direct3D 9, for D3D9 tools such as RTX Remix
     bool keyboard_mouse = true;      // controller 1 is the keyboard and mouse too, bound in [controls]
@@ -144,6 +145,8 @@ struct GameInfo {
     // the game widens its own camera by HorPlus and places its 2D (gpu::SetTwoDPlacement), so its picture takes any
     // shape (aspect_ratio) rather than the console's 4:3 or 16:9
     bool hor_plus;
+    // xbe file name, SHA-1: other releases the executable runs, each from its own [xbe] named config
+    std::vector<std::pair<const char*, const char*>> releases;
 };
 extern const GameInfo kGame;
 

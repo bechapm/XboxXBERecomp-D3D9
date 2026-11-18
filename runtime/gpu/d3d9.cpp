@@ -516,7 +516,8 @@ bool UnitTexcoords(const Assembled& a) {
     constexpr uint32_t kSmallDrawVertices = 4096;
     if (!a.vertices.empty() || !a.vertex_count || a.vertex_count > kSmallDrawVertices) return false;
     bool any = false;
-    for (int r = 0; r < 16; r++) {
+    constexpr int kPositionRegister = 0;  // D3DVSDE_POSITION; 2D sprites send x, y in pixels as FLOAT2
+    for (int r = kPositionRegister + 1; r < 16; r++) {
         const VertexElement& e = a.elements[size_t(r)];
         if (!(a.regs >> r & 1) || e.format != DXGI_FORMAT_R32G32_FLOAT) continue;
         const VertexBuffer& vb = a.buffers[e.buffer];
@@ -702,7 +703,8 @@ public:
                uint32_t stencil) override;
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
     void DrawSkinned(const State& s, const SkinnedMesh& m) override;
-    void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override;
+    void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points, float src_kx,
+              float src_ky) override;
     void Present(const Surface& front) override;
     void Sync(uint32_t data, uint32_t size) override;
     void SyncLate(uint32_t data) override { Sync(data, 0); }
@@ -2371,10 +2373,14 @@ D3DTEXTUREFILTERTYPE Filter(uint32_t f) {
 }
 
 void D3D9Backend::SetSamplers(const State& s, const Assembled& a, const DrawTextures& stages) {
-    bool clamp = AnyStageWraps(s) && UnitTexcoords(a);
+    bool unit = AnyStageWraps(s) && UnitTexcoords(a);
+    bool fixed = !a.pretransformed && !((s.vs_handle & 1) && s.vs && !s.vs->program.empty());
     uint32_t aniso = app::Get().aniso;
     for (DWORD i = 0; i < 4; i++) {
         const auto& t = s.tss[i];
+        // wrap is read as clamp unless the fixed function moves this stage's coordinates out of 0..1 with a texture
+        // matrix or generates them (as the D3D12 renderer does)
+        bool clamp = unit && !(fixed && ((t[kTssTexCoordIndex] >> 16 & 7) || (t[kTssTextureTransformFlags] & 7)));
         uint32_t mag = t[kTssMagFilter];
         uint32_t min = t[kTssMinFilter];
         uint32_t mip = t[kTssMipFilter];
@@ -4041,7 +4047,7 @@ void D3D9Backend::DrawSkinned(const State& s, const SkinnedMesh& m) {
 }
 
 void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects,
-                       uint32_t dst_points) {
+                       uint32_t dst_points, float src_kx, float src_ky) {
     if (!Usable()) return;
     Target* src_t = FindTarget(src, false);
     // pixels the CPU made: the copy happens in memory, textures and targets pick it up from there
@@ -4057,12 +4063,14 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
     if (!dst_t || src_t == dst_t) return;
     NoteAfterMark("copy", src_t->data, dst_t->data);
     Scene(false);
-    float ssx = float(src_t->w) / src_t->gw, ssy = float(src_t->h) / src_t->gh;
+    // the source in the guest pixels the rects use: a multisampled or scaled down frame buffer's (src_kx, src_ky)
+    uint32_t sgw = uint32_t(src_t->gw * src_kx), sgh = uint32_t(src_t->gh * src_ky);
+    float ssx = float(src_t->w) / sgw, ssy = float(src_t->h) / sgh;
     float dsx = float(dst_t->w) / dst_t->gw, dsy = float(dst_t->h) / dst_t->gh;
     bool listed = count && src_rects;
     uint32_t n = listed ? count : 1;
     for (uint32_t i = 0; i < n; i++) {
-        int32_t x0 = 0, y0 = 0, x1 = int32_t(std::min(src_t->gw, dst_t->gw)), y1 = int32_t(std::min(src_t->gh, dst_t->gh));
+        int32_t x0 = 0, y0 = 0, x1 = int32_t(std::min(sgw, dst_t->gw)), y1 = int32_t(std::min(sgh, dst_t->gh));
         int32_t dx = 0, dy = 0;
         if (listed) {
             uint32_t r = src_rects + i * 16;
@@ -4101,8 +4109,8 @@ void D3D9Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, u
                            : nullptr;
         if (side) PART_LOG(1, "d3d9: a corner's copy taken from the side target");
         // clamped to both targets
-        x1 = std::min(x1, int32_t(std::min<int64_t>(src_t->gw, x0 + int64_t(dst_t->gw) - dx)));
-        y1 = std::min(y1, int32_t(std::min<int64_t>(src_t->gh, y0 + int64_t(dst_t->gh) - dy)));
+        x1 = std::min(x1, int32_t(std::min<int64_t>(sgw, x0 + int64_t(dst_t->gw) - dx)));
+        y1 = std::min(y1, int32_t(std::min<int64_t>(sgh, y0 + int64_t(dst_t->gh) - dy)));
         if (x0 < 0 || y0 < 0 || dx < 0 || dy < 0 || x1 <= x0 || y1 <= y0) continue;
         RECT sr{LONG(x0 * ssx), LONG(y0 * ssy), LONG(x1 * ssx), LONG(y1 * ssy)};
         RECT dr{LONG(dx * dsx), LONG(dy * dsy), LONG((dx + x1 - x0) * dsx), LONG((dy + y1 - y0) * dsy)};

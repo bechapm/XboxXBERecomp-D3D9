@@ -8,7 +8,6 @@
 #include <windows.h>
 
 #include <algorithm>
-#include <atomic>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -17,6 +16,7 @@
 
 #include "app/app.h"
 #include "audio/acoustics.h"
+#include "audio/audio.h"
 #include "core/input.h"
 #include "core/log.h"
 
@@ -72,11 +72,13 @@ void Load() {
     s.acoustics_reverb_level = std::min(t["acoustics_reverb_level"].value_or(s.acoustics_reverb_level), 100u);
     s.acoustics_tails = std::min(t["acoustics_tails"].value_or(s.acoustics_tails), 100u);
     input::LoadControls(t["controls"].as_table());
+    s.audio_output = std::min(t["audio_output"].value_or(s.audio_output), audio::kOutputMono);
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
         else *o.value = t[o.key].value_or(*o.value);
     }
     if (kGame.load) kGame.load(&t);
+    audio::SetOutputMode(s.audio_output);
     ApplyAcoustics();
 }
 
@@ -114,7 +116,8 @@ toml::table Table() {
                   {"acoustics_paths", s.acoustics_paths},
                   {"acoustics_reverb", s.acoustics_reverb},
                   {"acoustics_reverb_level", int64_t(s.acoustics_reverb_level)},
-                  {"acoustics_tails", int64_t(s.acoustics_tails)}};
+                  {"acoustics_tails", int64_t(s.acoustics_tails)},
+                  {"audio_output", int64_t(s.audio_output)}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
@@ -128,9 +131,14 @@ toml::table Table() {
 
 }  // namespace
 
+// written beside the real file and renamed over it, so a crash mid save keeps the old settings
 void Save() {
-    std::ofstream f(File());
+    std::filesystem::path tmp = File();
+    tmp += ".tmp";
+    std::ofstream f(tmp);
     f << Table() << "\n";
+    f.close();
+    if (f) MoveFileExW(tmp.c_str(), File().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
 
 void LogSettings() {
@@ -180,19 +188,6 @@ Mode Output() {
     return Desktop();
 }
 
-bool Widescreen() {
-    // asked per frame and per HUD quad: the desktop mode lookup only runs when the resolution setting changes
-    static std::atomic<uint64_t> key{~0ull};
-    static std::atomic<bool> wide{true};
-    const Settings& s = Get();
-    uint64_t k = uint64_t(s.width) << 32 | s.height;
-    if (key.exchange(k) != k) {
-        Mode m = Output();
-        wide = m.width * 2 >= m.height * 3;  // 3:2 or wider
-    }
-    return wide;
-}
-
 // Output for every frame, declared here for PictureAspect
 Mode CachedOutput();
 
@@ -234,6 +229,12 @@ Mode CachedOutput() {
 static std::atomic<bool> g_size_at_start{false};
 bool SizeAtStart() { return g_size_at_start; }
 void SetSizeAtStart(bool at_start) { g_size_at_start = at_start; }
+
+// asked per frame and per HUD quad: CachedOutput costs a monitor lookup, the registry only on a change
+bool Widescreen() {
+    Mode m = CachedOutput();
+    return m.width * 2 >= m.height * 3;  // 3:2 or wider
+}
 
 float RenderScale(uint32_t guest_height) {
     float h = CachedOutput().height * (Get().render_percent / 100.0f);
