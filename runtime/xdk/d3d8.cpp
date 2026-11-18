@@ -586,7 +586,7 @@ namespace {
 // blending, test or fog; in a 4:3 box on a wider picture. The title's state is put back after.
 void DrawOverlay(uint32_t shown) {
     if (!g_overlay.on || !g_overlay.surface || !g_backend || !shown) return;
-    constexpr uint32_t kFvfXyzrhwTex1 = 0x104, kTriangleStrip = 5;
+    constexpr uint32_t kFvfXyzrhwTex1 = 0x104, kTriangleStrip = 6;  // the console numbers D3DPT_TRIANGLESTRIP 6
     constexpr uint32_t kTopDisable = 1, kTopSelectArg1 = 2, kTaTexture = 2, kAddressClamp = 3, kFilterLinear = 2;
     constexpr uint32_t kColorWriteAll = 0x01010101, kFillSolid = 0x1B02;
     SyncDeferred();
