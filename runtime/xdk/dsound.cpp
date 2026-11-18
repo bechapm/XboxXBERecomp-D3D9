@@ -166,6 +166,12 @@ X86Func* Find(uint32_t guest);
 #define SYM_DirectSoundGetSampleTime FFFFFF22
 #define HAS_DirectSoundGetSampleTime 0
 #endif
+// a stream's 3D rolloff curve: XDK 5849 titles call it (TimeSplitters Future Perfect at start-up); left to the console's
+// code it reads its own voice object off the host's stream and faults
+#ifndef SYM_CDirectSoundStream_SetRolloffCurve
+#define SYM_CDirectSoundStream_SetRolloffCurve FFFFFF23
+#define HAS_CDirectSoundStream_SetRolloffCurve 0
+#endif
 
 namespace {
 
@@ -921,7 +927,8 @@ static void AuditExports() {
         SYM(IDirectSoundBuffer_SetPitch), SYM(IDirectSoundBuffer_SetLFO),
         SYM(CDirectSoundStream_GetVoiceProperties), SYM(CDirectSoundStream_Set3DVoiceData),
         SYM(CDirectSoundStream_Use3DVoiceData), SYM(CDirectSoundStream_SetPitch), SYM(CDirectSoundStream_SetLFO),
-        SYM(CDirectSoundStream_SetOutputBuffer), SYM(IDirectSound_SetAllParameters), SYM(DirectSoundGetSampleTime)};
+        SYM(CDirectSoundStream_SetOutputBuffer), SYM(IDirectSound_SetAllParameters), SYM(DirectSoundGetSampleTime),
+        SYM(CDirectSoundStream_SetRolloffCurve)};
     std::string left;
     // the library's own section: the WMA decoder shares the export ids and touches no DSOUND object
     uint32_t lo = 0, hi = 0;
@@ -1523,3 +1530,9 @@ STREAM(SetVelocity, 5) { return 0; }
 // (this, factor, apply): attenuation keeps the default factor of 1, like the listener's
 STREAM(SetRolloffFactor, 3) { return 0; }
 STREAM(SetI3DL2Source, 3) { return 0; }
+// (this, points, count, apply): as a buffer's, the curve the voice's distance volume follows
+STREAM(SetRolloffCurve, 4) {
+    v.curve.clear();
+    for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
+    return 0;
+}
