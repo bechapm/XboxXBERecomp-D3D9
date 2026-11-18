@@ -498,7 +498,8 @@ bool UnitTexcoords(const Assembled& a) {
     constexpr uint32_t kSmallDrawVertices = 4096;
     if (!a.vertices.empty() || !a.vertex_count || a.vertex_count > kSmallDrawVertices) return false;
     bool any = false;
-    for (int r = 0; r < 16; r++) {
+    constexpr int kPositionRegister = 0;  // D3DVSDE_POSITION; 2D sprites send x, y in pixels as FLOAT2
+    for (int r = kPositionRegister + 1; r < 16; r++) {
         const VertexElement& e = a.elements[size_t(r)];
         if (!(a.regs >> r & 1) || e.format != DXGI_FORMAT_R32G32_FLOAT) continue;
         const VertexBuffer& vb = a.buffers[e.buffer];
@@ -2104,10 +2105,14 @@ D3DTEXTUREFILTERTYPE Filter(uint32_t f) {
 }
 
 void D3D9Backend::SetSamplers(const State& s, const Assembled& a, const DrawTextures& stages) {
-    bool clamp = AnyStageWraps(s) && UnitTexcoords(a);
+    bool unit = AnyStageWraps(s) && UnitTexcoords(a);
+    bool fixed = !a.pretransformed && !((s.vs_handle & 1) && s.vs && !s.vs->program.empty());
     uint32_t aniso = app::Get().aniso;
     for (DWORD i = 0; i < 4; i++) {
         const auto& t = s.tss[i];
+        // wrap is read as clamp unless the fixed function moves this stage's coordinates out of 0..1 with a texture
+        // matrix or generates them (as the D3D12 renderer does)
+        bool clamp = unit && !(fixed && ((t[kTssTexCoordIndex] >> 16 & 7) || (t[kTssTextureTransformFlags] & 7)));
         uint32_t mag = t[kTssMagFilter];
         uint32_t min = t[kTssMinFilter];
         uint32_t mip = t[kTssMipFilter];

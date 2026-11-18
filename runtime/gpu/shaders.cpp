@@ -859,12 +859,14 @@ bool ReadsConstant(const Tok& k, uint32_t index) {
     return constant && !relative && k.f(1, 13, 8) == index;
 }
 
-bool ReadsViewportOffset(const std::vector<uint32_t>& prog) {
+bool ReadsConstant(const std::vector<uint32_t>& prog, uint32_t reg) {
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
-        if (ReadsConstant(Tok{&prog[n]}, kViewportOffsetConstant)) return true;
+        if (ReadsConstant(Tok{&prog[n]}, reg)) return true;
     }
     return false;
 }
+
+bool ReadsViewportOffset(const std::vector<uint32_t>& prog) { return ReadsConstant(prog, kViewportOffsetConstant); }
 
 constexpr uint32_t kMacDph = 6;
 constexpr uint32_t kMacDp4 = 7;
