@@ -198,6 +198,9 @@ enum MixBin : uint32_t {
     kFirstSend,  // effect sends from here up
 };
 constexpr uint32_t kBins = dsp::kBins;
+// the acoustics' stereo downmix of the speaker bins: centre and back pair at -3 dB, the sub dropped (as the
+// output's own fold in audio/xaudio2.cpp)
+constexpr float kFold = 0.707f;
 constexpr uint32_t kInvalidCall = 0x88780032u;  // DSERR_INVALIDCALL
 constexpr uint32_t kMaxChannels = 8;
 // rows of a voice's mix: its channels, then a mono 3D voice's two ears
