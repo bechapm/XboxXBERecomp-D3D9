@@ -1475,54 +1475,11 @@ static void DrawInline(uint32_t prim, const std::vector<uint32_t>& vertices) {
     else LOG_FIRST(8, "d3d: EndPush primitive %u dropped, %u bytes of vertices of %u", prim, bytes, stride);
 }
 
-// Vertex arrays as pushed commands set them: per register an offset (a physical address) and a format (type in bits
-// 0 to 3 and count in 4 to 7, coded as D3DVSDT is, stride from bit 8; count 0 is no array)
-uint32_t g_array_offset[16], g_array_format[16];
-
-// bytes of one element of an array format, as gpu's TypeBytes reads D3DVSDT
-static uint32_t ArrayElementBytes(uint32_t format) {
-    uint32_t kind = format & 15, n = (format >> 4) & 15;
-    switch (kind) {
-        case 0: return 4;  // D3DCOLOR
-        case 1: case 5: return 2 * n;
-        case 4: return n;
-        case 6: return 4;  // packed normal
-        default: return 4 * n;
-    }
-}
-
-// A primitive drawn from vertex arrays by index (draw arrays or array elements): each vertex is gathered from the
-// arrays into the bound vertex format, register by register at the format's offsets, then drawn as user vertices.
-// Titles that build their own push buffers draw most of their world so (TimeSplitters Future Perfect's levels)
-static void DrawArrays(uint32_t prim, const std::vector<uint32_t>& indices) {
-    if (indices.empty()) return;
-    gpu::VertexShader fvf;
-    const gpu::VertexShader* layout = g_state.vs_handle & 1 ? g_state.vs.get() : (gpu::FvfInputs(g_state.vs_handle, fvf), &fvf);
-    uint32_t stride = layout ? layout->stream_stride[0] : 0;
-    if (!stride) {
-        LOG_FIRST(8, "d3d: pushed array primitive %u dropped, no vertex format bound", prim);
-        return;
-    }
-    static std::vector<uint8_t> out;
-    out.assign(size_t(indices.size()) * stride, 0);
-    for (uint32_t r = 0; r < 16; r++) {
-        const auto& in = layout->inputs[r];
-        uint32_t format = g_array_format[r], count = (format >> 4) & 15, from_stride = format >> 8;
-        if (in.stream != 0 || !count) continue;
-        uint32_t bytes = std::min(ArrayElementBytes(format), stride - std::min(in.offset, stride));
-        uint32_t base = mem::VirtualFromPhysical(g_array_offset[r] & 0x7FFFFFFF);
-        for (size_t k = 0; k < indices.size(); k++)
-            std::memcpy(&out[k * stride + in.offset], HostPtr(base + indices[k] * from_stride), bytes);
-    }
-    DrawUp(prim, uint32_t(indices.size()), out.data(), stride);
-}
-
 static void RunCommands(uint32_t begin, uint32_t end) {
     constexpr uint32_t kBeginEnd = 0x17FC, kInlineArray = 0x1818;
-    // vertex array offsets and formats, then index elements (two 16-bit, one 32-bit) and draw arrays
-    constexpr uint32_t kArrayOffsets = 0x1720, kArrayFormats = 0x1760, kArrayFormatsEnd = 0x17A0;
-    constexpr uint32_t kArrayElement16 = 0x1800, kArrayElement32 = 0x1808, kDrawArrays = 0x1810;
-    static std::vector<uint32_t> vertices, indices;
+    // vertex array offsets and formats, then index elements and draw arrays up to the inline array
+    constexpr uint32_t kArrayOffsets = 0x1720, kArrayFormatsEnd = 0x17A0, kArrayDraws = 0x1800;
+    static std::vector<uint32_t> vertices;
     uint32_t prim = 0;
     for (uint32_t p = begin; begin && p + 4 <= end;) {
         // count in bits 18 to 28, bit 30 keeps the method for every value
@@ -1538,24 +1495,12 @@ static void RunCommands(uint32_t begin, uint32_t end) {
             if (m == kInlineArray) {
                 if (prim) vertices.push_back(v);
             } else if (m == kBeginEnd) {
-                if (!v && prim) {
-                    DrawInline(prim, vertices);
-                    DrawArrays(prim, indices);
-                }
+                if (!v && prim) DrawInline(prim, vertices);
                 prim = v;
                 vertices.clear();
-                indices.clear();
                 ApplyImmediate(m, v);
-            } else if (m >= kArrayOffsets && m < kArrayFormats) {
-                g_array_offset[(m - kArrayOffsets) / 4] = v;
-            } else if (m >= kArrayFormats && m < kArrayFormatsEnd) {
-                g_array_format[(m - kArrayFormats) / 4] = v;
-            } else if (m == kArrayElement16) {
-                if (prim) indices.insert(indices.end(), {v & 0xFFFF, v >> 16});
-            } else if (m == kArrayElement32) {
-                if (prim) indices.push_back(v);
-            } else if (m == kDrawArrays) {  // start in bits 0 to 23, count less one in 24 to 31
-                for (uint32_t k = 0; prim && k <= v >> 24; k++) indices.push_back((v & 0xFFFFFF) + k);
+            } else if ((m >= kArrayOffsets && m < kArrayFormatsEnd) || (m >= kArrayDraws && m < kInlineArray)) {
+                LOG_FIRST(16, "d3d: pushed commands draw from vertex arrays (method %04X), which is not run", m);
             } else if (!ApplyConstant(m, v) && !ApplyImmediate(m, v) && m >> 2 < g_state.simple.size()) {
                 SetSimple(m, v);
             }
