@@ -653,6 +653,16 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         app::FinishHandover();
     }
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    // D3DSWAP flags. FINISH (4) ends the frame without a flip; BYPASSCOPY (2) shows the front buffer the title drew
+    // itself, with no copy from the back buffer and no rotation. TimeSplitters Future Perfect swaps FINISH then
+    // BYPASSCOPY every frame and draws into one frame buffer's memory throughout: presenting and rotating on both
+    // calls showed a blank buffer every other present (the menus strobed black)
+    constexpr uint32_t kSwapBypassCopy = 2, kSwapFinish = 4;
+    const uint32_t flags = a[0];
+    if (flags & kSwapFinish) {
+        Walk(Dev(kDevPush));  // reports asked for at the end of the frame
+        return Dev(kDevSwapCount);
+    }
     g_presents++;
     g_frame_pass_count = 0;
     // the kept display is shown until the title presents its own
@@ -666,17 +676,30 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         }
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
-    if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    const bool bypass = flags & kSwapBypassCopy;
+    // what BYPASSCOPY shows is the frame buffer the title drew: the one whose memory its render target holds (the front
+    // buffer when none does)
+    uint32_t shown = g_buffers[1];
+    if (bypass) {
+        shown = g_buffers[0];
+        uint32_t rt = Dev(kDevRenderTarget), rt_data = rt ? R32(rt + 4) : 0;
+        for (uint32_t i = 0; rt_data && i < g_buffer_count; i++)
+            if (R32(g_buffers[i] + 4) == rt_data) shown = g_buffers[i];
+    }
+    if (g_backend) g_backend->Present(SurfaceOf(shown));
     mods::Frame();
     app::Pace();
-    // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
-    uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
-    for (uint32_t i = g_buffer_count - 1; i > 0; i--) {
-        W32(g_buffers[i] + 4, R32(g_buffers[i - 1] + 4));
-        W32(g_buffers[i] + 8, R32(g_buffers[i - 1] + 8));
+    // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data.
+    // Not on BYPASSCOPY, where the title keeps drawing the front buffer itself
+    if (!bypass) {
+        uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
+        for (uint32_t i = g_buffer_count - 1; i > 0; i--) {
+            W32(g_buffers[i] + 4, R32(g_buffers[i - 1] + 4));
+            W32(g_buffers[i] + 8, R32(g_buffers[i - 1] + 8));
+        }
+        W32(g_buffers[0] + 4, data);
+        W32(g_buffers[0] + 8, lk);
     }
-    W32(g_buffers[0] + 4, data);
-    W32(g_buffers[0] + 8, lk);
     g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
     uint32_t n = Dev(kDevSwapCount) + 1;
     SetDev(kDevSwapCount, n);
