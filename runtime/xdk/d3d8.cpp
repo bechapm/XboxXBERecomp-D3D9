@@ -143,6 +143,27 @@ uint32_t g_depth = 0;
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
 uint32_t g_walk = 0;  // first scratch command not read yet
 
+// Vertex arrays a title pushes itself, as the console's own draws would: an address per input register (methods
+// 0x1720 + 4r, physical) and a format per register (0x1760 + 4r: type and count in the low byte, stride from bit 8).
+// TimeSplitters Future Perfect sets every level mesh's arrays so, between the library's own stream changes. The
+// console's draws read them until SetStreamSource, SetVertexShader or SelectVertexShader with a handle marks the
+// streams for the library to push again.
+constexpr uint32_t kArrayOffset = 0x1720, kArrayFormat = 0x1760, kArrayEnd = 0x17A0;
+struct PushedArrays {
+    bool live = false;
+    uint32_t offset[16] = {};
+    uint32_t format[16] = {};
+} g_pushed;
+
+// an array offset or format method updates the pushed arrays; false for any other method
+bool ApplyPushedArray(uint32_t m, uint32_t v) {
+    if (m < kArrayOffset || m >= kArrayEnd) return false;
+    if (m < kArrayFormat) g_pushed.offset[(m - kArrayOffset) / 4] = v;
+    else g_pushed.format[(m - kArrayFormat) / 4] = v;
+    g_pushed.live = true;
+    return true;
+}
+
 uint32_t Dev(uint32_t off) { return R32(kDevice + off); }
 void SetDev(uint32_t off, uint32_t v) { W32(kDevice + off, v); }
 
@@ -1001,6 +1022,7 @@ HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
 
 HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_pushed.live = false;  // the console pushes the streams' arrays again at the next draw
     uint32_t n = a[0] & 15, vb = a[1], stride = a[2];
     uint32_t old = R32(kStreams + n * kStreamSize + XDK_Stream_Buffer);
     bool same = vb == old;
@@ -1084,6 +1106,7 @@ HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
 
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_pushed.live = false;
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
@@ -1245,6 +1268,7 @@ HLE_STDCALL(D3DDevice_LoadVertexShaderProgram, 2) {
 HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t handle = a[0];
+    if (handle) g_pushed.live = false;  // a new input layout: the console pushes the streams' arrays again
     bool program_bound = (g_state.vs_handle & 1) && g_state.vs;
     if (!handle && !program_bound) {
         LOG_FIRST(8, "d3d: SelectVertexShader at slot %u without a bound vertex shader", a[1]);
@@ -1345,6 +1369,56 @@ bool FramePassSkipped() {
     return false;
 }
 
+// For one draw while pushed arrays are live: each enabled register reads its own array, through a stream of its own
+// (a vertex buffer header per register pointing at the array), with the bound program. The state is put back after.
+class PushedArraysDraw {
+public:
+    PushedArraysDraw() {
+        if (!g_pushed.live || !g_state.vs) return;
+        static uint32_t headers = 0;
+        if (!headers) {
+            headers = mem::AllocSystem(16 * kHeaderBytes);
+            std::memset(HostPtr(headers), 0, 16 * kHeaderBytes);
+            for (uint32_t r = 0; r < 16; r++) W32(headers + r * kHeaderBytes, 1);  // a vertex buffer, one reference
+        }
+        streams_ = g_state.streams;
+        vs_ = g_state.vs;
+        gpu::VertexShader inputs;
+        for (uint32_t r = 0; r < 16; r++) {
+            uint32_t format = g_pushed.format[r], type = format & 0xFF, stride = format >> 8;
+            if (!(type & 0xF0)) continue;  // a count of 0: the register reads no array
+            inputs.inputs[r] = {int(r), 0, type};
+            inputs.stream_stride[r] = stride;
+            W32(headers + r * kHeaderBytes + 4, g_pushed.offset[r]);
+            g_state.streams[r] = {headers + r * kHeaderBytes, stride};
+        }
+        // one shader object per program and array layout: the render thread tells shaders apart by pointer
+        static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+        uint64_t key = gpu::Hash(vs_->program.data(), vs_->program.size() * 4);
+        key = gpu::Hash(inputs.inputs.data(), sizeof(inputs.inputs), key);
+        key = gpu::Hash(inputs.stream_stride.data(), sizeof(inputs.stream_stride), key);
+        auto& vs = made[key];
+        if (!vs) {
+            vs = std::make_shared<gpu::VertexShader>(*vs_);
+            vs->inputs = inputs.inputs;
+            vs->stream_stride = inputs.stream_stride;
+        }
+        g_state.vs = vs;
+        active_ = true;
+    }
+    ~PushedArraysDraw() {
+        if (!active_) return;
+        g_state.streams = streams_;
+        g_state.vs = vs_;
+    }
+
+private:
+    static constexpr uint32_t kHeaderBytes = 20;
+    bool active_ = false;
+    decltype(g_state.streams) streams_{};
+    std::shared_ptr<gpu::VertexShader> vs_;
+};
+
 }  // namespace
 
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
@@ -1352,6 +1426,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
     if (FramePassSkipped()) return 0;
+    PushedArraysDraw pushed;
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
     return 0;
 }
@@ -1365,6 +1440,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     // the base vertex is the device's own: titles built with an inlined SetIndices (TimeSplitters Future Perfect,
     // XDK 5849) write it there themselves and never call SetIndices, and the console's draw reads it from the device
     if (XDK_CDevice_BaseVertex != 0xFFFFFFFFu) g_state.base_vertex = Dev(kDevBaseVertex);
+    PushedArraysDraw pushed;
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
     return 0;
 }
@@ -1557,7 +1633,7 @@ void Walk(uint32_t end) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4;
             uint32_t v = R32(p);
             ApplyVisibilityMethod(m, v);
-            if (!ApplyConstant(m, v)) ApplyImmediate(m, v);
+            if (!ApplyConstant(m, v) && !ApplyPushedArray(m, v)) ApplyImmediate(m, v);
         }
     }
     g_walk = end;
@@ -1591,8 +1667,8 @@ static void DrawInline(uint32_t prim, const std::vector<uint32_t>& vertices) {
 
 static void RunCommands(uint32_t begin, uint32_t end) {
     constexpr uint32_t kBeginEnd = 0x17FC, kInlineArray = 0x1818;
-    // vertex array offsets and formats, then index elements and draw arrays up to the inline array
-    constexpr uint32_t kArrayOffsets = 0x1720, kArrayFormatsEnd = 0x17A0, kArrayDraws = 0x1800;
+    // index elements and draw arrays, up to the inline array
+    constexpr uint32_t kArrayDraws = 0x1800;
     static std::vector<uint32_t> vertices;
     uint32_t prim = 0;
     for (uint32_t p = begin; begin && p + 4 <= end;) {
@@ -1613,7 +1689,8 @@ static void RunCommands(uint32_t begin, uint32_t end) {
                 prim = v;
                 vertices.clear();
                 ApplyImmediate(m, v);
-            } else if ((m >= kArrayOffsets && m < kArrayFormatsEnd) || (m >= kArrayDraws && m < kInlineArray)) {
+            } else if (ApplyPushedArray(m, v)) {
+            } else if (m >= kArrayDraws && m < kInlineArray) {
                 LOG_FIRST(16, "d3d: pushed commands draw from vertex arrays (method %04X), which is not run", m);
             } else if (!ApplyConstant(m, v) && !ApplyImmediate(m, v) && m >> 2 < g_state.simple.size()) {
                 SetSimple(m, v);
