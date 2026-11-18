@@ -1276,6 +1276,10 @@ KERNEL_EXPORT(253, PhyInitialize, 2) { return kSuccess; }
 
 KERNEL_EXPORT(65, IoCreateDevice, 6) { return kUnsuccessful; }
 KERNEL_EXPORT(74, IoInvalidDeviceRequest, 2) { return 0xC0000010; }  // STATUS_INVALID_DEVICE_REQUEST
+// (file object, class, length, buffer, returned): the file objects here have no file system behind them. XAPI's
+// XGetFilePhysicalSortKey asks it the volume's name to read the file's place on the disc from FsContext, and on a failure
+// answers "no key" (TimeSplitters Future Perfect 0x37D188)
+KERNEL_EXPORT(76, IoQueryVolumeInformation, 5) { return 0xC0000010; }  // STATUS_INVALID_DEVICE_REQUEST
 KERNEL_EXPORT(62, IoBuildSynchronousFsdRequest, 7) { return 0; }
 KERNEL_EXPORT(85, IoSynchronousFsdRequest, 5) { return kUnsuccessful; }
 KERNEL_EXPORT(84, IoSynchronousDeviceIoControlRequest, 8) {
