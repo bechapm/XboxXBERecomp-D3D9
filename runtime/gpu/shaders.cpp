@@ -1066,8 +1066,6 @@ StageSum PixelStageSum(const PixelKey& k, const float pc[18][4], bool specular) 
 
 constexpr uint32_t kMuxConstant = 3;
 
-constexpr uint32_t kViewportScaleConstant = 58;  // c-38
-
 // the constant an instruction reads without a0, through any of its operands: at most one
 bool ReadsConstant(const Tok& k, uint32_t index) {
     bool constant = k.f(2, 26, 2) == kMuxConstant || k.f(2, 11, 2) == kMuxConstant || k.f(3, 28, 2) == kMuxConstant;
@@ -1085,7 +1083,7 @@ bool ReadsConstant(const std::vector<uint32_t>& prog, uint32_t reg) {
 bool ReadsViewportOffset(const std::vector<uint32_t>& prog) { return ReadsConstant(prog, kViewportOffsetConstant); }
 
 constexpr uint32_t kMacDph = 6;
-constexpr uint32_t kMacDp4 = 7;
+constexpr uint32_t kMacDp4 = 7;  // also upstream's mac opcode list below
 constexpr uint32_t kMacArl = 13;
 constexpr uint32_t kLaneZ = 2;  // kMask bits
 constexpr uint32_t kLaneW = 1;
@@ -1198,7 +1196,7 @@ int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, si
 
 namespace {
 
-constexpr uint32_t kMacMov = 1, kMacMul = 2, kMacMad = 4, kMacDp4 = 7, kIluRcc = 3, kMuxConst = 3;
+constexpr uint32_t kMacMov = 1, kMacMul = 2, kMacMad = 4, kIluRcc = 3, kMuxConst = 3;
 constexpr uint32_t kTempPos = 12;  // R12 is oPos
 constexpr int kOutT3 = 12;
 
