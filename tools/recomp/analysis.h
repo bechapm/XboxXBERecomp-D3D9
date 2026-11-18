@@ -34,6 +34,10 @@ struct Config {
     std::map<uint32_t, std::string> functions;  // extra entry points
     // names the host binds to: functions it replaces and data it reads; 0 = not in this image
     std::map<std::string, uint32_t> symbols, data;
+    // [xbe] named: the [symbols] and [names] functions take those names, not their address, so one executable binds
+    // to each release of a game; [names] are the game's own functions it replaces or calls
+    bool named = false;
+    std::map<std::string, uint32_t> names;
     std::map<std::string, uint32_t> layout;     // XDK data layout, emitted as XDK_<name>
     std::map<std::string, std::vector<std::string>> abi;  // where a symbol takes each argument, emitted as IMAGE_ABI
     std::set<uint32_t> no_gap_fill;             // section starts to skip in gap fill
@@ -90,7 +94,8 @@ public:
 
 private:
     bool DecodeFlow(uint32_t va, Insn& out, JumpTable* jt);
-    bool Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls);
+    // overlap: an untrusted walk that keeps decodes overlapping earlier ones instead of failing on them
+    bool Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls, bool overlap = false);
     void SeedPointers(bool late = false);
     bool PlausibleEntry(uint32_t va) const;
     void Adopt(const std::vector<uint32_t>& calls, bool trusted);

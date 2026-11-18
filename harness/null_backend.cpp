@@ -35,7 +35,7 @@ public:
         if (drawing_) reference::Draw(s, prim, start, count, indices);
         if (list_) List(s, prim, start, count);
     }
-    void Copy(const Surface& src, const Surface& dst, uint32_t n, uint32_t rects, uint32_t points) override {
+    void Copy(const Surface& src, const Surface& dst, uint32_t n, uint32_t rects, uint32_t points, float, float) override {
         if (drawing_) reference::Copy(src, dst, n, rects, points);
         else CopySurfaceMemory(src, dst, n, rects, points);
     }
