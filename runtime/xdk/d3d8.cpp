@@ -1362,6 +1362,9 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     SyncDeferred();
     if (FramePassSkipped()) return 0;
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
+    // the base vertex is the device's own: titles built with an inlined SetIndices (TimeSplitters Future Perfect,
+    // XDK 5849) write it there themselves and never call SetIndices, and the console's draw reads it from the device
+    if (XDK_CDevice_BaseVertex != 0xFFFFFFFFu) g_state.base_vertex = Dev(kDevBaseVertex);
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
     return 0;
 }
