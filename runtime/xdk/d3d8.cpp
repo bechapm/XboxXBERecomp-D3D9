@@ -20,6 +20,7 @@
 #include "core/diag.h"
 #include "core/testdrive.h"
 #include "gpu/backend.h"
+#include "gpu/picture.h"
 #include "gpu/shaders.h"
 #include "gpu/simple_dirty.h"
 #include "gpu/texture.h"
@@ -543,16 +544,102 @@ HLE_STDCALL(D3DDevice_GetRasterStatus, 1) {
 }
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
-HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
-// (surface, src rect, dst rect, colour key on, colour key): the overlay shows the surface from the next vertical blank.
-// Not drawn yet: the frame is only remembered, so a movie on the overlay plays on unseen
+// The video overlay (XMV movies show on it): the console's scaler lays the surface over the frame buffer at every
+// vertical blank. Here it is drawn into the frame being shown, at Swap, as a quad of the surface's YUY2 texels.
 namespace {
-std::atomic<uint32_t> g_overlay_surface{0};
+struct Overlay {
+    bool on = false;
+    uint32_t surface = 0;
+    int32_t src[4] = {}, dst[4] = {};  // left, top, right, bottom
+    bool key = false;                  // colour key: shown only where the frame buffer holds that colour
+};
+Overlay g_overlay;
+uint32_t UpVertices(const void* src, uint32_t bytes);  // the DrawVerticesUP ring, below
 }  // namespace
-HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
-    g_overlay_surface = a[0];
+HLE_STDCALL(D3DDevice_EnableOverlay, 1) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_overlay.on = a[0] != 0;
+    if (!g_overlay.on) g_overlay.surface = 0;
     return 0;
 }
+// (surface, src rect, dst rect, colour key on, colour key): shown from the next vertical blank; null rects are the
+// whole surface and the whole screen
+HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t s = a[0];
+    g_overlay.surface = s;
+    g_overlay.key = a[3] != 0;
+    if (!s) return 0;
+    gpu::MarkDirty(s);  // a movie decodes each frame into the same memory
+    uint32_t size = R32(s + 16);
+    int32_t w = int32_t(size & 0xFFF) + 1, h = int32_t((size >> 12) & 0xFFF) + 1;
+    for (int i = 0; i < 4; i++) g_overlay.src[i] = a[1] ? int32_t(R32(a[1] + i * 4)) : (i < 2 ? 0 : i == 2 ? w : h);
+    uint32_t sw = 640, sh = 480;
+    gpu::SurfaceSize(SurfaceOf(g_buffers[1]), sw, sh);
+    for (int i = 0; i < 4; i++)
+        g_overlay.dst[i] = a[2] ? int32_t(R32(a[2] + i * 4)) : (i < 2 ? 0 : i == 2 ? int32_t(sw) : int32_t(sh));
+    if (g_overlay.key) LOG_FIRST(1, "d3d: overlay colour key %08X is not applied, the overlay covers the frame", a[4]);
+    return 0;
+}
+namespace {
+// the overlay's quad over the frame buffer shown: pretransformed, the surface's texels by the fixed pipeline, no depth,
+// blending, test or fog; in a 4:3 box on a wider picture. The title's state is put back after.
+void DrawOverlay(uint32_t shown) {
+    if (!g_overlay.on || !g_overlay.surface || !g_backend || !shown) return;
+    constexpr uint32_t kFvfXyzrhwTex1 = 0x104, kTriangleStrip = 5;
+    constexpr uint32_t kTopDisable = 1, kTopSelectArg1 = 2, kTaTexture = 2, kAddressClamp = 3, kFilterLinear = 2;
+    constexpr uint32_t kColorWriteAll = 0x01010101, kFillSolid = 0x1B02;
+    SyncDeferred();
+    const gpu::State saved = g_state;
+    auto& s = g_state;
+    s.rt = SurfaceOf(shown);
+    s.zs = {};
+    uint32_t w = 640, h = 480;
+    gpu::SurfaceSize(s.rt, w, h);
+    s.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    s.scissor_count = 0;
+    s.place = gpu::kPlaceCentre;
+    s.place_tag = 0;
+    s.vs_handle = kFvfXyzrhwTex1;
+    s.vs = nullptr;
+    s.ps = nullptr;
+    s.textures = {g_overlay.surface, 0, 0, 0};
+    s.palettes = {};
+    for (uint32_t m : {gpu::kMAlphaTestEnable, gpu::kMBlendEnable, gpu::kMZWriteEnable, gpu::kMSolidOffsetEnable,
+                       gpu::kMCountEnable})
+        SetSimple(m, 0);
+    SetSimple(gpu::kMColorWriteEnable, kColorWriteAll);
+    for (uint32_t r : {gpu::kRsFogEnable, gpu::kRsLighting, gpu::kRsSpecularEnable, gpu::kRsPointSpriteEnable,
+                       gpu::kRsZEnable, gpu::kRsStencilEnable, gpu::kRsCullMode, gpu::kRsYuvEnable,
+                       gpu::kRsOcclusionCullEnable, gpu::kRsStencilCullEnable, gpu::kRsLogicOp, gpu::kRsZBias})
+        s.rs[r] = 0;
+    s.rs[gpu::kRsFillMode] = kFillSolid;
+    s.rs[gpu::kRsMultiSampleMask] = 0xFFFFFFFF;
+    for (auto& t : s.tss) {
+        t[gpu::kTssColorOp] = kTopDisable;
+        t[gpu::kTssAlphaOp] = kTopDisable;
+    }
+    auto& t = s.tss[0];
+    t[gpu::kTssColorOp] = t[gpu::kTssAlphaOp] = kTopSelectArg1;
+    t[gpu::kTssColorArg1] = t[gpu::kTssAlphaArg1] = kTaTexture;
+    t[gpu::kTssAddressU] = t[gpu::kTssAddressV] = t[gpu::kTssAddressW] = kAddressClamp;
+    t[gpu::kTssMagFilter] = t[gpu::kTssMinFilter] = kFilterLinear;
+    t[gpu::kTssMipFilter] = 0;
+    t[gpu::kTssColorKeyOp] = t[gpu::kTssColorSign] = t[gpu::kTssAlphaKill] = 0;
+    t[gpu::kTssTextureTransformFlags] = t[gpu::kTssTexCoordIndex] = 0;
+    // a linear texture is addressed in texels, as the console does; x y z rhw u v
+    const auto& d = g_overlay.dst;
+    const auto& r = g_overlay.src;
+    const float q[4][6] = {{float(d[0]), float(d[1]), 0, 1, float(r[0]), float(r[1])},
+                           {float(d[2]), float(d[1]), 0, 1, float(r[2]), float(r[1])},
+                           {float(d[0]), float(d[3]), 0, 1, float(r[0]), float(r[3])},
+                           {float(d[2]), float(d[3]), 0, 1, float(r[2]), float(r[3])}};
+    s.streams[0] = {UpVertices(q, sizeof(q)), sizeof(q[0])};
+    g_backend->Draw(s, kTriangleStrip, 0, 4, nullptr);
+    g_state = saved;
+    gpu::MarkAllSimple();
+}
+}  // namespace
 // TRUE once the last update has been shown, which the library counts in vertical blanks; here it is at once
 HLE_STDCALL(D3DDevice_GetOverlayUpdateStatus, 0) { return 1; }
 // the front buffer, read back at the guest size, is kept for the next instance after a quick reboot, which may
@@ -686,6 +773,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         for (uint32_t i = 0; rt_data && i < g_buffer_count; i++)
             if (R32(g_buffers[i] + 4) == rt_data) shown = g_buffers[i];
     }
+    DrawOverlay(shown);
     if (g_backend) g_backend->Present(SurfaceOf(shown));
     mods::Frame();
     app::Pace();
