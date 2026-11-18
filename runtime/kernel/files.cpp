@@ -78,6 +78,8 @@ struct File : Object {
     size_t next = 0;
     bool listed = false;
     bool delete_on_close = false;
+    // opened for asynchronous I/O (neither FILE_SYNCHRONOUS_IO_ALERT 0x10 nor _NONALERT 0x20): see Transfer
+    bool async = false;
     std::mutex io;  // threads sharing a handle: seek and transfer stay together
     File() : Object(ObjType::File) {}
     ~File() override {
@@ -303,6 +305,7 @@ uint32_t OpenOnDisc(const Disc::Entry* e, const std::string& name, uint32_t hand
     f->xbox = Normalize(name);
     f->entry = e;
     f->dir = e->dir;
+    f->async = !(options & 0x30);
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, 1);
     LOG_FIRST(400, "open %s", name.c_str());
@@ -434,6 +437,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     f->xbox = Normalize(name);
     f->fp = fp;
     f->delete_on_close = options & 0x1000;  // FILE_DELETE_ON_CLOSE
+    f->async = !(options & 0x30);
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, info);
     LOG_FIRST(400, "open %s", name.c_str());
@@ -463,7 +467,7 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
         if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
         if (!f->fp) return kAccessDenied;
     }
-    (void)options;
+    f->async = !(options & 0x30);
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, 1);
     return kSuccess;
@@ -483,8 +487,22 @@ static uint64_t Offset(File& f, uint32_t off) {
     return o >= 0 ? uint64_t(o) : f.pos;
 }
 
-// pages is the FILE_SEGMENT_ELEMENT array for scatter and gather, 0 for one buffer
+static uint32_t TransferNow(const Args& a, bool write, uint32_t pages);
+
+// pages is the FILE_SEGMENT_ELEMENT array for scatter and gather, 0 for one buffer. On a handle opened for
+// asynchronous I/O the console's disc and hard disk drivers always pend a transfer, and titles rely on it: a
+// streaming loop that issues a read, waits for STATUS_PENDING and only advances once GetOverlappedResult succeeds
+// reissued the same read forever when it came back STATUS_SUCCESS (TimeSplitters Future Perfect's cutscene sound,
+// 0x294F0). The transfer is still done here, its status block written and its event and APC signalled, but such a
+// handle is answered STATUS_PENDING, which XAPI's ReadFile turns into ERROR_IO_PENDING; a failure stays as it is
 static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
+    constexpr uint32_t kPending = 0x103;
+    auto f = FileFromHandle(a[0]);
+    uint32_t r = TransferNow(a, write, pages);
+    return f && f->async && r == kSuccess ? kPending : r;
+}
+
+static uint32_t TransferNow(const Args& a, bool write, uint32_t pages) {
     uint32_t h = a[0], event = a[1], apc = a[2], apc_ctx = a[3], iosb = a[4], buf = a[5], len = a[6], off = a[7];
     auto f = FileFromHandle(h);
     if (!f || (!f->fp && !f->entry)) return kInvalidHandle;
