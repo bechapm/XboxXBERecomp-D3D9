@@ -1104,12 +1104,20 @@ HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
     return 0;
 }
 
+namespace {
+// The slot SelectVertexShader chose, while that choice stands. The console runs whatever program memory holds there
+// when it draws, so a program stored after the choice is the one that runs: TimeSplitters Future Perfect picks slot 0
+// and then stores the program for each piece of a character, and drew every piece with the piece before's program.
+int g_selected_slot = -1;
+}  // namespace
+
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_pushed.live = false;
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
+    g_selected_slot = -1;
     if (h & 1) {
         auto it = g_vs.find(h);
         if (it != g_vs.end()) {
@@ -1246,6 +1254,11 @@ std::shared_ptr<gpu::VertexShader> SelectedShader(uint32_t handle, uint32_t slot
 }  // namespace
 
 // (handle, slot): the program a shader was made with, stored at the slot
+static void SelectAgainAfterStore() {
+    if (g_selected_slot < 0 || !(g_state.vs_handle & 1) || !g_state.vs) return;
+    g_state.vs = SelectedShader(0, uint32_t(g_selected_slot));
+}
+
 HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     auto it = g_vs.find(a[0]);
@@ -1254,6 +1267,7 @@ HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
         return 0;
     }
     StoreProgram(a[1], it->second->program);
+    SelectAgainAfterStore();
     return 0;
 }
 
@@ -1261,6 +1275,7 @@ HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
 HLE_STDCALL(D3DDevice_LoadVertexShaderProgram, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     StoreProgram(a[1], FunctionWords(a[0]));
+    SelectAgainAfterStore();
     return 0;
 }
 
@@ -1276,6 +1291,7 @@ HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
     }
     g_state.vs = SelectedShader(handle, a[1]);
     if (handle) g_state.vs_handle = handle;
+    g_selected_slot = int(a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
