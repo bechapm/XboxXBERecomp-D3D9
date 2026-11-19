@@ -2221,9 +2221,13 @@ constexpr float kAlphaTestAlways = float(D3D12_COMPARISON_FUNC_ALWAYS - 1);
 constexpr uint32_t kFogTableNone = 0;
 constexpr float kFogTableLinear = 3.0f;
 
-// table mode none under a vertex program: oFog is the blend factor, passed on as linear fog from 1 to 0
+// table mode none under a vertex program: oFog is the blend factor, passed on as linear fog from 1 to 0.
+// A pixel shader's own final combiner reads the fog value with fog off too: the switch only keeps fog out of the
+// combiner Direct3D builds itself (TimeSplitters Future Perfect blends by its programs' oFog on screens with fog off)
 void FillFogConstants(const State& s, bool vertex_program, DrawConstants& c) {
-    if (!s.rs[kRsFogEnable]) return;
+    constexpr int kFinalAbcd = 8, kFinalEfg = 9;  // D3DPIXELSHADERDEF dwords
+    bool own_final = s.ps && (s.ps->def[kFinalAbcd] || s.ps->def[kFinalEfg]);
+    if (!s.rs[kRsFogEnable] && !own_final) return;
     if (vertex_program && s.rs[kRsFogTableMode] == kFogTableNone) {
         c.fog[0] = 1.0f;
         c.fog[1] = 0.0f;
