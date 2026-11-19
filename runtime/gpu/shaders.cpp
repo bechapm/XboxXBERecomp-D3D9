@@ -956,13 +956,17 @@ void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputU
         name(OneInput(m), kUsageColor, uint8_t(c));
     }
     for (int t = 0; t < 4; t++) name(OneInput(feeds[kOutT0 + t] & regs & ~named), kUsageTexCoord, uint8_t(t));
-    if (uint16_t d = dp3 & regs & ~named) name(std::countr_zero(d), kUsageNormal, 0);
-    // the rest keep the habit's name unless it has gone
+    // Only the input the program rotates is the NORMAL. A tool that reads a program draw's positions from its output
+    // (RTX Remix's vertex capture) has them in the space the program put them in, and a normal read straight from the
+    // vertex is in the model's space: the tool would turn it again and light every surface from the wrong side
+    // (TimeSplitters Future Perfect's levels, whose programs dot a raw normal with their light). Without a NORMAL
+    // the tool takes each surface's facing from the positions it read. Such an input is a spare TEXCOORD instead.
+    // the rest keep the habit's name unless it has gone, or the habit calls it a NORMAL
     uint8_t spare = 8;
     for (int r = 0; r < 16; r++) {
         if (!((regs >> r) & 1) || (named >> r) & 1) continue;
         InputUsage h = HabitUsage(r);
-        if (!name(r, h.usage, h.index))
+        if (h.usage == kUsageNormal || !name(r, h.usage, h.index))
             while (spare < 16 && !name(r, kUsageTexCoord, spare++)) {}
     }
 }
