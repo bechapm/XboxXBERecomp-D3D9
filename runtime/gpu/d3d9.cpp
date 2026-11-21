@@ -2341,6 +2341,17 @@ uint32_t PrimitiveCount(const Assembled& a, uint32_t n) {
 // the draw to make
 bool D3D9Backend::DrawGeometry(const Assembled& a, const std::vector<DeclElement>& el, uint32_t conv_stride,
                                Geometry& g) {
+    // DISCARD replaces the storage of the whole vertex buffer. All streams bound for one draw,
+    // including converted attributes, must be uploaded on the same side of a wrap.
+    uint64_t stream_bytes = 0;
+    auto include_stream = [&](uint64_t bytes) {
+        stream_bytes = ((stream_bytes + 15) & ~uint64_t(15)) + bytes;
+    };
+    for (uint32_t i = 0; i < a.buffer_count; ++i) include_stream(a.buffers[i].bytes);
+    if (conv_stride) include_stream(uint64_t(a.vertex_count) * conv_stride);
+    if (stream_bytes > kVbRingBytes) return false;
+    if (((vb_at_ + 15u) & ~15u) + stream_bytes > kVbRingBytes) vb_at_ = kVbRingBytes;
+
     for (uint32_t i = 0; i < a.buffer_count; i++) {
         const VertexBuffer& b = a.buffers[i];
         uint32_t at = RingVertices(b.src, b.bytes);
