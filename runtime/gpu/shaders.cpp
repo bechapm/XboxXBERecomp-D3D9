@@ -892,21 +892,35 @@ void FeedTemp(uint32_t r, uint32_t mask, uint16_t from, uint16_t temp[13], uint1
 
 int OneInput(uint16_t m) { return m && !(m & (m - 1)) ? std::countr_zero(m) : -1; }
 
-// three DP3s in a row of one input into x, y and z of one temporary: a matrix rotating the normal; temp gets the
-// temporary, last the instruction of the third
-int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, size_t* last = nullptr) {
+// A matrix rotation writes three dot products to one temporary. Some programs
+// pack the results into spare lanes and read them back with a swizzle.
+int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, size_t* last = nullptr,
+                 std::array<char, 4>* components = nullptr) {
     for (size_t n = 0; n + 12 <= prog.size(); n += 4) {
         int k = 0, in = -1;
-        uint32_t r = 0;
+        uint32_t r = 0, used = 0;
+        const Tok first{&prog[n]};
+        std::array<char, 4> lanes{};
+        bool consecutive_rows = true;
         for (; k < 3; k++) {
             Tok t{&prog[n + size_t(k) * 4]};
-            if (t.f(1, 21, 4) != kMacDp3 || t.f(2, 26, 2) != kMuxInput || t.f(3, 24, 4) != (8u >> k)) break;
+            const uint32_t mask = t.f(3, 24, 4);
+            if (t.f(1, 21, 4) != kMacDp3 || t.f(2, 26, 2) != kMuxInput ||
+                !std::has_single_bit(mask) || (used & mask)) break;
             if (k == 0) in = int(t.f(1, 9, 4)), r = t.f(3, 20, 4);
             else if (int(t.f(1, 9, 4)) != in || t.f(3, 20, 4) != r) break;
+            used |= mask;
+            lanes[k] = "wzyx"[std::countr_zero(mask)];
+            // For a packed result require the same input swizzle/sign and the same
+            // coefficient swizzle/sign on consecutive rows of one matrix.
+            consecutive_rows &= t.f(2, 11, 2) == kMuxConstant && t.f(1, 2, 7) == first.f(1, 2, 7) &&
+                                t.f(2, 19, 7) == first.f(2, 19, 7) && t.f(3, 1, 1) == first.f(3, 1, 1) &&
+                                t.f(1, 13, 8) == first.f(1, 13, 8) + uint32_t(k);
         }
-        if (k == 3) {
+        if (k == 3 && (std::strcmp(lanes.data(), "xyz") == 0 || consecutive_rows)) {
             if (temp) *temp = r;
             if (last) *last = n + 8;
+            if (components) *components = lanes;
             return in;
         }
     }
@@ -978,7 +992,8 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     // rotates one, a tool would take any other program's zero for its normal
     uint32_t ntemp = 0;
     size_t nlast = 0;
-    bool normal = g_shader_model3 && RotatedInput(prog, &ntemp, &nlast) >= 0;
+    std::array<char, 4> normal_lanes{};
+    bool normal = g_shader_model3 && RotatedInput(prog, &ntemp, &nlast, &normal_lanes) >= 0;
     std::string s = normal ? "#define XBE_VS_NORMAL\n" : "";
     s += Common(For::Program);
     s += VsHelpers();
@@ -1016,7 +1031,8 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
             }
             s += "    }\n";
         }
-        if (normal && n == nlast) s += F("#ifdef RHI_MOD_NORMAL\n    xnormal = R%u.xyz;\n#endif\n", ntemp);
+        if (normal && n == nlast)
+            s += F("#ifdef RHI_MOD_NORMAL\n    xnormal = R%u.%s;\n#endif\n", ntemp, normal_lanes.data());
         if (k.f(3, 0, 1)) break;  // last instruction
     }
     s += kVsEpilogue;
