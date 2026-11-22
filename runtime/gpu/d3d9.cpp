@@ -850,6 +850,7 @@ private:
     bool flip_winding_ = false;  // SetOutputState to DrawGeometry: the draw's triangles go reversed (CullNoneFrontIsCcw)
     // mods: the draw in hand, the transforms as the device has them (WORLD, VIEW, PROJECTION) and those a mod set
     const State* mod_state_ = nullptr;
+    bool mod_program_ = false;  // the draw in hand is a program's, through a vertex shader
     const Assembled* mod_asm_ = nullptr;
     GuestExtent mod_size_{};
     RecompModDraw mod_draw_{};
@@ -3039,7 +3040,23 @@ bool D3D9Backend::RenderState(uint32_t state, uint32_t* value) {
 void D3D9Backend::SetProjection(const float m[16]) {
     if (!mod_state_) return;
     float p[16];
-    FoldProjection(*mod_state_, mod_size_, m, p);
+    const State& s = *mod_state_;
+    FoldProjection(s, mod_size_, m, p);
+    // A program ends on c-38 and c-37, whose offset has the screen space offset in it (0.53125 of a guest pixel unless
+    // the title sets another) beside the viewport's middle. Without it here a tool that takes positions back out of
+    // the program's output through PROJECTION (RTX Remix's vertex capture) has them millimetres off, more with
+    // distance and differently as the camera turns.
+    if (mod_program_ && s.vsc.size() > 59) {
+        const float hw = s.viewport.w * 0.5f, hh = s.viewport.h * 0.5f;
+        if (std::fabs(s.vsc[58][0] - hw) < 1e-3f && std::fabs(s.vsc[58][1] + hh) < 1e-3f) {
+            const float dx = 2.0f * (s.vsc[59][0] - (s.viewport.x + hw)) / mod_size_.w;
+            const float dy = -2.0f * (s.vsc[59][1] - (s.viewport.y + hh)) / mod_size_.h;
+            for (int r = 0; r < 4; r++) {
+                p[r * 4] += dx * p[r * 4 + 3];
+                p[r * 4 + 1] += dy * p[r * 4 + 3];
+            }
+        }
+    }
     SetDeviceTransform(2, p);
 }
 
@@ -3210,6 +3227,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
         return;
     }
     mod_state_ = &s;
+    mod_program_ = sh.prog && !sh.ffp;
     mod_asm_ = &a;
     mod_size_ = size;
     bool drawn = !(sh.prog && diag::D3d9SkipProgram(s.vs->hash)) && ModsBefore(s, a, sh, stages, g);
