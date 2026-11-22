@@ -763,7 +763,7 @@ private:
     void BuildDeclaration(const State& s, const Assembled& a, const DrawShaders& sh, std::vector<DeclElement>& el,
                           uint64_t& decode, uint32_t& conv_stride);
     IDirect3DVertexDeclaration9* EnsureDeclaration(const std::vector<DeclElement>& el);
-    const InputUsages& ProgramUsages(const State& s, uint16_t regs);
+    const InputUsages& ProgramUsages(const State& s, const Assembled& a);
     IDirect3DVertexShader9* EnsureVertexShader(const State& s, const Assembled& a, const DrawShaders& sh,
                                                uint64_t decode);
     IDirect3DPixelShader9* EnsurePixelShader(const PixelKey& pk, uint64_t key);
@@ -1943,10 +1943,15 @@ IDirect3DVertexDeclaration9* D3D9Backend::EnsureDeclaration(const std::vector<De
     return decl.Get();
 }
 
-// a program's input names, worked out once for each set of registers a draw gives it
-const InputUsages& D3D9Backend::ProgramUsages(const State& s, uint16_t regs) {
-    auto [it, added] = usages_.try_emplace(s.vs->hash ^ (uint64_t(regs) << 48));
-    if (added) ProgramInputUsages(s.vs->program, regs, it->second);
+// a program's input names, worked out once for each set of registers a draw gives it and which are three floats
+const InputUsages& D3D9Backend::ProgramUsages(const State& s, const Assembled& a) {
+    uint16_t float3 = 0;
+    for (int r = 0; r < 16; r++)
+        if (((a.regs >> r) & 1) && a.elements[size_t(r)].format == DXGI_FORMAT_R32G32B32_FLOAT)
+            float3 |= uint16_t(1u << r);
+    const uint32_t layout = uint32_t(a.regs) << 16 | float3;
+    auto [it, added] = usages_.try_emplace(Hash(&layout, sizeof(layout), s.vs->hash));
+    if (added) ProgramInputUsages(s.vs->program, a.regs, float3, it->second);
     return it->second;
 }
 
@@ -3153,7 +3158,7 @@ void D3D9Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t c
     if (!sh.prog) sh.fk = MakeFixedKey(s);
     if (sh.prog) {
         if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
-        sh.usages = ProgramUsages(s, a.regs);
+        sh.usages = ProgramUsages(s, a);
     }
 
     std::vector<DeclElement> el;

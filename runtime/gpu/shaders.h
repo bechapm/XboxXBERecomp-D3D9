@@ -68,7 +68,8 @@ InputUsage HabitUsage(int reg);
 // what each input of a program holds, from the output it reaches: a title lays out its own inputs (TS2's levels keep
 // position in v1, colour in v2, texture coordinates in v3), and anything reading the declaration (RTX Remix) goes by
 // the names. Each name is used once; an input that tells nothing keeps the habit's, or a spare TEXCOORD
-void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, InputUsages& out);
+// float3: the registers fed three floats, which are no colour when the program takes a dot product of them
+void ProgramInputUsages(const std::vector<uint32_t>& program, uint16_t regs, uint16_t float3, InputUsages& out);
 
 // vertex program microcode to HLSL, regs is the bit mask of v registers the draw supplies
 // decode: VertexDecode per register, 4 bits each, for elements the input assembler hands over raw

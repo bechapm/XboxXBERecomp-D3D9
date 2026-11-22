@@ -994,7 +994,7 @@ int RotatedInput(const std::vector<uint32_t>& prog, uint32_t* temp = nullptr, si
 
 }  // namespace
 
-void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputUsages& out) {
+void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, uint16_t float3_regs, InputUsages& out) {
     uint16_t temp[13] = {}, feeds[16] = {}, dp3 = 0, named = 0;
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
         Tok k{&prog[n]};
@@ -1029,8 +1029,11 @@ void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputU
     };
     if (uint16_t pos = feeds[kOutPos] & regs) name(pos & 1 ? 0 : std::countr_zero(pos), kUsagePosition, 0);
     if (int rot = RotatedInput(prog); rot >= 0 && (regs >> rot) & 1) name(rot, kUsageNormal, 0);
+    // Three floats the program takes a dot product of are a vector, whatever they reach: a skinned program that
+    // lights its vertices can have the normal as the one input of its colour.
+    const uint16_t vectors = float3_regs & dp3;
     for (int c = 0; c < 2; c++) {  // what alone reaches a colour; a lit program's normal goes through a DP3 too
-        uint16_t m = feeds[kOutD0 + c] & regs & ~named;
+        uint16_t m = feeds[kOutD0 + c] & regs & ~named & ~vectors;
         if (OneInput(m) < 0) m &= uint16_t(~dp3);
         name(OneInput(m), kUsageColor, uint8_t(c));
     }
@@ -1045,7 +1048,7 @@ void ProgramInputUsages(const std::vector<uint32_t>& prog, uint16_t regs, InputU
     for (int r = 0; r < 16; r++) {
         if (!((regs >> r) & 1) || (named >> r) & 1) continue;
         InputUsage h = HabitUsage(r);
-        if (h.usage == kUsageNormal || !name(r, h.usage, h.index))
+        if (h.usage == kUsageNormal || (h.usage == kUsageColor && ((vectors >> r) & 1)) || !name(r, h.usage, h.index))
             while (spare < 16 && !name(r, kUsageTexCoord, spare++)) {}
     }
 }
