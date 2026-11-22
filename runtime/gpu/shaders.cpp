@@ -350,7 +350,8 @@ std::string VsInputs(uint16_t regs, uint64_t decode, const InputUsages* usages) 
 const char* kVsEpilogue = R"(
     VOut o;
     precise float4 p = oPos;
-    p.w = magclamp(p.w);
+    // w 0 is screen space; clamped to 2^-64 its clip coordinates near 1e-20 lose draws on AMD, w 1 draws the same
+    p.w = p.w == 0 ? 1 : magclamp(p.w);
     precise float4 q;
     // full screen passes drawn half a pixel up-left for the console's integer pixel centers stop half a pixel short
     // of the far edges on D3D12's, which upscaled leaves the last host columns and rows undrawn
@@ -362,6 +363,12 @@ const char* kVsEpilogue = R"(
     q.z = p.z * surf.z;
     q.xyz *= p.w;
     q.w = p.w;
+    // w - z of one vector's dp4s as one dot keeps the near plane's offset; then the viewport's z scale and offset
+    precise float wz = q.w - q.z;
+    if (all(clip_zv == clip_wv)) {
+        float scale = c[58].z * surf.z;
+        wz = scale * dot(clip_wv, clip_wr - clip_zr) + q.w * (1 - scale - c[59].z * surf.z);
+    }
     o.pos = q;
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
@@ -381,6 +388,7 @@ const char* kVsPrologue = R"(
     // precise: EQUAL depth passes need bit exact positions
     precise float4 R0 = 0, R1 = 0, R2 = 0, R3 = 0, R4 = 0, R5 = 0, R6 = 0, R7 = 0, R8 = 0, R9 = 0, R10 = 0, R11 = 0;
     precise float4 oPos = 0;
+    precise float4 clip_zv = 0, clip_zr = 0, clip_wv = 1, clip_wr = 0;  // the vector and row of each dp4
     float4 oD0 = float4(0, 0, 0, 1), oD1 = 0, oB0 = float4(0, 0, 0, 1), oB1 = 0, oFog = 0, oPts = 1;
     float4 oT0 = float4(0, 0, 0, 1), oT1 = float4(0, 0, 0, 1), oT2 = float4(0, 0, 0, 1), oT3 = float4(0, 0, 0, 1);
 )";
@@ -842,18 +850,75 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
 constexpr uint32_t kMuxConstant = 3;
 constexpr uint32_t kViewportOffsetConstant = 59;  // c-37: constants start at c-96
 
+constexpr uint32_t kViewportScaleConstant = 58;  // c-38
+
+// the constant an instruction reads without a0, through any of its operands: at most one
+bool ReadsConstant(const Tok& k, uint32_t index) {
+    bool constant = k.f(2, 26, 2) == kMuxConstant || k.f(2, 11, 2) == kMuxConstant || k.f(3, 28, 2) == kMuxConstant;
+    bool relative = k.f(3, 1, 1);
+    return constant && !relative && k.f(1, 13, 8) == index;
+}
+
 bool ReadsConstant(const std::vector<uint32_t>& prog, uint32_t reg) {
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
-        Tok k{&prog[n]};
-        // an instruction reads at most one constant, through any of its operands
-        bool constant = k.f(2, 26, 2) == kMuxConstant || k.f(2, 11, 2) == kMuxConstant || k.f(3, 28, 2) == kMuxConstant;
-        bool relative = k.f(3, 1, 1);
-        if (constant && !relative && k.f(1, 13, 8) == reg) return true;
+        if (ReadsConstant(Tok{&prog[n]}, reg)) return true;
     }
     return false;
 }
 
 bool ReadsViewportOffset(const std::vector<uint32_t>& prog) { return ReadsConstant(prog, kViewportOffsetConstant); }
+
+constexpr uint32_t kMacDph = 6;
+constexpr uint32_t kMacDp4 = 7;
+constexpr uint32_t kMacArl = 13;
+constexpr uint32_t kLaneZ = 2;  // kMask bits
+constexpr uint32_t kLaneW = 1;
+
+// the oPos lanes an instruction writes: by a dp4 or dph, and by anything else
+struct PosLanes {
+    uint32_t dot = 0;
+    uint32_t other = 0;
+};
+
+PosLanes WrittenPosLanes(const Tok& k) {
+    uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
+    uint32_t r = k.f(3, 20, 4), omask = k.f(3, 12, 4);
+    bool mac_writes = mac && mac != kMacArl;
+    uint32_t mac_lanes = mac_writes && r == 12 ? k.f(3, 24, 4) : 0;
+    uint32_t ilu_lanes = ilu && (mac ? 1 : r) == 12 ? k.f(3, 16, 4) : 0;
+    if (omask && k.f(3, 11, 1) && (k.f(3, 3, 8) & 0xF) == 0) {
+        bool use_ilu = k.f(3, 2, 1) == 1;
+        if (use_ilu && ilu) ilu_lanes |= omask;
+        if (!use_ilu && mac_writes) mac_lanes |= omask;
+    }
+    bool dot = mac == kMacDph || mac == kMacDp4;
+    return {dot ? mac_lanes : 0, ilu_lanes | (dot ? 0 : mac_lanes)};
+}
+
+// clip z and w each from one dp4 or dph, z later only taken into the viewport: their w - z can be one dot
+bool SeparableClipDepth(const std::vector<uint32_t>& prog) {
+    int z = 0, w = 0;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        PosLanes p = WrittenPosLanes(k);
+        bool viewport = ReadsConstant(k, kViewportScaleConstant) || ReadsConstant(k, kViewportOffsetConstant);
+        if ((p.dot & (kLaneZ | kLaneW)) == (kLaneZ | kLaneW) || (p.other & kLaneW)) return false;
+        if ((p.other & kLaneZ) && !viewport) return false;
+        z += (p.dot & kLaneZ) != 0;
+        w += (p.dot & kLaneW) != 0;
+        if (k.f(3, 0, 1)) break;
+    }
+    return z == 1 && w == 1;
+}
+
+// at the dp4 or dph of clip z or w, the epilogue's copy of its vector and row
+std::string ClipSnapshot(const Tok& k, const std::string& a, const std::string& b) {
+    PosLanes p = WrittenPosLanes(k);
+    std::string v = k.f(1, 21, 4) == kMacDph ? "float4(" + a + ".xyz, 1)" : a;
+    if (p.dot & kLaneZ) return "        clip_zv = " + v + ";\n        clip_zr = " + b + ";\n";
+    if (p.dot & kLaneW) return "        clip_wv = " + v + ";\n        clip_wr = " + b + ";\n";
+    return "";
+}
 
 // D3DDECLUSAGE
 constexpr uint8_t kUsagePosition = 0, kUsageBlendWeight = 1, kUsageNormal = 3, kUsagePSize = 4, kUsageTexCoord = 5,
@@ -872,7 +937,7 @@ InputUsage HabitUsage(int reg) {
 namespace {
 
 constexpr uint32_t kMuxTemp = 1, kMuxInput = 2;
-constexpr uint32_t kMacDp3 = 5, kMacArl = 13;
+constexpr uint32_t kMacDp3 = 5;
 constexpr int kOutPos = 0, kOutD0 = 3, kOutT0 = 9;
 
 // the inputs an operand reads, directly or through the temporaries
@@ -1000,6 +1065,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     s += VsInputs(regs, decode, usages);
     s += kVsPrologue;
     if (normal) s += "#ifdef RHI_MOD_NORMAL\n    float3 xnormal = 0;\n#endif\n";
+    bool separable = SeparableClipDepth(prog);
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
         Tok k{&prog[n]};
         uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
@@ -1007,6 +1073,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
             std::string a = Src(k, 0, regs), b = Src(k, 1, regs), c = Src(k, 2, regs);
             s += "    {\n";
             if (mac) s += "        precise float4 mr = " + MacExpr(mac, a, b, c) + ";\n";
+            if (separable) s += ClipSnapshot(k, a, b);
             if (ilu) s += "        precise float4 ir = " + IluExpr(ilu, c) + ";\n";
             uint32_t r = k.f(3, 20, 4), omask = k.f(3, 12, 4);
             if (mac == 13) {
@@ -1085,7 +1152,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    oPos = float4(rhw.xy, rhw.z / surf.z, w);\n";
     } else {
         s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
-        s += "    float4 cp = mul(ip, wvp);\n";
+        s += "    precise float4 cp = mul(ip, wvp);\n";
         s += "    float3 vp = mul(ip, wv).xyz;\n";
         s += "    float3 vn = mul(float4(" + v(2, "float4(0,0,0,0)") + ".xyz, 0), wvn).xyz;\n";
         if (f.light & 8) s += "    vn = dot(vn, vn) > 0 ? normalize(vn) : vn;\n";
@@ -1241,7 +1308,8 @@ std::string PixelHlsl(const PixelKey& k) {
             body += "outc.rgb = " + D + " + lerp(" + C + ", " + B + ", " + A + ");\n";
             body += "outc.a = " + G + ";\n";
         } else {
-            body += "float4 outc = float4(lerp(fogin.rgb, r0.rgb, fogin.a), r0.a);\n";
+            // the final combiner reads r0 unsigned, a negative alpha reaches the alpha test as 0
+            body += "float4 outc = float4(lerp(fogin.rgb, saturate(r0.rgb), fogin.a), saturate(r0.a));\n";
         }
     } else {
         body += "float4 cur = v0, tmp = 0;\n";
@@ -1298,10 +1366,10 @@ std::string QuadHlsl(std::string s) {
 namespace {
 
 // A w buffer's reversed depth comes from the clip w alone, zparams.x * (zparams.y / w - 1), exact where z / w had
-// already rounded away; a z buffer's is 1 - z. zparams.z is the polygon offset in the units of each
-const char* kReversedClipHlsl = R"(float ReversedClip(float z, float w) {
+// already rounded away; a z buffer's is 1 - z, given as w - z. zparams.z is the polygon offset in the units of each
+const char* kReversedClipHlsl = R"(float ReversedClip(float wz, float w) {
     if (zparams.x != 0) return zparams.x * (zparams.y - (w + zparams.z));
-    return w - z - zparams.z * w;
+    return wz - zparams.z * w;
 }
 )";
 
@@ -1317,8 +1385,12 @@ bool InsertAfter(std::string& s, const char* at, const char* text) {
 std::string ReversedDepthHlsl(std::string s) {
     size_t entry = s.find("VOut main(");
     if (entry != std::string::npos) s.insert(entry, kReversedClipHlsl);
-    InsertAfter(s, "    o.pos = q;\n", "    o.pos.z = ReversedClip(q.z, q.w);\n");
-    InsertAfter(s, "    o.pos = cp;\n", "    o.pos.z = ReversedClip(cp.z, cp.w);\n");
+    InsertAfter(s, "    o.pos = q;\n", "    o.pos.z = ReversedClip(wz, q.w);\n");
+    // w and z rounded apart lose the near plane's offset to cancellation once the far plane is distant, so fixed
+    // function takes w - z from one column; the matrix's own rounding then moves every surface alike
+    InsertAfter(s, "    o.pos = cp;\n",
+                "    precise float wz = dot(ip, wvp._m03_m13_m23_m33 - wvp._m02_m12_m22_m32);\n"
+                "    o.pos.z = ReversedClip(wz, cp.w);\n");
     return s;
 }
 

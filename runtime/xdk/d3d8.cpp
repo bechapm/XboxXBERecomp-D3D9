@@ -1,4 +1,4 @@
-// Direct3D 8 (XDK 4721, 4831 and 5849) entry points the title calls, implemented on the host renderer.
+// Direct3D 8 (XDK 4721, 4831, 5659 and 5849) entry points the title calls, implemented on the host renderer.
 // Resource creation, locking and the XG helpers stay recompiled: they only manage memory.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -46,7 +46,20 @@ bool InCode(uint32_t va);  // cpu/dispatch.cpp
 #define HAS_D3DDevice_EndPush 0
 #endif
 #ifndef HAS_D3D_FvfShader
+#define SYM_D3D_FvfShader 0
 #define HAS_D3D_FvfShader 0
+#endif
+#ifndef HAS_D3D_InternalAddRef
+#define SYM_D3D_InternalAddRef 0
+#define HAS_D3D_InternalAddRef 0
+#endif
+#ifndef HAS_D3D_InternalRelease
+#define SYM_D3D_InternalRelease 0
+#define HAS_D3D_InternalRelease 0
+#endif
+#ifndef HAS_D3D_InitDefaultState
+#define SYM_D3D_InitDefaultState 0
+#define HAS_D3D_InitDefaultState 0
 #endif
 #ifndef SYM_D3DDevice_SetPalette
 #define SYM_D3DDevice_SetPalette FFFFFE02
@@ -84,13 +97,21 @@ bool InCode(uint32_t va);  // cpu/dispatch.cpp
 #define SYM_D3D_BlockOnNonSurfaceResource FFFFFE0A
 #define HAS_D3D_BlockOnNonSurfaceResource 0
 #endif
+#ifndef SYM_D3DDevice_SetBackBufferScale
+#define SYM_D3DDevice_SetBackBufferScale FFFFFE0B
+#define HAS_D3DDevice_SetBackBufferScale 0
+#endif
+#ifndef SYM_D3DDevice_DrawIndexedVerticesUP
+#define SYM_D3DDevice_DrawIndexedVerticesUP FFFFFE0C
+#define HAS_D3DDevice_DrawIndexedVerticesUP 0
+#endif
 // the video overlay (XMV movies show on it): left to the console's code they write the overlay's GPU registers
 #ifndef SYM_D3DDevice_UpdateOverlay
-#define SYM_D3DDevice_UpdateOverlay FFFFFE0B
+#define SYM_D3DDevice_UpdateOverlay FFFFFE0D
 #define HAS_D3DDevice_UpdateOverlay 0
 #endif
 #ifndef SYM_D3DDevice_GetOverlayUpdateStatus
-#define SYM_D3DDevice_GetOverlayUpdateStatus FFFFFE0C
+#define SYM_D3DDevice_GetOverlayUpdateStatus FFFFFE0E
 #define HAS_D3DDevice_GetOverlayUpdateStatus 0
 #endif
 
@@ -105,14 +126,14 @@ namespace {
 constexpr bool kRenderThread = XBE_RENDER_THREAD;
 
 // D3D globals of this build
-constexpr uint32_t kDevice = SYM(D3D_Device);        // the static CDevice, g_pDevice points at it
-constexpr uint32_t kDevicePtr = SYM(D3D_pDevice);
-constexpr uint32_t kIndexData = SYM(D3D_IndexData);  // index data base the inline draws read
-constexpr uint32_t kDirtyFlags = SYM(D3D_DirtyFlags);
-constexpr uint32_t kTextureState = SYM(D3D_DeferredTextureState);  // [4][32]
-constexpr uint32_t kRenderState = SYM(D3D_RenderState);            // [166]
-constexpr uint32_t kStreams = SYM(D3D_Streams);                    // [16] stride, offset, buffer
-constexpr uint32_t kSimpleEncode = SYM(D3D_SimpleRenderStateEncode);
+constexpr hle::Va kDevice = SYM(D3D_Device);        // the static CDevice, g_pDevice points at it
+constexpr hle::Va kDevicePtr = SYM(D3D_pDevice);
+constexpr hle::Va kIndexData = SYM(D3D_IndexData);  // index data base the inline draws read
+constexpr hle::Va kDirtyFlags = SYM(D3D_DirtyFlags);
+constexpr hle::Va kTextureState = SYM(D3D_DeferredTextureState);  // [4][32]
+constexpr hle::Va kRenderState = SYM(D3D_RenderState);            // [166]
+constexpr hle::Va kStreams = SYM(D3D_Streams);                    // [16] stride, offset, buffer
+constexpr hle::Va kSimpleEncode = SYM(D3D_SimpleRenderStateEncode);
 
 // CDevice fields mirrored so the recompiled getters and resource code see what the XDK would
 constexpr uint32_t kDevPush = XDK_CDevice_Push, kDevThreshold = XDK_CDevice_PushThreshold,
@@ -140,6 +161,10 @@ std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
 uint32_t g_depth = 0;
+// the console's frame buffers are the multisample factor times the asked size, and after SetBackBufferScale it draws
+// to only their top-left part; CopyRects blits those pixels as they lie
+uint32_t g_ms_x = 1, g_ms_y = 1;
+float g_bb_x = 1, g_bb_y = 1;
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
 uint32_t g_walk = 0;  // first scratch command not read yet
 
@@ -171,22 +196,21 @@ void SetDev(uint32_t off, uint32_t v) { W32(kDevice + off, v); }
 // also holds its parent. The library's functions do it when the image has them, inlined ones are done here.
 void AddRef(X86Context& ctx, uint32_t res) {
     if (!res) return;
-#if HAS_D3D_InternalAddRef
-    GUEST_CALL(D3D_InternalAddRef, ctx, {res});
-#else
-    (void)ctx;
+    if (HAS(D3D_InternalAddRef)) {
+        GUEST_CALL(D3D_InternalAddRef, ctx, {res});
+        return;
+    }
     uint32_t common = R32(res);
     if (!(common & 0x780000) && (common & 0x70000) == 0x50000)
         if (uint32_t parent = R32(res + 0x14)) W32(parent, R32(parent) + 0x80000);
     W32(res, R32(res) + 0x80000);
-#endif
 }
 void Release(X86Context& ctx, uint32_t res) {
     if (!res) return;
-#if HAS_D3D_InternalRelease
-    GUEST_CALL(D3D_InternalRelease, ctx, {res});
-#else
-    (void)ctx;
+    if (HAS(D3D_InternalRelease)) {
+        GUEST_CALL(D3D_InternalRelease, ctx, {res});
+        return;
+    }
     // the library frees a resource nothing holds any more; without its function the memory stays
     auto drop = [](uint32_t r) {
         W32(r, R32(r) - 0x80000);
@@ -196,7 +220,6 @@ void Release(X86Context& ctx, uint32_t res) {
     if ((common & 0x780000) == 0x80000 && (common & 0x70000) == 0x50000)
         if (uint32_t parent = R32(res + 0x14)) drop(parent);
     drop(res);
-#endif
 }
 
 void Walk(uint32_t end);
@@ -287,12 +310,8 @@ void SetComplex(uint32_t rs, uint32_t v) {
 
 // The library's default render and texture stage states; its pushes land in the scratch buffer
 void ApplyDefaultStates(X86Context& ctx) {
-#if HAS_D3D_InitDefaultState
-    GUEST_CALL(D3D_InitDefaultState, ctx, {});
-#else
-    (void)ctx;
-    LOG_FIRST(1, "d3d: the image has no D3D_InitDefaultState, default states were not applied");
-#endif
+    if (HAS(D3D_InitDefaultState)) GUEST_CALL(D3D_InitDefaultState, ctx, {});
+    else LOG_FIRST(1, "d3d: the image has no D3D_InitDefaultState, default states were not applied");
 }
 
 // The frame buffers a D3DPRESENT_PARAMETERS asks for become the device's targets, the viewport covers them. The
@@ -302,6 +321,9 @@ void SetFrameBuffers(const char* caller, uint32_t pp) {
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
     if (!w) w = 640;
     if (!h) h = 480;
+    uint32_t ms = R32(pp + 0x10);  // D3DMULTISAMPLE_TYPE: samples across in bits 4-7, down in bits 0-3
+    g_ms_x = std::max<uint32_t>(ms >> 4 & 0xF, 1);
+    g_ms_y = std::max<uint32_t>(ms & 0xF, 1);
     LOGI("d3d: %s %ux%u format %X buffers %u depth %u format %X interval %X flags %X", caller, w, h, fmt, count,
          auto_depth, depth_fmt, interval, R32(pp + 0x28));
     uint32_t color_fmt = gpu::LinearColorFormat(fmt);
@@ -427,9 +449,7 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
         uint8_t* ramp = static_cast<uint8_t*>(HostPtr(kDevice + XDK_CDevice_GammaRamps));  // red, green, blue
         for (uint32_t i = 0; i < 256; i++) ramp[i] = ramp[256 + i] = ramp[512 + i] = uint8_t(i);
     }
-#if HAS_D3D_FvfShader
-    if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
-#endif
+    if (HAS(D3D_FvfShader) && XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
     if (kVBlank) {
         // notification event, signalled
         SetDev(XDK_CDevice_VBlankEvent, 0x00040000);
@@ -565,6 +585,14 @@ HLE_STDCALL(D3DDevice_GetRasterStatus, 1) {
 }
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
+// (x, y): the console draws to a scaled-down part of the back buffer and enlarges it on display; the host draws
+// every frame at its own render scale, and only a copy out of the back buffer places it as the console would
+HLE_STDCALL(D3DDevice_SetBackBufferScale, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_bb_x = ArgF(a, 0);
+    g_bb_y = ArgF(a, 1);
+    return 0;
+}
 // The video overlay (XMV movies show on it): the console's scaler lays the surface over the frame buffer at every
 // vertical blank. Here it is drawn into the frame being shown, at Swap, as a quad of the surface's YUY2 texels.
 namespace {
@@ -684,6 +712,7 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
     if (XDK_CDevice_GammaRamps != xdk::kUnknown)
         for (uint32_t slot = 0; slot < 2; slot++)
             std::memcpy(HostPtr(kDevice + XDK_CDevice_GammaRamps + slot * sizeof(ramp)), ramp, sizeof(ramp));
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_backend) g_backend->SetGamma(ramp);
     return 0;
 }
@@ -835,14 +864,17 @@ HLE_STDCALL(D3DDevice_Reset, 1) {
 
 HLE_STDCALL(D3DDevice_CopyRects, 5) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    if (g_backend) g_backend->Copy(SurfaceOf(a[0]), SurfaceOf(a[3]), a[2], a[1], a[4]);
+    bool frame = std::find(g_buffers.begin(), g_buffers.end(), a[0]) != g_buffers.end();
+    float kx = frame ? g_ms_x * g_bb_x : 1, ky = frame ? g_ms_y * g_bb_y : 1;
+    if (g_backend) g_backend->Copy(SurfaceOf(a[0]), SurfaceOf(a[3]), a[2], a[1], a[4], kx, ky);
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetViewport, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t v = a[0];
-    g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
+    // null keeps the stored viewport, as the library does
+    if (v) g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
     g_state.scissor_count = 0;
     UpdateViewportConstants();
     return 0;
@@ -1489,13 +1521,15 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
     return g_up_header;
 }
 
-void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
+void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride, const uint16_t* indices = nullptr) {
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
     if (FramePassSkipped()) return;
+    // indexed: count is of indices, the ring takes the vertices up to the highest one
+    uint32_t used = indices ? *std::max_element(indices, indices + count) + 1u : count;
     auto stream = g_state.streams[0];
-    g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
-    g_backend->Draw(g_state, prim, 0, count, nullptr);
+    g_state.streams[0] = {UpVertices(vertices, used * stride), stride};
+    g_backend->Draw(g_state, prim, 0, count, reinterpret_cast<const uint8_t*>(indices));
     g_state.streams[0] = stream;
 }
 
@@ -1661,6 +1695,13 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     DrawUp(a[0], a[1], HostPtr(a[2]), a[3]);
+    return 0;
+}
+// (prim, index count, 16 bit indices, vertices, stride)
+HLE_STDCALL(D3DDevice_DrawIndexedVerticesUP, 5) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    DrawUp(a[0], a[1], HostPtr(a[3]), a[4], static_cast<const uint16_t*>(HostPtr(a[2])));
     return 0;
 }
 
