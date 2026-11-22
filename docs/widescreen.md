@@ -29,7 +29,8 @@ Every target the size of the console's screen, colour and depth, is made `HorPlu
 gives it (`gpu::PictureWide`); smaller targets (shadow maps, reflections) are left alone. The game keeps working in its
 console's 640 x 480: its viewport, scissor and copies are scaled to the target across and down separately, so a copy
 from the screen into a smaller texture is drawn across rather than copied. The frame is shown at the picture's shape and
-letterboxed on an output of another shape.
+letterboxed on an output of another shape. Such a game is told it has a widescreen TV (`app::Widescreen`, the
+console's video flags) when the picture is 3:2 or wider, whatever the monitor is.
 
 A game's 3D gets wider by its own camera: `HorPlus()` is how many times wider than 4:3 the picture is, the factor its
 horizontal field of view or its aspect argument is widened by. Without that the world is drawn at the picture's shape
@@ -39,7 +40,8 @@ but stretched.
 
 A game's 2D is laid out in the console's pixels and says nothing of what each piece is attached to. A modern UI layout
 has that, so the game names it before a group of draws: `gpu::SetTwoDPlacement(placement, tag)`, from its hooks on the
-game thread. The placement holds until changed. The tag names the call site, for `XBE_2D_TAGS=1`.
+game thread. The placement holds until changed. The tag names the call site, for `XBE_2D_TAGS=1`. A draw placed `kPlaceStretch` is
+not measured (unless `XBE_2D_TAGS` asks), so a game that already shapes its own 2D for the picture costs nothing.
 
 **Figure 2.** The placements, `gpu/picture.h`.
 
@@ -69,7 +71,9 @@ alone, so this needs no list of what is in a menu. Program draws are told apart 
 names (`gpu::g_projection_register`).
 
 What counts as 2D: a draw of pre-transformed vertices, a fixed function draw through an orthographic projection, or a
-program draw that does not read the projection register. Its extent is measured on the CPU (a program draw's positions
+program draw that does not read the projection register. A game whose world programs read only a combined model, view
+and projection names its registers too (`gpu::g_combined_register`, Future Perfect's c68): a program draw reading them
+through a perspective matrix is 3D. Its extent is measured on the CPU (a program draw's positions
 through the program itself); a draw reaching 98% of the screen's width spans the picture.
 
 `gpu::SetTwoDOverflow(true)` lets a piece reaching past the console's screen go on past the old edge, as CSS's

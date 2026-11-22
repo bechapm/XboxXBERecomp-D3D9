@@ -83,6 +83,10 @@ bool ReadsViewportOffset(const std::vector<uint32_t>& program);
 // the four constant registers (hardware order) a game keeps its camera's projection in, -1 when unknown. The game repo
 // names them; a mod is then told the projection of each program draw that reads them (RecompModDraw::program_projection)
 inline int g_projection_register = -1;
+// the four constant registers (hardware order) a game keeps a combined model, view and projection in, for its programs
+// that never read the projection's (Future Perfect's level: c68). A program draw reading them through a perspective
+// matrix is 3D, not 2D, to the picture's placement (gpu/picture.cpp); -1 when the game has none
+inline int g_combined_register = -1;
 // every draw as lines, whatever the game's fill mode: a game's debugging tools set it while it runs. Read as each draw
 // is made, on the game's thread, so a host overlay clears it around its own draws to stay readable
 inline std::atomic<bool> g_wireframe{false};

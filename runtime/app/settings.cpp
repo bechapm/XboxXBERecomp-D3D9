@@ -207,6 +207,8 @@ void SetSizeAtStart(bool at_start) { g_size_at_start = at_start; }
 
 // asked per frame and per HUD quad: CachedOutput costs a monitor lookup, the registry only on a change
 bool Widescreen() {
+    // a game that widens its own view is told the shape it is shown at, not the monitor's: "4:3" on a wide monitor is 4:3
+    if (kGame.hor_plus) return PictureAspect() >= 1.5f;
     Mode m = CachedOutput();
     return m.width * 2 >= m.height * 3;  // 3:2 or wider
 }

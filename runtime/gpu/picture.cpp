@@ -287,10 +287,16 @@ void Visible(const State& s, float& x0, float& x1) {
 // the draw goes onto the screen in screen coordinates the game worked out, not through its camera
 bool TwoD(const State& s, const Assembled& a, bool program) {
     if (program) {
+        auto named = [&](int reg) { return reg >= 0 && reg + 4 <= int(s.vsc.size()); };
         int preg = g_projection_register;
         // a game that names no projection register says nothing of which of its programs are 2D
-        if (preg < 0 || preg + 4 > int(s.vsc.size())) return false;
-        if (!ReadsConstant(s.vs->program, uint32_t(preg))) return true;
+        if (!named(preg)) return false;
+        if (!ReadsConstant(s.vs->program, uint32_t(preg))) {
+            // a program reading the camera only through the combined matrix the game names: that matrix decides
+            int creg = g_combined_register;
+            if (!named(creg) || !ReadsConstant(s.vs->program, uint32_t(creg))) return true;
+            preg = creg;
+        }
         float m[16];
         for (int r = 0; r < 4; r++)
             for (int c = 0; c < 4; c++) m[r * 4 + c] = s.vsc[size_t(preg + c)][size_t(r)];
@@ -374,6 +380,9 @@ Placed Place(const State& s, const Assembled& a, bool program, uint32_t gw, uint
         out.k = k;
         out.offset = anchor * (1 - k);
     };
+    // spans whatever it is: nothing to measure unless XBE_2D_TAGS asks (a game that squeezes its own 2D places all of
+    // it so, and the measuring runs a program per vertex)
+    if (base == kPlaceStretch && !TagLog()) return out;
     if (!TwoD(s, a, program)) {
         // a camera narrower than the picture, which the world's never is: a model the game's 2D layout holds. A tenth
         // short of it, so a camera a hair off the picture's shape is still the world, and a 4:3 camera is still

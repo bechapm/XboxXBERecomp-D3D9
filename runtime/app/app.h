@@ -62,7 +62,8 @@ float RenderScale(uint32_t guest_height);
 // size resets the back buffer live
 bool SizeAtStart();
 void SetSizeAtStart(bool at_start);
-// the output is 3:2 or wider: the console reports a widescreen TV and the frame is shown 16:9, else 4:3 as on a 4:3 TV
+// the output is 3:2 or wider (for a game that widens its own view, the picture is): the console reports a widescreen TV
+// and the frame is shown 16:9, else 4:3 as on a 4:3 TV
 bool Widescreen();
 // the shape the frame is shown at, width over height: a game that widens its own view (GameInfo::hor_plus) is shown at
 // the aspect_ratio setting, at least 4:3 and at most 32:9; any other at 16:9 when Widescreen, else 4:3. Any thread
