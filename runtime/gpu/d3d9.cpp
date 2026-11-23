@@ -2629,6 +2629,10 @@ bool D3D9Backend::ModsBefore(const State& s, const Assembled& a, const DrawShade
     d.depth_enable = rs_ok_[D3DRS_ZENABLE] && rs_[D3DRS_ZENABLE];
     d.depth_write = d.depth_enable && rs_ok_[D3DRS_ZWRITEENABLE] && rs_[D3DRS_ZWRITEENABLE];
     d.depth_func = rs_ok_[D3DRS_ZFUNC] ? rs_[D3DRS_ZFUNC] : D3DCMP_LESSEQUAL;
+    // the title's: the generated shaders make the test, so the device has it off
+    d.alpha_test = SimpleState(s, kMAlphaTestEnable) != 0;
+    d.alpha_func = Cmp(SimpleState(s, kMAlphaFunc));
+    d.alpha_ref = SimpleState(s, kMAlphaRef) & 0xFF;
     d.projection_set = !sh.prog && !a.pretransformed;
     std::memcpy(d.projection, proj, sizeof(d.projection));
     std::memcpy(d.world, dev_xf_[0], sizeof(d.world));
