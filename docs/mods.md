@@ -221,6 +221,7 @@ flowchart TD
 | How | `program`, `program_id`, `fixed_transform`, `primitive`, `primitives` | `program_id` is the program's microcode hash; `fixed_transform` is always 0 |
 | Textures | `textures[8]`, `texture_ids[8]`, `screen_copies` | stages 0 to 3. A texture's id changes when its contents do. `screen_copies` marks stages that read a render target |
 | Depth | `depth_state`, `depth_enable`, `depth_write`, `depth_func` | as the device has them for the draw |
+| Alpha test | `alpha_test`, `alpha_func`, `alpha_ref` | the game's own. The generated pixel shaders make the test, so the device's render state has it off for those draws. Check `size` before reading them: they are the struct's last fields |
 | Transforms | `projection_set`, `projection`, `world`, `view`, `program_projection_set`, `program_projection` | `projection` is the game's own; `world` and `view` the device's. `program_projection` needs the game's port to name its registers ([The camera](#the-camera)) |
 | Geometry | `indexed`, `first_vertex`, `vertices`, `indices`, `index_bytes`, `index_count`, `base_vertex` | vertices start at 0 in the bound streams, indices are rebased to them: `first_vertex` and `base_vertex` are 0 |
 

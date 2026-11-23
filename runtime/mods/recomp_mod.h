@@ -93,6 +93,12 @@ typedef struct RecompModDraw {
                                        it (d3d9_fixed_transform): no vertex shader
                                        is bound, WORLD is its model-view and VIEW
                                        identity, and PROJECTION its projection */
+    /* The title's own alpha test (there if `size` reaches them). Where a
+     * generated pixel shader makes the test, the device's render state says
+     * it is off, and a tool reading the device cannot see it. */
+    int      alpha_test;            /* the title has it on; then: */
+    uint32_t alpha_func;            /* D3DCMPFUNC */
+    uint32_t alpha_ref;             /* 0 to 255, against the pixel's final alpha */
 } RecompModDraw;
 
 #define RECOMP_DRAW_AS_IS 0         /* before's answers */
